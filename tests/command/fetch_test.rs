@@ -1199,12 +1199,15 @@ async fn setup_local_fetch_with_tags_fixture() -> (TempDir, PathBuf, String) {
     let remote_dir = temp_root.path().join("remote.git");
     let work_dir = temp_root.path().join("workdir");
     let repo_dir = temp_root.path().join("libra_repo");
+    let git_config_global = temp_root.path().join("gitconfig");
 
     let git = |args: &[&str], cwd: Option<&Path>| {
         let mut cmd = Command::new("git");
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
+        cmd.env("GIT_CONFIG_GLOBAL", &git_config_global)
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         assert!(
             cmd.args(args)
                 .status()
@@ -1530,12 +1533,15 @@ async fn test_clone_fetches_all_tags_by_default() {
     let temp_root = tempdir().expect("temp root");
     let remote_dir = temp_root.path().join("remote.git");
     let work_dir = temp_root.path().join("workdir");
+    let git_config_global = temp_root.path().join("gitconfig");
 
     let git = |args: &[&str], cwd: Option<&Path>| {
         let mut cmd = Command::new("git");
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
+        cmd.env("GIT_CONFIG_GLOBAL", &git_config_global)
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         assert!(
             cmd.args(args).status().expect("git failed").success(),
             "git {args:?}"

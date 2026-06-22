@@ -25,7 +25,11 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use git_internal::hash::{ObjectHash, get_hash_kind};
-use libra::internal::config::ConfigKv;
+use libra::internal::{
+    config::ConfigKv,
+    db::get_db_conn_instance,
+    operation::{OperationQueryPage, OperationService},
+};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -65,6 +69,89 @@ fn test_branch_json_create_output_reports_branch() {
     assert_eq!(json["data"]["action"], "create");
     assert_eq!(json["data"]["name"], "feature");
     assert!(json["data"]["commit"].as_str().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_create_records_operation_log() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&output, "branch feature");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    let repo_id = ConfigKv::get("libra.repoid").await.unwrap().unwrap().value;
+    let page = OperationService::list_operations_by_repo_paginated_with_conn(
+        &db,
+        &repo_id,
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .await
+    .unwrap();
+    let op = page
+        .items
+        .iter()
+        .find(|item| item.command_name == "branch")
+        .expect("branch create should record an operation");
+
+    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &op.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.operation.command_name, "branch");
+    assert!(
+        graph
+            .operation
+            .description
+            .starts_with("create branch feature")
+    );
+    assert!(
+        graph
+            .refs
+            .iter()
+            .any(|reference| reference.ref_name == "feature")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_create_mints_missing_repo_id_before_operation_log() {
+    let repo = create_committed_repo_via_cli();
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        ConfigKv::unset_all("libra.repoid").await.unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "legacy-feature"], repo.path());
+    assert_cli_success(&output, "branch legacy-feature without repo id");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let repo_id = ConfigKv::get("libra.repoid")
+        .await
+        .unwrap()
+        .expect("branch create should mint repo id")
+        .value;
+    uuid::Uuid::parse_str(&repo_id).expect("minted repo id should be a UUID");
+
+    let db = get_db_conn_instance().await;
+    let page = OperationService::list_operations_by_repo_paginated_with_conn(
+        &db,
+        &repo_id,
+        OperationQueryPage {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(page.items.iter().any(|item| {
+        item.command_name == "branch" && item.description.contains("legacy-feature")
+    }));
 }
 
 /// Scenario: human-readable branch creation must print "Created branch

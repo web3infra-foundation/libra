@@ -62,6 +62,7 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "clean",
     "stash",
     "lfs",
+    "ls-files",
     "worktree",
     "log",
     "shortlog",
@@ -105,7 +106,6 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "graph",
     "sandbox",
     "agent",
-    "db",
     "maintenance",
 ];
 

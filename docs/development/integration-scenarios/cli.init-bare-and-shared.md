@@ -49,6 +49,6 @@ cd "$RUN_DIR"
 补充可执行断言：
 - bare repo 后 `test -f bare-repo/libra.db && test ! -e bare-repo/.libra`。
 - 在 bare repo 中 `libra status` 必须非 0。
-- 所有合法 `--shared=<mode>` 模式创建后，`libra db --json status` 成功，且 `data.current_version` / `data.latest_version` 可解析。
+- 所有合法 `--shared=<mode>` 模式创建后，仓库中的普通命令（如 `libra status`）成功，证明 schema 建链即可用。
 - 非法 `--shared=<mode>` 值（invalid、8888）的错误必须非 0，且 stderr 列出支持的 mode。
 - 操作后在 shared 仓库执行 `libra fsck --connectivity-only` 通过。

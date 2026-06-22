@@ -21,8 +21,9 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, DbErr};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::{
     command::{get_target_commit, load_object, log::get_reachable_commits},
@@ -33,6 +34,7 @@ use crate::{
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
+        operation_wrapper::{OperationMeta, OperationScope, with_operation_log},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -304,6 +306,9 @@ enum BranchError {
     #[error("failed to delete branch '{branch}': {detail}")]
     DeleteFailed { branch: String, detail: String },
 
+    #[error("failed to record branch operation: {0}")]
+    OperationLogFailed(String),
+
     #[error("failed to load commit {commit}: {detail}")]
     CommitLoadFailed { commit: String, detail: String },
 
@@ -395,6 +400,11 @@ impl From<BranchError> for CliError {
             BranchError::DeleteFailed { branch, detail } => {
                 CliError::fatal(format!("failed to delete branch '{branch}': {detail}"))
                     .with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            BranchError::OperationLogFailed(detail) => {
+                CliError::fatal(format!("failed to record branch operation: {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                    .with_hint("check whether the repository database is writable.")
             }
             BranchError::CommitLoadFailed { commit, detail } => {
                 CliError::fatal(format!("failed to load commit {commit}: {detail}"))
@@ -533,21 +543,44 @@ fn branch_config_write_error(key: &str, error: impl ToString) -> BranchError {
     }
 }
 
-/// Persist `branch.<name>.{remote,merge}` for `branch`, tracking
-/// `upstream` (in `remote/branch` form).
-///
-/// Functional scope:
-/// - Splits `upstream` at the first `/` to derive the remote and remote
-///   branch.
-/// - Compares the existing config (if any) to avoid pointless writes — the
-///   stored `merge` value is normalised to the short branch name, so the
-///   comparison is also against the short name even though the stored value
-///   on disk is `refs/heads/<name>`.
-///
-/// Boundary conditions:
-/// - Returns [`BranchError::InvalidUpstream`] when `upstream` lacks a `/`.
-/// - Each underlying SQL failure becomes a [`BranchError::ConfigReadFailed`]
-///   or [`BranchError::ConfigWriteFailed`] keyed by the config key.
+async fn operation_actor() -> String {
+    ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "libra-user".to_string())
+}
+
+async fn current_repo_id_for_operation() -> Result<String, BranchError> {
+    if let Some(entry) = ConfigKv::get("libra.repoid").await.map_err(|error| {
+        BranchError::OperationLogFailed(format!(
+            "failed to read repository id from config: {error}"
+        ))
+    })? {
+        let repo_id = entry.value;
+        if !repo_id.trim().is_empty() && repo_id != "unknown-repo" {
+            return Ok(repo_id);
+        }
+    }
+
+    let repo_id = Uuid::new_v4().to_string();
+    ConfigKv::set("libra.repoid", &repo_id, false)
+        .await
+        .map_err(|error| {
+            BranchError::OperationLogFailed(format!(
+                "failed to write generated repository id to config: {error}"
+            ))
+        })?;
+    Ok(repo_id)
+}
+
+fn branch_operation_args_digest(action: &str, branch: &str, commit: &str) -> String {
+    let payload = format!("{action}\0{branch}\0{commit}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, payload.as_bytes());
+    format!("sha256:{}", hex::encode(digest.as_ref()))
+}
 async fn set_upstream_with_conn<C: ConnectionTrait>(
     db: &C,
     branch: &str,
@@ -667,6 +700,7 @@ async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
+    record_operation: bool,
 ) -> Result<BranchOutput, BranchError> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
@@ -716,12 +750,55 @@ async fn create_branch_impl(
         )
     })?;
 
-    Branch::update_branch(&new_branch, &commit_id.to_string(), None)
+    if record_operation {
+        let meta = OperationMeta {
+            command_name: "branch".to_string(),
+            description: format!("create branch {new_branch}"),
+            actor: operation_actor().await,
+            repo_id: current_repo_id_for_operation().await?,
+            args_digest: Some(branch_operation_args_digest(
+                "create",
+                &new_branch,
+                &commit_id_display,
+            )),
+        };
+
+        let branch_for_operation = new_branch.clone();
+        let commit_for_operation = commit_id_display.clone();
+        with_operation_log(meta, OperationScope::default(), move |txn| {
+            Box::pin(async move {
+                let exists = Branch::exists_result_with_conn(txn, &branch_for_operation, None)
+                    .await
+                    .map_err(|error| DbErr::Custom(error.to_string()))?;
+                if exists {
+                    return Err(DbErr::Custom(format!(
+                        "a branch named '{}' already exists",
+                        branch_for_operation
+                    )));
+                }
+                Branch::update_branch_with_conn(
+                    txn,
+                    &branch_for_operation,
+                    &commit_for_operation,
+                    None,
+                )
+                .await?;
+                Ok::<(), DbErr>(())
+            })
+        })
         .await
-        .map_err(|e| BranchError::CreateFailed {
+        .map_err(|error| BranchError::CreateFailed {
             branch: new_branch.clone(),
-            detail: e.to_string(),
+            detail: error.to_string(),
         })?;
+    } else {
+        Branch::update_branch(&new_branch, &commit_id_display, None)
+            .await
+            .map_err(|error| BranchError::CreateFailed {
+                branch: new_branch.clone(),
+                detail: error.to_string(),
+            })?;
+    }
 
     Ok(BranchOutput::Create {
         name: new_branch,
@@ -954,7 +1031,7 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
-        create_branch_impl(new_branch, args.commit_hash.clone()).await
+        create_branch_impl(new_branch, args.commit_hash.clone(), true).await
     } else if let Some(branch_to_delete) = args.delete.clone() {
         delete_branch_impl(branch_to_delete, true).await
     } else if let Some(branch_to_delete) = args.delete_safe.clone() {
@@ -1149,7 +1226,7 @@ pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
 ) -> CliResult<()> {
-    create_branch_impl(new_branch, branch_or_commit)
+    create_branch_impl(new_branch, branch_or_commit, false)
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -1346,7 +1423,7 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, str::FromStr};
+    use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
@@ -1356,13 +1433,36 @@ mod tests {
         Branch, BranchError, commit_contains, format_branch_name, load_remote_branches_with_conn,
         map_head_commit_store_error,
     };
-    use crate::utils::error::{CliError, StableErrorCode};
+    use crate::utils::{
+        error::{CliError, StableErrorCode},
+        test,
+    };
 
     struct ColorOverrideReset;
 
     impl Drop for ColorOverrideReset {
         fn drop(&mut self) {
             colored::control::unset_override();
+        }
+    }
+
+    #[allow(dead_code)]
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    #[allow(dead_code)]
+    impl CurrentDirGuard {
+        fn change_to(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("failed to read current dir");
+            std::env::set_current_dir(path).expect("failed to change current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
         }
     }
 
@@ -1433,6 +1533,11 @@ mod tests {
     #[test]
     #[serial]
     fn commit_contains_surfaces_typed_commit_load_failure() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(test::setup_with_new_libra_in(repo.path()));
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
         let corrupt_commit = any_hash();
         let branch = Branch {
             name: "corrupt".to_string(),

@@ -421,6 +421,11 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
 #[serial]
 /// Tests clean reports a fatal error when deletion is denied.
 async fn test_clean_force_permission_error_returns_io_exit_code() {
+    if skip_permission_denied_test_if_root("test_clean_force_permission_error_returns_io_exit_code")
+    {
+        return;
+    }
+
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());

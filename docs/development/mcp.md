@@ -62,4 +62,4 @@ libra code --mcp-stdio
 
 ## Relationship To Agent Plan
 
-[`docs/development/agent.md`](agent.md) 只负责 Web-only AgentRuntime / ControlAdapter 收敛：TUI 不再作为生产操作入口，MCP 不作为 Agent 调度面。`libra mcp` 的 CLI grammar、stdio transport、compat docs 和 MCP e2e 验收全部由本文跟踪。
+[`docs/development/code-agent-runtime.md`](code-agent-runtime.md) 只负责 Web-only AgentRuntime / ControlAdapter 收敛：TUI 不再作为生产操作入口，MCP 不作为 Agent 调度面。`libra mcp` 的 CLI grammar、stdio transport、compat docs 和 MCP e2e 验收全部由本文跟踪。

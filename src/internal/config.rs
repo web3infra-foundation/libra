@@ -360,6 +360,32 @@ impl ConfigKv {
         Self::get_with_conn(&db, key).await
     }
 
+    /// Non-panicking counterpart of [`Self::get`].
+    ///
+    /// [`Self::get`] resolves its connection through [`get_db_conn_instance`],
+    /// which **panics** when the repository database is missing or its schema
+    /// is out of date. That is unacceptable for best-effort / background
+    /// reads — for example the SSH transport setup performed during
+    /// `clone`/`fetch`, which may walk up into an *enclosing* repository whose
+    /// schema this binary no longer supports. This variant resolves the
+    /// database path fallibly and surfaces any open/compatibility failure as
+    /// an `Err`, so callers can degrade gracefully instead of dumping a panic
+    /// to stderr.
+    pub async fn get_best_effort(key: &str) -> Result<Option<ConfigKvEntry>> {
+        let db_path = try_get_storage_path(None)
+            .map_err(|err| anyhow!("not inside a libra repository: {err}"))?
+            .join(DATABASE);
+        let db = get_db_conn_instance_for_path(&db_path)
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "failed to open repository database {}: {err}",
+                    db_path.display()
+                )
+            })?;
+        Self::get_with_conn(&db, key).await
+    }
+
     /// Pool-acquiring counterpart of [`Self::get_all_with_conn`].
     pub async fn get_all(key: &str) -> Result<Vec<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
@@ -895,10 +921,11 @@ pub async fn resolve_env(name: &str) -> Result<Option<String>> {
 /// Returns `Ok(None)` only when the process env, the local repo's
 /// `.libra/libra.db`, and the global `~/.libra/config.db` all lack the value.
 /// Returns `Err` when the worker thread crashed before sending OR when the
-/// underlying async resolver returned an error (e.g. corrupt SQLite,
-/// schema-mismatch propagation that the vault-init fix in v0.17.515 did not
-/// downgrade — those still bubble up here so storage / provider init paths
-/// can surface "Run `libra db upgrade`" hints rather than silently treating a
+/// underlying async resolver returned an error (e.g. corrupt SQLite, or a
+/// schema *newer* than this binary supports — pending migrations are now
+/// applied automatically on connect, but an unsupported-future schema still
+/// bubbles up here so storage / provider init paths can surface an
+/// "install a newer Libra" hint rather than silently treating a
 /// vault-configured key as missing).
 ///
 /// Prefer the async [`resolve_env`] when the caller is already inside an
@@ -1192,8 +1219,13 @@ async fn local_config_entry_for_target(
 ) -> Result<Option<ConfigKvEntry>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = crate::utils::util::try_get_storage_path(None)
-                .context("failed to resolve current repository storage")?;
+            let storage = match crate::utils::util::try_get_storage_path(None) {
+                Ok(storage) => storage,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(error).context("failed to resolve current repository storage");
+                }
+            };
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_entry_from_db_path(&db_path, key).await
         }
@@ -1244,8 +1276,13 @@ async fn local_config_value_for_target(
 ) -> Result<Option<String>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = try_get_storage_path(None)
-                .context("failed to resolve current repository storage")?;
+            let storage = match try_get_storage_path(None) {
+                Ok(storage) => storage,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(error).context("failed to resolve current repository storage");
+                }
+            };
             let db_path = storage.join(DATABASE);
             read_config_value_from_db_path(&db_path, key).await
         }

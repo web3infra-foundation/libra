@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`libra ls-files` compatibility expansion**: adds `<pathspec>...`
+  filtering resolved from the caller's current working directory,
+  `--error-unmatch`, and `-z` NUL-delimited text output. The release
+  also extends AI/MCP read-only safety coverage for pathspec-based
+  inspection and publishes the updated English/Chinese command docs.
+
 - **`libra maintenance` command**: implements Git-compatible `maintenance`
   with subcommands `run`, `register`, `unregister`, and `status`. Supports
   tasks `gc`, `loose-objects`, `pack-refs`, `incremental-repack`,

@@ -28,6 +28,8 @@ pub mod head;
 pub mod log;
 pub mod model;
 pub mod notes;
+pub mod operation;
+pub mod operation_wrapper;
 pub mod protocol;
 pub mod publish;
 pub mod reflog;

@@ -1036,9 +1036,16 @@ async fn handle_get(
                         continue;
                     }
                 }
-                let scope_entries = ScopedConfig::get_regexp(s, key).await.map_err(|e| {
-                    config_read_cli_error(format!("failed to read {} config: {e}", scope_name(s)))
-                })?;
+                let scope_entries = match ScopedConfig::get_regexp(s, key).await {
+                    Ok(entries) => entries,
+                    Err(e) if should_skip_config_scope_read_error(s, &e) => continue,
+                    Err(e) => {
+                        return Err(config_read_cli_error(format!(
+                            "failed to read {} config: {e}",
+                            scope_name(s)
+                        )));
+                    }
+                };
                 for e in scope_entries {
                     all_entries.push((e, s));
                 }
@@ -2093,6 +2100,7 @@ async fn get_cascaded(key: &str) -> Result<Option<(ConfigKvEntry, ConfigScope)>,
         match ScopedConfig::get(scope, key).await {
             Ok(Some(v)) => return Ok(Some((v, scope))),
             Ok(None) => continue,
+            Err(e) if should_skip_config_scope_read_error(scope, &e) => continue,
             Err(e) => {
                 return Err(format!("failed to read {} config: {e}", scope_name(scope)));
             }
@@ -2118,10 +2126,18 @@ async fn get_all_cascaded(key: &str) -> Result<Vec<(ConfigKvEntry, ConfigScope)>
                     out.push((v, scope));
                 }
             }
+            Err(e) if should_skip_config_scope_read_error(scope, &e) => continue,
             Err(e) => return Err(format!("failed to read {} config: {e}", scope_name(scope))),
         }
     }
     Ok(out)
+}
+
+fn should_skip_config_scope_read_error(scope: ConfigScope, error: &str) -> bool {
+    // Out-of-date schemas are now upgraded automatically on connect; the only
+    // surviving incompatibility is a global config DB whose schema is newer
+    // than this binary supports — skip that scope rather than failing the read.
+    scope == ConfigScope::Global && error.contains("is newer than this Libra binary supports")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

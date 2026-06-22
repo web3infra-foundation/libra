@@ -1,6 +1,6 @@
 ### `cli.schema-upgrade-observable`
 
-目的：验证新建仓库的 SQLite schema 可被 CLI 正常使用。
+目的：验证新建仓库的 SQLite schema 可被 CLI 正常使用，且过期 schema 在建立数据库连接时自动升级（不再需要显式的 `libra db upgrade`）。
 
 最小步骤：
 
@@ -14,14 +14,9 @@ cd "$RUN_DIR"
 libra init schema-repo
 cd schema-repo
 
-libra db status
-libra db --json status >db-status.json
-python3 -c "import json; d=json.load(open('db-status.json')); assert d['ok'] is True; assert d['data']['state'] == 'compatible'; assert d['data']['current_version'] is not None; assert d['data']['current_version'] == d['data']['latest_version']"
-libra db upgrade
-libra db upgrade
-libra db --json upgrade >db-upgrade.json
-python3 -c "import json; d=json.load(open('db-upgrade.json')); assert d['ok'] is True; assert d['data']['upgraded'] is False; assert d['data']['applied_versions'] == []; assert d['data']['current_version'] == d['data']['latest_version']"
-libra db status
+# 任意普通命令都会在打开数据库连接时把 schema 升级到当前版本；
+# 对全新仓库这是幂等的（已是最新）。
+libra status
 
 libra config set user.name "Libra Schema Test"
 libra config set user.email "schema@example.invalid"
@@ -38,15 +33,13 @@ libra fsck --connectivity-only
 cd "$RUN_ROOT/repos"
 mkdir not-a-repo
 cd not-a-repo
-! libra db status
-! libra db upgrade
+! libra status
 ```
 
-断言：`db status` 只读取 schema 状态并退出码为 0；`db --json status` 输出 current/latest/state 等结构化字段或等价 schema 状态；`db upgrade` 对已是当前版本的仓库应成功且幂等；升级/状态检查后提交闭环和 `fsck --connectivity-only` 不触发 migration 或 schema 错误；非仓库目录中的 `db status` / `db upgrade` 必须失败并提示缺少 Libra 仓库。
+断言：全新仓库上的普通命令（`status`/`add`/`commit`/`log`/`fsck`）全部 0 退出，证明 schema 建链即可用且自动保持最新；提交闭环与 `fsck --connectivity-only` 不触发 migration 或 schema 错误；非仓库目录中的命令必须失败并提示缺少 Libra 仓库。
 
 补充可执行断言：
-- `libra --json db status` 必须 `ok:true`，`data.current_version == data.latest_version` 且 `data.state` 为兼容状态。
-- 非仓库目录执行 `libra db status` / `libra db upgrade` 必须非 0，stderr 包含 "not a libra repository" 或 LBR-REPO-001。
+- 过期 schema 的仓库在执行任意需要数据库的命令时被自动升级（迁移在建立连接处应用，见 `db::establish_connection`），无需用户干预。
+- 比当前二进制更新的 schema 无法降级，仍是硬错误，提示安装更新版本的 Libra。
+- 非仓库目录执行普通命令必须非 0，stderr 包含 "not a libra repository" 或 LBR-REPO-001。
 - 操作后 `libra fsck --connectivity-only` 必须 0 退出。
-- 验证 schema 升级幂等：连续两次 `libra db upgrade` 均成功且无副作用；`libra --json db upgrade` 在已最新仓库上返回 `upgraded:false` 且 `applied_versions == []`。
-

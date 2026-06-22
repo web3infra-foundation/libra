@@ -93,7 +93,6 @@
 |------|------|------|------|
 | `libra cloud` | | 通过 Cloudflare D1/R2 执行云备份和恢复操作 | [cloud.md](cloud.md) |
 | `libra publish` | | 管理只读 Cloudflare Worker 发布 | [publish.md](publish.md) |
-| `libra db` | | 检查并升级仓库 SQLite schema | [db.md](db.md) |
 | `libra worktree` | `wt` | 管理附加到仓库的多个工作树 | [worktree.md](worktree.md) |
 
 ### AI 与开发

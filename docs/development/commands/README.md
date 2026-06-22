@@ -38,7 +38,6 @@
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
 | [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer and `-e/--edit` + `-v/--verbose` (editor) supported; `--porcelain`/`--status`/`-t/--template` not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
-| [`db`](db.md) | `intentionally-different` | Libra repository database schema inspection/upgrade extension, not a Git command |
 | [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, and `--exclude` supported; contains/candidates/all not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat output supported; positional revspec, summary/word/binary/whitespace/ext-diff incomplete |
 | [`fetch`](fetch.md) | `partial` | repository/refspec, `--all`, `--depth`, `--dry-run`, `-v`, `--porcelain`, tag auto-follow (default; `--tags`/`--no-tags`, `remote.<name>.tagOpt`), `-f`/`--force`, `FETCH_HEAD`, and `--append` supported; refmap/atomic/prune and shallow expansion flags not exposed |
@@ -53,12 +52,14 @@
 | [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
 | [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`; positional ranges and exact line history remain partial |
+| [`ls-files`](ls-files.md) | `partial` | default cached listing plus modified/deleted/stage/untracked filters, `.libraignore`-aware `--others --exclude-standard`, pathspecs, `--error-unmatch`, `-z`, and JSON/machine output supported |
 | [`ls-remote`](ls-remote.md) | `partial` | heads/tags/refs filtering, patterns, get-url, sort, and exit-code supported; symref not exposed |
 | [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, common output flags, and partial `--format` atom support exposed; `REV:path` syntax is not exposed |
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; commit-graph and prefetch tasks implemented with documented Git semantic differences |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | [`mv`](mv.md) | `partial` | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
 | [`notes`](notes.md) | `partial` | `add` / `show` / `list` / `remove` supported; `--ref` supported; append/edit/copy/merge/prune and editor support not implemented |
+| [`op`](op.md) | `intentionally-different` | Libra command-level operation history inspection/restore extension, not a Git command |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, and `--no-commit` exposed; `--commit` / `--autostash` not exposed |
@@ -90,7 +91,6 @@
 以下命令曾有开发设计资料，但已明确决定不接入公开 CLI；它们降级为内部历史资料，不承诺用户可见兼容面：
 
 - `gc`：功能由 `libra maintenance run --task gc` 覆盖（见 `docs/development/internal/gc.md`）
-- `ls-files`：内部设计资料保留（见 `docs/development/internal/ls-files.md`）
 - `package`：内部设计资料保留（见 `docs/development/internal/package.md`）
 - `prune`：内部设计资料保留（见 `docs/development/internal/prune.md`）
 - `stats`：内部设计资料保留（见 `docs/development/internal/stats.md`）
