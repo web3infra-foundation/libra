@@ -16,6 +16,7 @@ pub const NOTES_EXAMPLES: &str = "\
 EXAMPLES:
     libra notes add -m \"Reviewed-by: Alice\"         Add a note to HEAD
     libra notes append -m \"Deployed-by: CI\"         Append a line to HEAD's note
+    libra notes copy <from> <to>                      Copy a note to another object
     libra notes show                                  Show the note on HEAD
     libra notes list                                  List all notes
     libra notes remove abc1234                        Remove a note
@@ -67,6 +68,18 @@ pub enum NotesSubcommand {
         #[clap(short = 'F', long)]
         file: Vec<String>,
     },
+    /// Copy the note of one object to another object
+    Copy {
+        /// Source object to copy the note from
+        from_object: String,
+
+        /// Target object to copy the note to
+        to_object: String,
+
+        /// Overwrite an existing note on the target object
+        #[clap(short, long)]
+        force: bool,
+    },
     /// List note objects and the commits they annotate
     List {
         /// Object to list notes for (omit to list all)
@@ -102,6 +115,14 @@ pub enum NotesOutput {
         #[serde(rename = "ref")]
         notes_ref: String,
         object: String,
+        note_hash: String,
+    },
+    #[serde(rename = "copy")]
+    Copy {
+        #[serde(rename = "ref")]
+        notes_ref: String,
+        from_object: String,
+        to_object: String,
         note_hash: String,
     },
     #[serde(rename = "list")]
@@ -210,6 +231,28 @@ pub async fn execute_safe(
             let out = NotesOutput::Append {
                 notes_ref: result.notes_ref,
                 object: result.object,
+                note_hash: result.note_hash,
+            };
+            render_output(&out, output)?;
+        }
+        NotesSubcommand::Copy {
+            from_object,
+            to_object,
+            force,
+        } => {
+            // Read the source note (errors if the source object has none),
+            // then write it onto the target (`force` overwrites an existing
+            // target note) — matching `git notes copy`.
+            let (_, _, text) = notes::show(notes_ref, Some(&from_object))
+                .await
+                .map_err(NotesCliError::from)?;
+            let result = notes::add(notes_ref, &to_object, &text, force)
+                .await
+                .map_err(NotesCliError::from)?;
+            let out = NotesOutput::Copy {
+                notes_ref: result.notes_ref,
+                from_object,
+                to_object: result.object,
                 note_hash: result.note_hash,
             };
             render_output(&out, output)?;
@@ -381,6 +424,19 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
             println!(
                 "Appended to note for {} in {}",
                 short_display_hash(object),
+                notes_ref
+            );
+        }
+        NotesOutput::Copy {
+            notes_ref,
+            from_object,
+            to_object,
+            note_hash: _,
+        } => {
+            println!(
+                "Copied note from {} to {} in {}",
+                short_display_hash(from_object),
+                short_display_hash(to_object),
                 notes_ref
             );
         }

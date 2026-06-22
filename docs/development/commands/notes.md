@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra notes` 的目标是管理提交 notes，包括 add、append、show、list、remove 等基础操作。当前已实现并公开接入顶层 CLI；后续按需补齐 edit/copy/merge/prune 和编辑器支持。
+`libra notes` 的目标是管理提交 notes，包括 add、append、copy、show、list、remove 等基础操作。当前已实现并公开接入顶层 CLI；后续按需补齐 edit/merge/prune 和编辑器支持。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 add/append/show/list/remove 已公开；edit/copy/merge/prune 和编辑器支持未实现。
+- 兼容级别：`partial`。基础 add/append/copy/show/list/remove 已公开；edit/merge/prune 和编辑器支持未实现。
 
 
 ## 设计方案
@@ -51,7 +51,8 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令。 | 已纳入用户可见兼容矩阵和矩阵守卫。 |
 | ✅ 已实现 | Append | `notes append` 在现有 note 后追加（空行分隔；无 note 时新建，复用 `notes::show` 读取 + `notes::add(force)` 写入）。带集成测试（`notes_append_concatenates_to_existing_note`、`notes_append_creates_note_when_absent`）。 |
-| 兼容差异项 | Edit / Copy / Merge / Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现。后续若需支持，补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Copy | `notes copy [-f] <from> <to>` 复用 `notes::show(from)`（源无 note 报错）+ `notes::add(to, text, force)`（目标已有 note 且无 `-f` 报错）。带集成测试（`notes_copy_duplicates_note_to_another_object`、`notes_copy_fails_when_source_has_no_note`）。 |
+| 兼容差异项 | Edit / Merge / Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现。后续若需支持，补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Editor support | 原始对照：Interactive editor (default)；相关参数/替代：不支持 (-m / -F required)；当前说明：未实现。
 
 ## 维护要求

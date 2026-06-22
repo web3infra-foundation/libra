@@ -1273,3 +1273,75 @@ fn notes_append_creates_note_when_absent() {
         "append created the note"
     );
 }
+
+#[test]
+fn notes_copy_duplicates_note_to_another_object() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Two commits so we have two distinct objects.
+    std::fs::write(p.join("f.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], p).stdout)
+        .trim()
+        .to_string();
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "source note", &c1], p),
+        "notes add on c1",
+    );
+    // Copy c1's note onto c2.
+    assert_cli_success(
+        &run_libra_command(&["notes", "copy", &c1, &c2], p),
+        "notes copy c1 -> c2",
+    );
+    let show = run_libra_command(&["notes", "show", &c2], p);
+    assert_cli_success(&show, "notes show c2 after copy");
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains("source note"),
+        "c2 should now carry c1's note"
+    );
+
+    // Copying onto an object that already has a note fails without -f.
+    let bad = run_libra_command(&["notes", "copy", &c1, &c2], p);
+    assert!(
+        !bad.status.success(),
+        "copy over existing note should fail without -f"
+    );
+    // ...and succeeds with -f.
+    assert_cli_success(
+        &run_libra_command(&["notes", "copy", "-f", &c1, &c2], p),
+        "notes copy -f over existing note",
+    );
+}
+
+#[test]
+fn notes_copy_fails_when_source_has_no_note() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("f.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], p).stdout)
+        .trim()
+        .to_string();
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    // Neither object has a note: copying from a note-less source must fail.
+    let bad = run_libra_command(&["notes", "copy", &c1, &c2], p);
+    assert!(
+        !bad.status.success(),
+        "copy from an object with no note should fail: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}

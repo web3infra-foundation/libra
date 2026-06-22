@@ -4,8 +4,8 @@ Historical design for adding, showing, listing, or removing notes attached to
 commits without modifying the commits themselves.
 
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
-> operations (`add`, `append`, `list`, `show`, `remove`) are supported. Advanced
-> Git notes subcommands (`edit`, `copy`, `merge`, `prune`, `get-ref`) and
+> operations (`add`, `append`, `copy`, `list`, `show`, `remove`) are supported.
+> Advanced Git notes subcommands (`edit`, `merge`, `prune`, `get-ref`) and
 > interactive editor support are not implemented.
 
 ## Synopsis
@@ -13,6 +13,7 @@ commits without modifying the commits themselves.
 ```
 libra notes add [-m <message> | -F <file>] [-f] [<object>]
 libra notes append [-m <message> | -F <file>] [<object>]
+libra notes copy [-f] <from-object> <to-object>
 libra notes list [<object>]
 libra notes show [<object>]
 libra notes remove [<object>...]
@@ -38,7 +39,7 @@ If this command is published in a future release, omitting a subcommand should d
 | | `<object>` | positional (optional) | Commit to annotate, show, or remove notes from. Defaults to HEAD. |
 | `-m` | `--message` | `<msg>` | Note message text. Repeatable; blank lines separate messages. |
 | `-F` | `--file` | `<file>` | Read note message from file (`-` for stdin). |
-| `-f` | `--force` | | Overwrite an existing note (for `add`). |
+| `-f` | `--force` | | Overwrite an existing note (for `add` and `copy`). |
 | | `--ref` | `<ref>` | Operate on a specific notes ref (default: `refs/notes/commits`). |
 
 ### Subcommands
@@ -47,6 +48,7 @@ If this command is published in a future release, omitting a subcommand should d
 |------------|-------------|
 | `add` | Add a note to an object. Fails if a note already exists; use `-f` to overwrite. Requires `-m` or `-F`. |
 | `append` | Append a message to an object's note (separated by a blank line), creating the note if absent. Requires `-m` or `-F`. |
+| `copy` | Copy the note from `<from-object>` to `<to-object>`. Fails if the source has no note, or if the target already has one (use `-f` to overwrite). |
 | `list` | List note objects and the commits they annotate (default subcommand). |
 | `show` | Show the note text for an object. |
 | `remove` | Remove notes for one or more objects. |
@@ -65,6 +67,9 @@ libra notes add -m "Updated review" -f HEAD
 
 # Append another line to HEAD's note (blank-line separated)
 libra notes append -m "Deployed-by: CI"
+
+# Copy a note from one commit to another
+libra notes copy abc1234 def5678
 
 # List all notes
 libra notes list
@@ -188,10 +193,10 @@ invocations — editors assume an interactive user and are incompatible with
 headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
 for note creation.
 
-### Why no `edit`, `copy`, `merge`, `prune`, `get-ref`?
+### Why no `edit`, `merge`, `prune`, `get-ref`?
 
 These Git subcommands add complexity for niche or collaborative workflows.
-The core operations (`add`, `append`, `list`, `show`, `remove`) cover the
+The core operations (`add`, `append`, `copy`, `list`, `show`, `remove`) cover the
 primary use case: attaching structured metadata to commits. The remaining
 subcommands can be emulated (`edit` is `remove` + `add`) and added incrementally
 if real users or agents need them.
@@ -212,7 +217,8 @@ scan), and concurrency safety via SQLite WAL mode.
 | Show note | `git notes show [<obj>]` | `libra notes show [<obj>]` | N/A |
 | Remove note | `git notes remove [<obj>...]` | `libra notes remove [<obj>...]` | N/A |
 | Append | `notes append` | Supported | N/A |
-| Edit / Copy / Merge / Prune | Supported | Not supported | N/A |
+| Copy | `notes copy [-f] <from> <to>` | Supported | N/A |
+| Edit / Merge / Prune | Supported | Not supported | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
 | Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |
@@ -225,7 +231,7 @@ Note: jj does not have a notes feature.
 
 | Scenario | Error Code | Hint |
 |----------|-----------|------|
-| Object already has a note (add) | `LBR-CONFLICT-002` | "use '-f' to overwrite the existing note." |
+| Object already has a note (add or copy target) | `LBR-CONFLICT-002` | "use '-f' to overwrite the existing note." |
 | Object has no note (show/remove) | `LBR-CLI-003` | "use 'libra notes list' to see which objects have notes." |
 | Neither `-m` nor `-F` provided (add) | `LBR-CLI-002` | "provide a message with '-m <msg>' or '-F <file>'." |
 | Invalid object reference | `LBR-CLI-003` | "use 'libra log' to find valid commit references." |
