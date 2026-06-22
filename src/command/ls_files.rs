@@ -31,7 +31,8 @@ EXAMPLES:
     libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
     libra ls-files -z --others          Emit NUL-delimited records for scripts
     libra ls-files -s                   Short output with stage info
-    libra ls-files -t                   Prefix each path with a status tag";
+    libra ls-files -t                   Prefix each path with a status tag
+    libra ls-files -u                   Show only unmerged (conflict) entries";
 
 #[derive(Parser, Debug)]
 #[command(after_help = LS_FILES_EXAMPLES)]
@@ -73,9 +74,14 @@ pub struct LsFilesArgs {
     pub short: bool,
 
     /// Prefix each path with a status tag (H=cached, R=removed/deleted,
-    /// C=modified/changed, ?=other/untracked)
+    /// C=modified/changed, ?=other/untracked, M=unmerged)
     #[clap(short = 't')]
     pub tag: bool,
+
+    /// Show only unmerged (conflict) entries — index stages 1/2/3 — in
+    /// stage-style output
+    #[clap(short = 'u', long)]
+    pub unmerged: bool,
 
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
@@ -124,8 +130,17 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
     let mut entries = Vec::new();
     let include_cached = _args.cached || (!_args.deleted && !_args.modified && !_args.others);
 
-    if include_cached || _args.deleted || _args.modified || _args.stage || _args.short {
-        let stages: &[u8] = if _args.stage || _args.short {
+    if include_cached
+        || _args.deleted
+        || _args.modified
+        || _args.stage
+        || _args.short
+        || _args.unmerged
+    {
+        // `-u`/`--unmerged` restricts the listing to conflict stages 1/2/3.
+        let stages: &[u8] = if _args.unmerged {
+            &[1, 2, 3]
+        } else if _args.stage || _args.short {
             &[0, 1, 2, 3]
         } else {
             &[0]
@@ -145,7 +160,10 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
                     continue;
                 }
 
-                let status = if is_deleted {
+                // Conflict-stage entries are "unmerged" regardless of worktree state.
+                let status = if *stage > 0 {
+                    "unmerged"
+                } else if is_deleted {
                     "deleted"
                 } else if is_modified {
                     "modified"
@@ -330,7 +348,7 @@ fn render_output(
 
     let mut stdout = std::io::stdout().lock();
     for entry in entries {
-        let mut record = if args.short || args.stage {
+        let mut record = if args.short || args.stage || args.unmerged {
             format!(
                 "{} {} {}\t{}",
                 entry.mode.as_deref().unwrap_or("000000"),

@@ -18,8 +18,8 @@ remain listed even when the working tree copy is modified or deleted.
 This public compatibility slice supports cached listing, modified/deleted
 filters, stage-style output, untracked listing, `.libraignore`-aware filtering
 via `--others --exclude-standard`, repository-local pathspec filtering,
-`--error-unmatch`, NUL-delimited text output via `-z`, and status tags via
-`-t`.
+`--error-unmatch`, NUL-delimited text output via `-z`, status tags via
+`-t`, and unmerged-only listing via `-u` / `--unmerged`.
 
 Pathspecs are resolved from the caller's current working directory, not forced
 to the repository root. Exact-file and directory-prefix filtering are both
@@ -36,7 +36,8 @@ integration remain deferred.
 | `--modified` | Show tracked paths whose working-tree content hash differs from the index. |
 | `--stage` | Print stage-style records, including conflict stages when present. |
 | `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
-| `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked). |
+| `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged). |
+| `-u`, `--unmerged` | Show only unmerged (conflict) entries — index stages 1/2/3 — in stage-style output. |
 | `--others` | Show untracked working-tree files. |
 | `--exclude-standard` | With `--others`, honor `.libraignore` rules. |
 | `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
@@ -60,6 +61,7 @@ libra ls-files -z tracked-dir
 libra ls-files --stage
 libra ls-files -t
 libra ls-files -t --others --exclude-standard
+libra ls-files -u
 libra --json ls-files --modified
 ```
 
@@ -127,4 +129,5 @@ entries use `null` for fields that do not apply:
 | Pathspec filters | `<pathspec>...` | Supported | Different model |
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
 | NUL output | `-z` (text mode only) | `-z` | Different model |
-| Status tags | `-t` (H/R/C/?) | `-t` (H/S/M/R/C/K/?) | Different model |
+| Status tags | `-t` (H/R/C/?/M) | `-t` (H/S/M/R/C/K/?) | Different model |
+| Unmerged entries | `-u` / `--unmerged` | `-u` / `--unmerged` | Different model |

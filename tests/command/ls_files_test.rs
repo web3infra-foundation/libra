@@ -550,3 +550,56 @@ fn ls_files_t_prefixes_status_tags() {
         "deleted -> R: {s:?}"
     );
 }
+
+#[test]
+fn ls_files_u_shows_unmerged_conflict_entries() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Build a merge conflict on conf.txt via two divergent branches.
+    fs::write(p.join("conf.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "conf.txt"], p), "add conf");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base-conf", "--no-verify"], p),
+        "commit base-conf",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    fs::write(p.join("conf.txt"), "main-change\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "conf.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main-c", "--no-verify"], p),
+        "commit main-c",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    fs::write(p.join("conf.txt"), "other-change\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "conf.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "other-c", "--no-verify"], p),
+        "commit other-c",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    // The merge conflicts (non-zero exit expected); the conflict stays in the index.
+    let _ = run_libra_command(&["merge", "other"], p);
+
+    // -u lists the three conflict stages for conf.txt in stage format.
+    let out = run_libra_command(&["ls-files", "-u"], p);
+    assert_cli_success(&out, "ls-files -u");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        s.lines().any(|l| l.contains(" 1\tconf.txt")),
+        "stage 1: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l.contains(" 2\tconf.txt")),
+        "stage 2: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l.contains(" 3\tconf.txt")),
+        "stage 3: {s:?}"
+    );
+    // -u shows ONLY unmerged entries, not cleanly-staged files.
+    assert!(
+        !s.contains("tracked.txt"),
+        "clean entries excluded from -u: {s:?}"
+    );
+}
