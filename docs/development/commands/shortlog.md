@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、no-merges、top 限制、mailmap、范围解析和 JSON 摘要，同时把 group、format、stdin 和更复杂过滤作为差异项。
+`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、no-merges、top 限制、mailmap、范围解析和 JSON 摘要，同时把 format、stdin 和更复杂过滤作为差异项。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--no-merges`、`--top`/`--min-count`/`--reverse`、`--author` 过滤已支持；`--group=trailer:<key>`、`--format`、stdin 输入和 `-w` 换行宽度尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--no-merges`、`--top`/`--min-count`/`--reverse`、`--author` 过滤已支持；`--format`、stdin 输入和 `-w` 换行宽度尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,14 +46,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/shortlog.md`。
 - Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]`。
-- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`[<revision>]`。
+- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--group <TYPE>`（`author`/`committer`/`trailer:<key>`）、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`[<revision>]`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 分组方式 | 原始对照：不支持；相关参数/替代：--group=author\|committer\|trailer:<key>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 分组方式 `--group=author\|committer\|trailer:<key>` | `resolve_group_mode` 解析 `--group`（优先于 `-c`）；`trailer:<key>` 经 `extract_trailer_identities` 从消息末段 trailer 块按 key（忽略大小写）提取每个值作为分组（单提交可贡献 0..N 组）。带集成测试（`group_trailer_groups_by_trailer_value`）。 |
 | 兼容差异项 | 格式化输出 | 原始对照：不支持；相关参数/替代：--format=<format>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 管道输入 | 原始对照：不支持；相关参数/替代：从 stdin 读取管道输入；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | 作者过滤 `--author <PATTERN>` | 聚合前按作者 `name <email>` 的大小写不敏感子串过滤（即使配合 `-c` 也按作者过滤）。带 `author_identity_matches` 单元测试。 |

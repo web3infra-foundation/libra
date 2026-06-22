@@ -806,3 +806,49 @@ async fn test_shortlog_top_and_min_count_limit_output() {
         "--min-count above all counts drops every author:\n{min}"
     );
 }
+
+#[test]
+#[serial]
+fn group_trailer_groups_by_trailer_value() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for file in ["g1.txt", "g2.txt"] {
+        std::fs::write(p.join(file), "x\n").unwrap();
+        run_libra_command(&["add", file], p);
+        run_libra_command(
+            &[
+                "commit",
+                "-m",
+                "feat",
+                "--trailer",
+                "Co-authored-by: Alice <alice@x.io>",
+                "--no-verify",
+            ],
+            p,
+        );
+    }
+
+    // `--group=trailer:<key>` groups by each Co-authored-by value, ignoring
+    // author/committer; Alice appears with both commits.
+    let out = run_libra_command(&["shortlog", "--group=trailer:Co-authored-by", "-s"], p);
+    assert_cli_success(&out, "shortlog --group=trailer");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l.contains("Alice") && l.contains('2')),
+        "Alice should be grouped with 2 commits: {s:?}"
+    );
+
+    // `--group=committer` is accepted as the canonical spelling of `-c`.
+    assert_cli_success(
+        &run_libra_command(&["shortlog", "--group=committer", "-s"], p),
+        "shortlog --group=committer",
+    );
+
+    // An unknown `--group` type is a usage error.
+    let bad = run_libra_command(&["shortlog", "--group=bogus"], p);
+    assert!(
+        !bad.status.success(),
+        "invalid --group should fail: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}

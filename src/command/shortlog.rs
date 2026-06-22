@@ -74,6 +74,7 @@ EXAMPLES:
     libra shortlog HEAD~5           Summarize a subset of history starting from a revision
     libra shortlog -n -s            Sort by commit count, suppress subjects (count only)
     libra shortlog -c -s            Summarize by committer instead of author
+    libra shortlog --group=trailer:Co-authored-by   Group by Co-authored-by trailer values
     libra shortlog --no-merges      Exclude merge commits from the summary
     libra shortlog --top 5          Show only the top 5 authors
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
@@ -127,8 +128,88 @@ pub struct ShortlogArgs {
     #[clap(long = "reverse")]
     pub reverse: bool,
 
+    /// Group commits by `author` (default), `committer`, or `trailer:<key>`
+    /// (group by each value of the given commit-message trailer, e.g.
+    /// `trailer:Co-authored-by`). Takes precedence over `-c`/`--committer`.
+    #[clap(long = "group", value_name = "TYPE")]
+    pub group: Option<String>,
+
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
+}
+
+/// How commits are grouped for the summary.
+enum GroupMode {
+    Author,
+    Committer,
+    /// Group by each value of the named commit-message trailer.
+    Trailer(String),
+}
+
+/// Resolve the grouping mode from `--group` (preferred) or the legacy
+/// `-c`/`--committer` flag. Returns a usage error for an unknown `--group`.
+fn resolve_group_mode(args: &ShortlogArgs) -> CliResult<GroupMode> {
+    match args.group.as_deref() {
+        None => Ok(if args.committer {
+            GroupMode::Committer
+        } else {
+            GroupMode::Author
+        }),
+        Some("author") => Ok(GroupMode::Author),
+        Some("committer") => Ok(GroupMode::Committer),
+        Some(spec) if spec.starts_with("trailer:") => {
+            let key = spec["trailer:".len()..].trim();
+            if key.is_empty() {
+                return Err(
+                    CliError::fatal("--group=trailer:<key> requires a non-empty key")
+                        .with_stable_code(StableErrorCode::CliInvalidArguments)
+                        .with_hint("example: --group=trailer:Co-authored-by"),
+                );
+            }
+            Ok(GroupMode::Trailer(key.to_string()))
+        }
+        Some(other) => Err(CliError::fatal(format!("unknown --group type '{other}'"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("expected: author, committer, or trailer:<key>")),
+    }
+}
+
+/// Extract `(name, email)` identities from the trailer block of `message` whose
+/// key matches `key` (case-insensitive). The trailer block is the last
+/// paragraph of the message; each `Key: Value` line whose key matches yields
+/// one identity (Value parsed as `Name <email>`, or the raw text with an empty
+/// email). A commit may contribute several identities (or none).
+fn extract_trailer_identities(message: &str, key: &str) -> Vec<(String, String)> {
+    // The trailer block is the final non-empty paragraph.
+    let block = match message.trim_end().rsplit("\n\n").next() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let mut identities = Vec::new();
+    for line in block.lines() {
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        if !raw_key.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let value = raw_value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        // Parse `Name <email>` when present; otherwise treat the whole value as
+        // the name with an empty email.
+        if let (Some(open), Some(close)) = (value.rfind('<'), value.rfind('>'))
+            && open < close
+        {
+            let name = value[..open].trim().to_string();
+            let email = value[open + 1..close].trim().to_string();
+            identities.push((name, email));
+        } else {
+            identities.push((value.to_string(), String::new()));
+        }
+    }
+    identities
 }
 
 struct AuthorStats {
@@ -249,35 +330,46 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
         });
     }
 
-    Ok(aggregate_shortlog(args, &revision, commits))
+    let group_mode = resolve_group_mode(args)?;
+    Ok(aggregate_shortlog(args, &group_mode, &revision, commits))
 }
 
-fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>) -> ShortlogOutput {
+fn aggregate_shortlog(
+    args: &ShortlogArgs,
+    group_mode: &GroupMode,
+    revision: &str,
+    commits: Vec<Commit>,
+) -> ShortlogOutput {
     let total_commits = commits.len();
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
     for commit in commits {
-        // `-c`/`--committer` groups by the committer identity; otherwise by the
-        // author (Git's default).
-        let signature = if args.committer {
-            &commit.committer
-        } else {
-            &commit.author
-        };
-        let author_name = signature.name.clone();
-        let author_email = signature.email.clone();
-        let key = if args.email {
-            format!("{} <{}>", author_name, author_email)
-        } else {
-            author_name.clone()
+        // Each commit contributes one identity for author/committer grouping,
+        // or zero-or-more for trailer grouping (one per matching trailer value).
+        let identities: Vec<(String, String)> = match group_mode {
+            GroupMode::Author => vec![(commit.author.name.clone(), commit.author.email.clone())],
+            GroupMode::Committer => {
+                vec![(
+                    commit.committer.name.clone(),
+                    commit.committer.email.clone(),
+                )]
+            }
+            GroupMode::Trailer(key) => extract_trailer_identities(&commit.message, key),
         };
 
         let subject = commit.format_message();
 
-        author_map
-            .entry(key)
-            .or_insert_with(|| AuthorStats::new(author_name.clone(), author_email.clone()))
-            .add_commit(subject);
+        for (author_name, author_email) in identities {
+            let key = if args.email {
+                format!("{} <{}>", author_name, author_email)
+            } else {
+                author_name.clone()
+            };
+            author_map
+                .entry(key)
+                .or_insert_with(|| AuthorStats::new(author_name.clone(), author_email.clone()))
+                .add_commit(subject.clone());
+        }
     }
 
     let mut authors: Vec<ShortlogAuthor> = author_map

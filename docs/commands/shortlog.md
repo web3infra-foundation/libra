@@ -28,6 +28,7 @@ Date filtering via `--since` and `--until` restricts which commits are included 
 | Summary | `-s` | `--summary` | Suppress commit descriptions; show only per-author commit counts. |
 | Email | `-e` | `--email` | Show the email address of each author alongside their name. When enabled, authors are grouped by `name <email>` pair. |
 | Committer | `-c` | `--committer` | Group commits by committer identity instead of author. |
+| Group | | `--group <TYPE>` | Group by `author` (default), `committer`, or `trailer:<key>` (one group per value of the named commit-message trailer, e.g. `trailer:Co-authored-by`). Takes precedence over `-c`. |
 | No merges | | `--no-merges` | Exclude merge commits (commits with more than one parent) before aggregation. |
 | Top | | `--top <N>` | Show only the top N identities (after sorting). |
 | Min count | | `--min-count <N>` | Show only identities with at least N commits. |
@@ -177,19 +178,19 @@ The `total_authors` and `total_commits` fields provide aggregate counts for quic
 
 ## Design Rationale
 
-### Why no `--group`?
+### How `--group` works
 
-Git's `shortlog --group=trailer:<key>` and `--group=author`/`--group=committer` allow grouping by different commit metadata fields or trailer values. This is a niche feature used primarily for analyzing co-authored commits or commits attributed via `Signed-off-by` trailers. Libra omits `--group` to keep the command focused on its primary use case: summarizing contributions by author. The overwhelmingly common usage of shortlog is author-based grouping, and supporting arbitrary grouping would require a generic aggregation framework that adds complexity without proportional value.
+Git's `--group=author`/`--group=committer`/`--group=trailer:<key>` selects what commits are grouped by. Libra supports all three: `author` (the default) and `committer` mirror the identity grouping also available via `-c`, while `trailer:<key>` groups by each value of the named commit-message trailer (e.g. `--group=trailer:Co-authored-by`), which is useful for analyzing co-authored commits or attributions recorded via trailers like `Signed-off-by`. A commit may contribute to several trailer groups (one per matching trailer line) or none. `--group` takes precedence over `-c`/`--committer`. The trailer key is matched case-insensitively against the last paragraph (the trailer block) of each commit message, and `Name <email>` values are split into name and email for the report. Git's full `interpret-trailers` configuration (folding, separators, custom config) is not modeled.
 
 ### Why positional revision instead of piped input?
 
 Git's `shortlog` can operate in two modes: reading from `git log` output piped via stdin, or directly traversing commit history. The piped mode (`git log | git shortlog`) is a Unix-philosophy composability feature, but it requires parsing serialized commit data, which is fragile and format-dependent.
 
-Libra takes the revision as a positional argument and always reads directly from the commit graph. This is simpler, faster (no serialization/deserialization), and works naturally with the `--json` output mode. For filtering beyond what `--since`/`--until` provide, use `libra log --json` with external tooling.
+Libra takes the revision as a positional argument and always reads directly from the commit graph. This is simpler, faster (no serialization/deserialization), and works naturally with the `--json` output mode. For filtering beyond the built-in filters (`--since`/`--until`, `--author`, `--no-merges`), use `libra log --json` with external tooling.
 
-### Why `--since`/`--until` instead of full log options?
+### Why a curated filter subset instead of full log options?
 
-Git's `shortlog` inherits the full set of `git log` options when used directly (not piped). This includes `--author`, `--grep`, `--no-merges`, and dozens of others. Libra provides only date-based filtering because it covers the most common shortlog filtering need (release period summaries) without inheriting the full complexity of the log command's option space.
+Git's `shortlog` inherits the full set of `git log` options when used directly (not piped) — `--author`, `--grep`, `--no-merges`, and dozens of others. Libra exposes a curated subset that covers the common shortlog needs — date filtering (`--since`/`--until`), `--author`, and `--no-merges` — without inheriting the full complexity of the log command's option space. Less common log filters such as `--grep` are not exposed.
 
 ### Why committer timestamp for filtering?
 
@@ -205,7 +206,7 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Since date | `--since <date>` | `--since <date>` / `--after <date>` | N/A |
 | Until date | `--until <date>` | `--until <date>` / `--before <date>` | N/A |
 | Revision | `<revision>` (positional) | `<revision range>...` | N/A |
-| Group by | Not supported | `--group=author\|committer\|trailer:<key>` | N/A |
+| Group by | `--group=author\|committer\|trailer:<key>` | `--group=author\|committer\|trailer:<key>` | N/A |
 | Format | Not supported | `--format=<format>` | N/A |
 | Committer grouping | `-c` / `--committer` | `--committer` (deprecated, use `--group=committer`) | N/A |
 | Piped input | Not supported | Reads from stdin when piped | N/A |
