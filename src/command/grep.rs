@@ -153,6 +153,28 @@ pub struct GrepArgs {
     /// Search within tracked files in the index (staging area) instead of the working tree.
     #[clap(long)]
     cached: bool,
+
+    /// Print the file name as a heading above its matches instead of as a per-line prefix.
+    /// Paired with `--no-heading`; the last one given wins (Git semantics).
+    #[clap(long, overrides_with = "no_heading")]
+    heading: bool,
+
+    /// Do not group matches under a file-name heading (the default).
+    #[clap(long = "no-heading", overrides_with = "heading")]
+    no_heading: bool,
+
+    /// Print an empty line between matches from different files.
+    /// Paired with `--no-break`; the last one given wins (Git semantics).
+    #[clap(long = "break", overrides_with = "no_break")]
+    break_: bool,
+
+    /// Do not print an empty line between files (the default).
+    #[clap(long = "no-break", overrides_with = "break_")]
+    no_break: bool,
+
+    /// Output a NUL byte after the file name (and line number) instead of ':', for machine consumption.
+    #[clap(short = 'z', long = "null")]
+    null: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -865,15 +887,24 @@ fn render_grep_output(
 
     if args.files_with_matches {
         for file in result.files_with_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
+            if args.null {
+                pager.write_str(&format!("{file}\0"))?;
+            } else {
+                pager.write_line(file)?;
+            }
         }
     } else if args.files_without_matches {
         for file in result.files_without_matches.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(file)?;
+            if args.null {
+                pager.write_str(&format!("{file}\0"))?;
+            } else {
+                pager.write_line(file)?;
+            }
         }
     } else if args.count {
+        let sep = if args.null { '\0' } else { ':' };
         for count in result.counts.as_ref().unwrap_or(&Vec::new()) {
-            pager.write_line(&format!("{}:{}", count.path, count.count))?;
+            pager.write_line(&format!("{}{sep}{}", count.path, count.count))?;
         }
     } else {
         // Regular match output with optional highlighting and -A/-B/-C context.
@@ -881,16 +912,49 @@ fn render_grep_output(
         // separates non-adjacent context groups (Git's behavior).
         let (before, after) = context_window(args);
         let context_active = before > 0 || after > 0;
+        // `overrides_with` makes each `--x`/`--no-x` pair last-one-wins, so the
+        // positive field already reflects the effective state.
+        let heading = args.heading;
+        let do_break = args.break_;
         let mut prev: Option<(String, usize)> = None;
         for match_item in result.matches.as_ref().unwrap_or(&Vec::new()) {
-            if context_active
-                && let Some((prev_path, prev_line)) = &prev
-                && (*prev_path != match_item.path || match_item.line_number > *prev_line + 1)
+            let new_file = prev
+                .as_ref()
+                .map(|(prev_path, _)| *prev_path != match_item.path)
+                .unwrap_or(true);
+
+            if new_file {
+                // File-group boundary. `--break` inserts a blank line between
+                // files; otherwise preserve Git's "--" separator between context
+                // groups across files when context is active. `--heading` prints
+                // the file name as a standalone heading line.
+                if prev.is_some() {
+                    if do_break {
+                        pager.write_line("")?;
+                    } else if !heading && context_active {
+                        pager.write_line("--")?;
+                    }
+                }
+                if heading {
+                    pager.write_line(&match_item.path)?;
+                }
+            } else if context_active
+                && let Some((_, prev_line)) = &prev
+                && match_item.line_number > *prev_line + 1
             {
+                // Non-adjacent context group within the same file.
                 pager.write_line("--")?;
             }
 
-            let sep = if match_item.is_context { "-" } else { ":" };
+            // `-z`/`--null` replaces every field separator with NUL; otherwise
+            // match lines use ':' and context lines use '-'.
+            let sep: char = if args.null {
+                '\0'
+            } else if match_item.is_context {
+                '-'
+            } else {
+                ':'
+            };
             let rendered = if match_item.is_context {
                 match_item.line.clone()
             } else if let Some(matcher) = matcher.as_ref().filter(|_| !args.invert_match) {
@@ -899,21 +963,22 @@ fn render_grep_output(
                 match_item.line.clone()
             };
 
+            // `--heading` drops the per-line file-name prefix.
+            let prefix = if heading {
+                String::new()
+            } else {
+                format!("{}{sep}", match_item.path)
+            };
             let formatted = if args.byte_offset && !match_item.is_context {
                 format!(
-                    "{}:{}:{}:{}",
-                    match_item.path,
+                    "{prefix}{}{sep}{}{sep}{rendered}",
                     match_item.line_number,
                     match_item.byte_offset.unwrap_or(0),
-                    rendered
                 )
             } else if args.line_number || args.byte_offset {
-                format!(
-                    "{}{sep}{}{sep}{}",
-                    match_item.path, match_item.line_number, rendered
-                )
+                format!("{prefix}{}{sep}{rendered}", match_item.line_number)
             } else {
-                format!("{}{sep}{}", match_item.path, rendered)
+                format!("{prefix}{rendered}")
             };
             pager.write_line(&formatted)?;
 
@@ -1010,6 +1075,30 @@ mod tests {
         assert!(GrepArgs::parse_from(["grep", "-P", "pat"]).perl_regexp);
         assert!(GrepArgs::parse_from(["grep", "-a", "pat"]).text);
         assert!(GrepArgs::parse_from(["grep", "-I", "pat"]).no_binary);
+    }
+
+    #[test]
+    fn test_grep_args_output_grouping_flags() {
+        // -z / --null short and long forms.
+        assert!(GrepArgs::parse_from(["grep", "-z", "pat"]).null);
+        assert!(GrepArgs::parse_from(["grep", "--null", "pat"]).null);
+
+        // Defaults are off.
+        let default = GrepArgs::parse_from(["grep", "pat"]);
+        assert!(!default.heading && !default.no_heading);
+        assert!(!default.break_ && !default.no_break);
+
+        // --heading / --break set the positive field.
+        assert!(GrepArgs::parse_from(["grep", "--heading", "pat"]).heading);
+        assert!(GrepArgs::parse_from(["grep", "--break", "pat"]).break_);
+
+        // Negated pairs are last-one-wins (Git semantics) via clap overrides_with:
+        // the positive field reflects the effective state regardless of which
+        // form appears, with the final occurrence taking precedence.
+        assert!(!GrepArgs::parse_from(["grep", "--heading", "--no-heading", "pat"]).heading);
+        assert!(GrepArgs::parse_from(["grep", "--no-heading", "--heading", "pat"]).heading);
+        assert!(!GrepArgs::parse_from(["grep", "--break", "--no-break", "pat"]).break_);
+        assert!(GrepArgs::parse_from(["grep", "--no-break", "--break", "pat"]).break_);
     }
 
     #[test]

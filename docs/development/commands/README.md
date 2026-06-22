@@ -45,7 +45,7 @@
 | [`format-patch`](format-patch.md) | `partial` | `-o`/`--output-directory`, `--stdout`, `-n`/`--numbered`, `--start-number`, `--subject-prefix`, `--cover-letter`, `--thread`/`--no-thread`, `--in-reply-to`, `-v`/`--reroll-count`, `-s`/`--signoff`, `--full-index`, `--no-stat`, `--keep-subject`, and `A..B`/single-commit revision range supported; merge commits are skipped; `--attach`, `--inline`, `--suffix`, `--signature`, `--from`, `--to`, `--cc`, `--base`, `--interdiff`, `--range-diff`, `--notes`, `--encode-email-headers`, and `--force` are not exposed |
 | [`fsck`](fsck.md) | `partial` | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode and pack verification surface incomplete |
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
-| [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags, context lines, `-E`/`-G`, `-P` rejection, and `-a`/`-I` binary controls supported; untracked/no-index/heading/null output not exposed |
+| [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags, context lines, `-E`/`-G`, `-P` rejection, `-a`/`-I` binary controls, and `--heading`/`--break`/`-z` output grouping supported; untracked/no-index search not exposed |
 | [`hash-object`](hash-object.md) | `partial` | Blob hashing for files and `--stdin`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte... |
 | [`hooks`](hooks.md) | `intentionally-different` | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; `--stdin`, `--keep[=<MSG>]`, and progress flags supported; `--fix-thin` not exposed |

@@ -681,3 +681,227 @@ fn test_grep_help_lists_examples_banner() {
         );
     }
 }
+
+#[tokio::test]
+#[serial]
+async fn test_grep_default_output_is_unchanged() {
+    // Regression guard: with none of the new grouping flags, output is exactly
+    // the historical `path:[lineno:]content` form, sorted by path.
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\nbeta\ngamma foo\n").expect("failed to write a.txt");
+    fs::write("b.txt", "delta foo\n").expect("failed to write b.txt");
+    add_and_commit("add files", vec!["a.txt".to_string(), "b.txt".to_string()]).await;
+
+    let output = run_libra_command(&["grep", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "default grep should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt:1:alpha foo\na.txt:3:gamma foo\nb.txt:1:delta foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_heading_groups_matches_under_file_name() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\nbeta\ngamma foo\n").expect("failed to write a.txt");
+    fs::write("b.txt", "delta foo\n").expect("failed to write b.txt");
+    add_and_commit("add files", vec!["a.txt".to_string(), "b.txt".to_string()]).await;
+
+    // --heading: file name on its own line; match lines drop the prefix.
+    let heading = "a.txt\n1:alpha foo\n3:gamma foo\nb.txt\n1:delta foo\n";
+    let output = run_libra_command(&["grep", "--heading", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep --heading should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), heading);
+
+    // Last-one-wins: `--no-heading --heading` keeps headings on.
+    let output = run_libra_command(
+        &["grep", "--no-heading", "--heading", "-n", "foo"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --no-heading --heading should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), heading);
+
+    // ...and `--heading --no-heading` falls back to the default prefixed form.
+    let output = run_libra_command(
+        &["grep", "--heading", "--no-heading", "-n", "foo"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --heading --no-heading should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt:1:alpha foo\na.txt:3:gamma foo\nb.txt:1:delta foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_break_inserts_blank_line_between_files() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\ngamma foo\n").expect("failed to write a.txt");
+    fs::write("b.txt", "delta foo\n").expect("failed to write b.txt");
+    add_and_commit("add files", vec!["a.txt".to_string(), "b.txt".to_string()]).await;
+
+    // One blank line between file groups; per-line prefix preserved.
+    let expected = "a.txt:1:alpha foo\na.txt:2:gamma foo\n\nb.txt:1:delta foo\n";
+    let output = run_libra_command(&["grep", "--break", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep --break should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+
+    // Last-one-wins for the negated pair.
+    let output = run_libra_command(&["grep", "--no-break", "--break", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep --no-break --break should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+
+    // A single matching file gets no leading or trailing blank line.
+    let output = run_libra_command(&["grep", "--break", "-n", "foo", "a.txt"], repo.path());
+    assert_cli_success(&output, "grep --break single file should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt:1:alpha foo\na.txt:2:gamma foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_heading_and_break_combine() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\nbeta\ngamma foo\n").expect("failed to write a.txt");
+    fs::write("b.txt", "delta foo\n").expect("failed to write b.txt");
+    add_and_commit("add files", vec!["a.txt".to_string(), "b.txt".to_string()]).await;
+
+    // Each new file emits a blank line (--break) then a heading (--heading).
+    let output = run_libra_command(&["grep", "--heading", "--break", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep --heading --break should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\n1:alpha foo\n3:gamma foo\n\nb.txt\n1:delta foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_heading_with_context_keeps_group_separator() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("d.txt", "m foo\nx\ny\nm2 foo\n").expect("failed to write d.txt");
+    add_and_commit("add d", vec!["d.txt".to_string()]).await;
+
+    // Heading drops the prefix; context lines use '-'; non-adjacent groups keep '--'.
+    let output = run_libra_command(&["grep", "--heading", "-A", "1", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep --heading -A1 should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "d.txt\n1:m foo\n2-x\n--\n4:m2 foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_null_separates_fields_with_nul_byte() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\ngamma foo\n").expect("failed to write a.txt");
+    fs::write("b.txt", "delta foo\n").expect("failed to write b.txt");
+    fs::write("c.txt", "no match here\n").expect("failed to write c.txt");
+    add_and_commit(
+        "add files",
+        vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "c.txt".to_string(),
+        ],
+    )
+    .await;
+
+    // -z -n: every field separator becomes NUL; lines stay newline-terminated.
+    let output = run_libra_command(&["grep", "-z", "-n", "foo"], repo.path());
+    assert_cli_success(&output, "grep -z should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\u{0}1\u{0}alpha foo\na.txt\u{0}2\u{0}gamma foo\nb.txt\u{0}1\u{0}delta foo\n"
+    );
+
+    // -lz: NUL-terminated file names, no trailing newline.
+    let output = run_libra_command(&["grep", "-lz", "foo"], repo.path());
+    assert_cli_success(&output, "grep -lz should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\u{0}b.txt\u{0}"
+    );
+
+    // -cz: `path\0count`, newline-terminated record (zero-count files omitted).
+    let output = run_libra_command(&["grep", "-cz", "foo"], repo.path());
+    assert_cli_success(&output, "grep -cz should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a.txt\u{0}2\nb.txt\u{0}1\n"
+    );
+
+    // -Lz: files without a match, NUL-terminated.
+    let output = run_libra_command(&["grep", "-Lz", "foo"], repo.path());
+    assert_cli_success(&output, "grep -Lz should succeed");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "c.txt\u{0}");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_null_with_context_uses_nul_and_literal_separator() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("d.txt", "m foo\nx\ny\nm2 foo\n").expect("failed to write d.txt");
+    add_and_commit("add d", vec!["d.txt".to_string()]).await;
+
+    // Context lines use NUL after the file name too; the group separator stays "--".
+    let output = run_libra_command(&["grep", "-z", "-A", "1", "foo"], repo.path());
+    assert_cli_success(&output, "grep -z -A1 should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "d.txt\u{0}m foo\nd.txt\u{0}x\n--\nd.txt\u{0}m2 foo\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_no_match_emits_no_output() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("a.txt", "alpha foo\n").expect("failed to write a.txt");
+    add_and_commit("add a", vec!["a.txt".to_string()]).await;
+
+    // No match: stdout is empty regardless of the grouping flags, and the
+    // command reports failure (Git-style exit code).
+    let output = run_libra_command(
+        &["grep", "--heading", "--break", "-z", "-n", "zzz"],
+        repo.path(),
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no-match output should be empty, stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !output.status.success(),
+        "no-match grep should exit non-zero"
+    );
+}

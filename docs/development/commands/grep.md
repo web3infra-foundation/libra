@@ -40,7 +40,7 @@ flowchart TD
 - 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：功能演进：add --untracked to also search untracked, non-ignored files；但该 `--untracked` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
 - 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：功能演进：add --no-index to search the filesystem without a repository；但该 `--no-index` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
 - 2026-06-05 `e3bfe11`（`feat(grep): add -A/-B/-C context lines with group separators`）：曾添加 `-A`/`-B`/`-C` 上下文行与分组分隔符；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「上下文行」一行）。
-- 2026-06-05 `2d471be`（`feat(grep): add --heading/--no-heading, --break, and -z/--null output formats`）：曾添加 `--heading`/`--no-heading`、`--break` 与 `-z`/`--null` 输出格式；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「文件名分组标题」「NUL 分隔输出」两行）。
+- 2026-06-05 `2d471be`（`feat(grep): add --heading/--no-heading, --break, and -z/--null output formats`）：曾添加 `--heading`/`--no-heading`、`--break` 与 `-z`/`--null` 输出格式；该批改动一度被 `900c062`（`Update integration`）回退，现已重新实现并补齐集成测试（见「当前状态」与缺口表中标记为「✅ 已实现」的三行）。
 - 2026-06-05 `e8151a5`（`feat(grep): add -a/--text and -I binary-file handling`）：曾添加 `-a`/`--text` 与 `-I` 二进制文件处理；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「强制文本搜索」「忽略二进制文件」两行）。
 - 2026-06-05 `3e17784`（`feat(grep): accept -E/-G as regex aliases and decline -P/--perl-regexp (129)`）：曾添加 `-E`/`-G` 正则别名并以 129 退出拒绝 `-P`/`--perl-regexp`；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「扩展正则」「Perl 正则」两行）。
 - 2026-06-07 `6d60ee03`（`fix(grep): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
@@ -51,7 +51,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/grep.md`。
 - Synopsis：`libra grep [<options>] [<pattern>] [<pathspec>...]`。
-- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached` 等。
+- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached`、`--heading`/`--no-heading`、`--break`/`--no-break`、`-z, --null` 等。
 
 
 ## 还未实现的功能
@@ -65,8 +65,9 @@ flowchart TD
 | 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 搜索未跟踪文件 | 原始对照：不支持；相关参数/替代：--untracked；当前说明：`01997f50` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 无仓库文件系统搜索 | 原始对照：不支持；相关参数/替代：--no-index；当前说明：`0e22f00d` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 文件名分组标题 | 原始对照：不支持；相关参数/替代：--heading / --no-heading；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | NUL 分隔输出 | 原始对照：不支持；相关参数/替代：-z / --null；当前说明：`2d471be` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 文件名分组标题 `--heading`/`--no-heading` | 已重新实现：`--heading` 把文件名作为独立标题行打印，匹配行去掉每行文件名前缀；`--no-heading` 为默认。带集成测试（`test_grep_heading_groups_matches_under_file_name`）。 |
+| ✅ 已实现 | 文件分组空行 `--break`/`--no-break` | 已实现：`--break` 在不同文件的匹配之间插入空行（保留每行前缀，与 Git 一致）；`--no-break` 为默认。带集成测试（`test_grep_break_inserts_blank_line_between_files`）。 |
+| ✅ 已实现 | NUL 分隔输出 `-z`/`--null` | 已重新实现：所有字段分隔符（文件名、行号）改为 NUL，行仍以换行结束；`-lz`/`-Lz` 用 NUL 终止文件名且不输出换行，`-cz` 输出 `path\0count`。带集成测试（`test_grep_null_separates_fields_with_nul_byte`）。 |
 | ✅ 已实现 | 强制文本搜索 `-a`/`--text` | 已重新实现：跳过二进制检测，将二进制文件按文本（UTF-8 lossy）搜索。 |
 | ✅ 已实现（默认行为） | 忽略二进制文件 `-I` | 已重新实现：作为兼容标志接受；二进制文件默认即跳过，`-I` 显式表达该默认。 |
 
