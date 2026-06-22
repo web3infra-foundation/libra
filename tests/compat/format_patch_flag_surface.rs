@@ -51,6 +51,8 @@ fn format_patch_help_lists_expected_flags() {
         "--full-index",
         "--no-stat",
         "--keep-subject",
+        "--suffix",
+        "--zero-commit",
         "revision-range",
     ] {
         assert!(

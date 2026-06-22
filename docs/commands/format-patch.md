@@ -39,6 +39,7 @@ commits, the command exits with an error.
 | `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
 | `--suffix <SFX>` | | Filename suffix for generated patches (e.g. `.txt`) | `.patch` |
+| `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
 
 ## Examples
 

@@ -713,3 +713,48 @@ fn suffix_changes_patch_filename_extension() {
         "no .patch files when --suffix=.txt: {names:?}"
     );
 }
+
+#[test]
+#[serial]
+fn zero_commit_zeroes_the_envelope_hash() {
+    let repo = repo_with_commits(1);
+
+    let output = run_libra_command(
+        &["format-patch", "--zero-commit", "--stdout", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "format-patch --zero-commit");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().unwrap_or("");
+    let hash_field = first
+        .strip_prefix("From ")
+        .and_then(|s| s.split(' ').next())
+        .unwrap_or("");
+    assert!(
+        !hash_field.is_empty() && hash_field.chars().all(|c| c == '0'),
+        "--zero-commit must zero the envelope hash: {first:?}"
+    );
+
+    // Without --zero-commit the envelope uses the real commit hash.
+    let def = run_libra_command(&["format-patch", "--stdout", "HEAD~1..HEAD"], repo.path());
+    let def_first_line = String::from_utf8_lossy(&def.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let def_hash = def_first_line
+        .strip_prefix("From ")
+        .and_then(|s| s.split(' ').next())
+        .unwrap_or("");
+    assert!(
+        def_hash.chars().any(|c| c != '0'),
+        "default envelope must use the real hash: {def_first_line:?}"
+    );
+    // The zero hash must span the full hash width (40 hex for SHA-1, 64 for
+    // SHA-256), not a single `0`.
+    assert_eq!(
+        hash_field.len(),
+        def_hash.len(),
+        "zeroed envelope hash must match the real hash width: {hash_field:?} vs {def_hash:?}"
+    );
+}

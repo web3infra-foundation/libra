@@ -50,7 +50,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `format_patch`，`src/cli.rs::Commands::FormatPatch` 负责 CLI 接入。
 - 用户文档：`docs/commands/format-patch.md`。
 - Synopsis：`libra format-patch [OPTIONS] [revision-range]`。
-- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`。
+- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`、`--zero-commit`。
 
 ## 还未实现的功能
 
@@ -65,7 +65,7 @@ flowchart TD
 | Git flag | `--notes[=<ref>]` / `--no-notes`（在补丁中附加 notes） | 未公开；需集成 notes 子系统。命令层。 |
 | Git flag | `--encode-email-headers`（QP 编码非 ASCII 邮件头） | 未公开；当前头直接使用 UTF-8。命令层。 |
 | Git flag | `--force`（强制覆盖已有文件） | 未公开；当前遇到同名文件直接覆盖。命令层。 |
-| Git flag | `--zero-commit`（为根提交输出全零 hash） | 未公开；当前根提交的 `From ` 行使用真实 hash。命令层。 |
+| ✅ 已实现 | `--zero-commit`（每个补丁的 `From <hash>` 信封行输出全零 hash） | 已公开：`format_patch_body` 按 `commit.id` 的十六进制长度生成全零串，仅替换信封行（其余补丁内容不变），与 `git format-patch` 一致。带集成测试（`zero_commit_zeroes_the_envelope_hash`）。 |
 | 行为差异 | 合并提交默认跳过，无可选 `--diff-merges` 参数 | 当前实现直接在范围解析时过滤掉所有多父提交。 |
 | 兼容矩阵 | `COMPATIBILITY.md` 已登记该命令。 | 已纳入用户可见兼容矩阵和矩阵守卫。 |
 | CLI 接入 | `src/cli.rs::Commands::FormatPatch` 已公开。 | 已接入 CLI；后续扩展参数时同步文档、矩阵和测试。 |

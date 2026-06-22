@@ -132,6 +132,11 @@ pub struct FormatPatchArgs {
     /// Filename suffix for generated patches (default ".patch"); e.g. ".txt".
     #[arg(long = "suffix", value_name = "SFX", default_value = ".patch")]
     pub suffix: String,
+
+    /// Output an all-zero hash in each patch's "From <hash>" line instead of
+    /// the commit hash (stable output for testing/reproducibility).
+    #[arg(long = "zero-commit")]
+    pub zero_commit: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -413,9 +418,16 @@ async fn format_patch_body(
 
     // ---- "From " mbox envelope ----
     let ts = timestamp_from_commit(commit);
+    // `--zero-commit` zeroes only this envelope hash (matching its hex length),
+    // leaving the rest of the patch untouched, like `git format-patch`.
+    let envelope_hash = if args.zero_commit {
+        "0".repeat(commit.id.to_string().len())
+    } else {
+        commit.id.to_string()
+    };
     out.push_str(&format!(
         "From {} {}\n",
-        commit.id,
+        envelope_hash,
         ts.format("%a %b %e %H:%M:%S %Y")
     ));
 
