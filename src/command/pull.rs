@@ -25,6 +25,7 @@ EXAMPLES:
     libra pull --ff-only                   Refuse to create a merge commit
     libra pull --no-ff                     Always create a merge commit
     libra pull --rebase                    Rebase the current branch onto the upstream
+    libra pull --commit                    Force a merge commit (override a prior --no-commit)
     libra pull --depth 1                   Shallow-fetch then integrate
     libra pull --json                      Structured JSON output for agents
     libra pull --quiet                     Suppress progress output
@@ -76,8 +77,12 @@ pub struct PullArgs {
     squash: bool,
 
     /// Perform the merge but stop before committing, recording merge state
-    #[clap(long = "no-commit", conflicts_with_all = ["rebase", "squash"])]
+    #[clap(long = "no-commit", conflicts_with_all = ["rebase", "squash"], overrides_with = "commit")]
     no_commit: bool,
+
+    /// Force a merge commit, overriding an earlier --no-commit (the default; last one wins).
+    #[clap(long, conflicts_with_all = ["rebase", "squash"], overrides_with = "no_commit")]
+    commit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +207,7 @@ impl PullArgs {
             depth: None,
             squash: false,
             no_commit: false,
+            commit: false,
         }
     }
 }
@@ -716,6 +722,27 @@ mod tests {
         // `--depth` is fetch-only and rejected on the rebase path's flag set only
         // when combined with rebase; a plain `--depth` still parses.
         assert!(PullArgs::try_parse_from(["pull", "--depth", "2"]).is_ok());
+    }
+
+    #[test]
+    fn commit_flag_conflicts_and_last_one_wins() {
+        // `--commit` forces a merge commit; it is the default, so a bare
+        // `--commit` parses with no_commit cleared.
+        let c = PullArgs::try_parse_from(["pull", "--commit"]).expect("--commit should parse");
+        assert!(c.commit && !c.no_commit);
+
+        // Mirrors Git: `--squash`/`--commit` and `--rebase`/`--commit` conflict.
+        assert!(PullArgs::try_parse_from(["pull", "--commit", "--squash"]).is_err());
+        assert!(PullArgs::try_parse_from(["pull", "--commit", "--rebase"]).is_err());
+
+        // `--commit` and `--no-commit` are last-one-wins (Git semantics), so the
+        // effective `no_commit` (which the merge path reads) reflects the final flag.
+        let on = PullArgs::try_parse_from(["pull", "--no-commit", "--commit"])
+            .expect("--no-commit --commit should parse");
+        assert!(!on.no_commit, "trailing --commit must clear --no-commit");
+        let off = PullArgs::try_parse_from(["pull", "--commit", "--no-commit"])
+            .expect("--commit --no-commit should parse");
+        assert!(off.no_commit, "trailing --no-commit must win");
     }
 
     #[test]

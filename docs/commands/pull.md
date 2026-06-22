@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--rebase] [--depth <n>] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -24,9 +24,9 @@ When invoked with no arguments, the command reads the current branch tracking co
 
 Pull supports already-up-to-date, fast-forward, and single-head three-way merge results. If the local and remote branches conflict, pull returns the merge-owned `LBR-CONFLICT-002` error with `phase: "merge"` and leaves the same merge state that `libra merge` uses. Resolve conflicts with `libra add <path>` and `libra merge --continue`, or run `libra merge --abort`.
 
-With `--squash`, pull fetches and computes the merge but stages the merged tree without creating a commit or moving `HEAD`, leaving the result ready for a plain `libra commit` (mirroring `git pull --squash`). With `--no-commit`, pull performs the merge and stages the result but stops before committing, recording merge state so the two-parent commit can be finalized with `libra merge --continue`. `--squash` and `--no-commit` conflict with each other and with `--rebase`.
+With `--squash`, pull fetches and computes the merge but stages the merged tree without creating a commit or moving `HEAD`, leaving the result ready for a plain `libra commit` (mirroring `git pull --squash`). With `--no-commit`, pull performs the merge and stages the result but stops before committing, recording merge state so the two-parent commit can be finalized with `libra merge --continue`. `--squash` and `--no-commit` conflict with each other and with `--rebase`. `--commit` forces a merge commit (the default merge behavior) and is last-one-wins with `--no-commit` (the final flag on the command line decides); it conflicts with `--squash` and `--rebase`, matching `git pull --commit`.
 
-`pull` does not yet implement `--commit` (force-commit override) or `--autostash`. These depend on the autostash state machine that is not present in the current build; they are documented as deferred rather than silently degraded.
+`pull` does not yet implement `--autostash`. It depends on the autostash state machine that is not present in the current build; it is documented as deferred rather than silently degraded.
 
 ## Options
 
@@ -39,6 +39,7 @@ With `--squash`, pull fetches and computes the merge but stages the merged tree 
 | `--no-ff` | Always create a merge commit even when a fast-forward is possible. Conflicts with `--ff`, `--ff-only`, `--rebase`. | `libra pull --no-ff` |
 | `--squash` | Stage the merged tree without committing or moving `HEAD`, leaving the result for a plain `libra commit`. Conflicts with `--no-commit`, `--rebase`. | `libra pull --squash` |
 | `--no-commit` | Merge and stage but stop before committing, recording merge state to finalize with `libra merge --continue`. Conflicts with `--squash`, `--rebase`. | `libra pull --no-commit` |
+| `--commit` | Force a merge commit (the default); last-one-wins with `--no-commit`. Conflicts with `--squash`, `--rebase`. | `libra pull --commit` |
 | `--depth <n>` | Limit the fetch phase to a shallow history of `n` commits per tip. Conflicts with `--rebase`. | `libra pull --depth 1` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
@@ -187,7 +188,8 @@ Rebase output omits `merge` and includes `rebase`:
 | Shallow pull | `libra pull --depth 1` | `git pull --depth 1` | N/A |
 | Squash | `libra pull --squash` | `git pull --squash` | N/A |
 | No-commit | `libra pull --no-commit` (finalize with `libra merge --continue`) | `git pull --no-commit` | N/A |
-| Force-commit override / autostash | Not supported (deferred — needs autostash state machine) | `git pull --commit` / `--autostash` | N/A |
+| Force-commit override | `libra pull --commit` (last-one-wins with `--no-commit`) | `git pull --commit` | N/A |
+| Autostash | Not supported (deferred — needs autostash state machine) | `git pull --autostash` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Phase diagnostics | `phase` detail in error JSON | No | No |
 

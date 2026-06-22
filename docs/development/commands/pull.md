@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。fetch + fast-forward/three-way merge supported; `--ff-only`、`--rebase`、`--no-ff`、`--ff` 与 fetch `--depth` exposed; `--squash` / `--commit` / `--no-commit` / `--autostash` strategy flags 仍未公开（依赖尚未恢复的 merge 引擎能力）
+- 兼容级别：`partial`。fetch + fast-forward/three-way merge supported; `--ff-only`、`--rebase`、`--no-ff`、`--ff`、fetch `--depth`、`--squash`、`--no-commit` 与 `--commit` exposed; `--autostash` strategy flag 仍未公开（依赖尚未实现的 autostash 状态机）
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -48,15 +48,16 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/pull.md`。
 - Synopsis：`libra pull [--ff-only] [--ff] [--no-ff] [--rebase] [--depth <n>] [<repository> [<refspec>]]`。
-- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`、`--ff`、`--no-ff`、`--depth <n>`。
+- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`、`--ff`、`--no-ff`、`--depth <n>`、`--squash`、`--no-commit`、`--commit`。
+- `--commit`：强制生成 merge commit（merge 模式的默认行为）；与 `--no-commit` 互为 last-one-wins（命令行最后出现者生效，复用既有 `no_commit` 透传，无新逻辑），与 `--squash`/`--rebase` 冲突（对齐 Git `merge --squash --commit` 报错）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `--ff-only` / `-r,--rebase` / `--ff` / `--no-ff`、fetch `--depth`、`--squash` 与 `--no-commit` 已公开并生效（`--no-ff` 强制生成 merge commit，`--depth` 透传到 fetch 浅历史，`--squash` 暂存合并树但不提交、不移动 HEAD，`--no-commit` 合并后暂停并记录 merge state，由 `libra merge --continue` 收尾）；`--commit`（强制提交覆盖）/ `--autostash` 仍未公开 | `--squash` / `--no-commit` 透传到 `merge::PullMergeOptions` 并复用 merge 引擎逻辑；`--commit` / `--autostash` 依赖尚未实现的 autostash 状态机，暂不在 `PullArgs` 中暴露，实现后再同步 `COMPATIBILITY.md` 与测试。 |
-| 兼容差异项 | Force-commit override / Autostash | 原始对照：不支持；相关参数/替代：git pull --commit / --autostash；当前说明：依赖尚未实现的 autostash 状态机，待其落地后补齐。 |
+| ✅ 已实现 | `--ff-only` / `-r,--rebase` / `--ff` / `--no-ff`、fetch `--depth`、`--squash`、`--no-commit`、`--commit` 已公开并生效（`--no-ff` 强制生成 merge commit，`--depth` 透传到 fetch 浅历史，`--squash` 暂存合并树但不提交、不移动 HEAD，`--no-commit` 合并后暂停并记录 merge state 由 `libra merge --continue` 收尾，`--commit` 强制提交、与 `--no-commit` last-one-wins） | `--squash` / `--no-commit` 透传到 `merge::PullMergeOptions`；`--commit` 通过 clap `overrides_with` 清除 `--no-commit`（无新逻辑，merge 路径仍读 `no_commit`），带单元测试（`commit_flag_conflicts_and_last_one_wins`）。 |
+| 兼容差异项 | Autostash | 原始对照：不支持；相关参数/替代：git pull --autostash；当前说明：依赖尚未实现的 autostash 状态机，待其落地后补齐。 |
 
 ## 维护要求
 
