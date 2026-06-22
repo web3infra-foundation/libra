@@ -794,3 +794,58 @@ async fn test_for_each_ref_refname_lstrip_rstrip() {
     );
     assert_eq!(f("lstrip=5"), "", "lstrip beyond depth yields empty");
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_contents_and_body_atoms() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    // A commit with a subject and a body paragraph (single message with a
+    // blank-line separator).
+    std::fs::write(p.join("x.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "x.txt"], p), "add x.txt");
+    // `--cleanup=verbatim` preserves the blank line separating subject/body
+    // (the default cleanup would collapse it).
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "-m",
+                "the subject\n\nthe body",
+                "--cleanup=verbatim",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "commit subject+body",
+    );
+
+    let field = |spec: &str| {
+        let fmt = format!("--format=[%({spec})]");
+        let out = run_libra_command(&["for-each-ref", "--heads", &fmt], p);
+        assert_cli_success(&out, spec);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // %(contents:subject) is the subject only.
+    let subj = field("contents:subject");
+    assert!(subj.contains("the subject"), "subject present: {subj:?}");
+    assert!(
+        !subj.contains("the body"),
+        "subject excludes body: {subj:?}"
+    );
+    // %(body) is the body only.
+    let body = field("body");
+    assert!(body.contains("the body"), "body present: {body:?}");
+    assert!(
+        !body.contains("the subject"),
+        "body excludes subject: {body:?}"
+    );
+    // %(contents) has both.
+    let contents = field("contents");
+    assert!(
+        contents.contains("the subject") && contents.contains("the body"),
+        "contents has subject and body: {contents:?}"
+    );
+}

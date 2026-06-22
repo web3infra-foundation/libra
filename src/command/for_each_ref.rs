@@ -535,8 +535,12 @@ fn render_format(
     // Commit-field atoms (`%(subject)`, author/committer name+email) require
     // loading the ref's object. Load it once, only when at least one such atom
     // is present, to avoid extra object reads.
-    const COMMIT_FIELD_ATOMS: [&str; 10] = [
+    const COMMIT_FIELD_ATOMS: [&str; 14] = [
         "%(subject)",
+        "%(contents)",
+        "%(contents:subject)",
+        "%(body)",
+        "%(contents:body)",
         "%(authorname)",
         "%(authoremail)",
         "%(authordate)",
@@ -555,11 +559,15 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 18] = [
+    let atoms: [(&str, &str); 22] = [
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
         ("subject", fields.subject.as_str()),
+        ("contents:subject", fields.subject.as_str()),
+        ("contents:body", fields.body.as_str()),
+        ("contents", fields.contents.as_str()),
+        ("body", fields.body.as_str()),
         ("authorname", fields.author_name.as_str()),
         ("authoremail", fields.author_email.as_str()),
         ("authordate", fields.author_date.as_str()),
@@ -613,6 +621,11 @@ fn unsupported_atom_error() -> CliError {
 #[derive(Default)]
 struct CommitFields {
     subject: String,
+    /// Full message (`%(contents)`): gpgsig-stripped for commits, the raw
+    /// message for annotated tags.
+    contents: String,
+    /// Message body (`%(body)`): everything after the first blank line.
+    body: String,
     author_name: String,
     author_email: String,
     committer_name: String,
@@ -632,16 +645,21 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
     match entry.objecttype.as_str() {
         "commit" => match load_object::<Commit>(&hash) {
             // Strip a leading `gpgsig`/`gpgsig-sha256` header before the subject.
-            Ok(c) => CommitFields {
-                subject: first_subject_line(parse_commit_msg(&c.message).0),
-                author_name: c.author.name.clone(),
-                author_email: format!("<{}>", c.author.email),
-                committer_name: c.committer.name.clone(),
-                committer_email: format!("<{}>", c.committer.email),
-                author_date: format_timestamp_with(c.author.timestamp as i64, ""),
-                committer_date: format_timestamp_with(c.committer.timestamp as i64, ""),
-                ..CommitFields::default()
-            },
+            Ok(c) => {
+                let contents = parse_commit_msg(&c.message).0.to_string();
+                CommitFields {
+                    subject: first_subject_line(&contents),
+                    body: message_body(&contents),
+                    contents,
+                    author_name: c.author.name.clone(),
+                    author_email: format!("<{}>", c.author.email),
+                    committer_name: c.committer.name.clone(),
+                    committer_email: format!("<{}>", c.committer.email),
+                    author_date: format_timestamp_with(c.author.timestamp as i64, ""),
+                    committer_date: format_timestamp_with(c.committer.timestamp as i64, ""),
+                    ..CommitFields::default()
+                }
+            }
             Err(_) => CommitFields::default(),
         },
         // Annotated tags have a message (subject) and a tagger, but no
@@ -649,6 +667,8 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
         "tag" => match load_object::<GitTag>(&hash) {
             Ok(t) => CommitFields {
                 subject: first_subject_line(&t.message),
+                body: message_body(&t.message),
+                contents: t.message.clone(),
                 tagger_name: t.tagger.name.clone(),
                 tagger_email: format!("<{}>", t.tagger.email),
                 tagger_date: format_timestamp_with(t.tagger.timestamp as i64, ""),
@@ -670,6 +690,17 @@ fn first_subject_line(message: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Message body for `%(body)`: everything after the first blank line that
+/// separates the subject from the body (empty when there is no body), matching
+/// `git for-each-ref`.
+fn message_body(message: &str) -> String {
+    message
+        .trim_start_matches('\n')
+        .split_once("\n\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
 }
 
 /// The `:short` form of a ref name: strip the well-known namespace prefix
