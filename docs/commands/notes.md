@@ -4,14 +4,15 @@ Historical design for adding, showing, listing, or removing notes attached to
 commits without modifying the commits themselves.
 
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
-> operations (`add`, `list`, `show`, `remove`) are supported. Advanced Git notes
-> subcommands (`append`, `edit`, `copy`, `merge`, `prune`, `get-ref`) and interactive
-> editor support are not implemented.
+> operations (`add`, `append`, `list`, `show`, `remove`) are supported. Advanced
+> Git notes subcommands (`edit`, `copy`, `merge`, `prune`, `get-ref`) and
+> interactive editor support are not implemented.
 
 ## Synopsis
 
 ```
 libra notes add [-m <message> | -F <file>] [-f] [<object>]
+libra notes append [-m <message> | -F <file>] [<object>]
 libra notes list [<object>]
 libra notes show [<object>]
 libra notes remove [<object>...]
@@ -45,6 +46,7 @@ If this command is published in a future release, omitting a subcommand should d
 | Subcommand | Description |
 |------------|-------------|
 | `add` | Add a note to an object. Fails if a note already exists; use `-f` to overwrite. Requires `-m` or `-F`. |
+| `append` | Append a message to an object's note (separated by a blank line), creating the note if absent. Requires `-m` or `-F`. |
 | `list` | List note objects and the commits they annotate (default subcommand). |
 | `show` | Show the note text for an object. |
 | `remove` | Remove notes for one or more objects. |
@@ -60,6 +62,9 @@ libra notes add -F review-summary.txt abc1234
 
 # Force-overwrite an existing note
 libra notes add -m "Updated review" -f HEAD
+
+# Append another line to HEAD's note (blank-line separated)
+libra notes append -m "Deployed-by: CI"
 
 # List all notes
 libra notes list
@@ -183,14 +188,13 @@ invocations — editors assume an interactive user and are incompatible with
 headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
 for note creation.
 
-### Why no `append`, `edit`, `copy`, `merge`, `prune`, `get-ref`?
+### Why no `edit`, `copy`, `merge`, `prune`, `get-ref`?
 
 These Git subcommands add complexity for niche or collaborative workflows.
-The four core operations (`add`, `list`, `show`, `remove`) cover the primary
-use case: attaching structured metadata to commits. Missing subcommands can be
-emulated: `edit` is `remove` + `add`, `append` is `show` + `add` with
-concatenation. Additional subcommands can be added incrementally if real users
-or agents need them.
+The core operations (`add`, `append`, `list`, `show`, `remove`) cover the
+primary use case: attaching structured metadata to commits. The remaining
+subcommands can be emulated (`edit` is `remove` + `add`) and added incrementally
+if real users or agents need them.
 
 ### Why SQLite-backed notes refs?
 
@@ -207,7 +211,8 @@ scan), and concurrency safety via SQLite WAL mode.
 | List notes | `git notes list [<obj>]` | `libra notes list [<obj>]` | N/A |
 | Show note | `git notes show [<obj>]` | `libra notes show [<obj>]` | N/A |
 | Remove note | `git notes remove [<obj>...]` | `libra notes remove [<obj>...]` | N/A |
-| Append / Edit / Copy / Merge / Prune | Supported | Not supported | N/A |
+| Append | `notes append` | Supported | N/A |
+| Edit / Copy / Merge / Prune | Supported | Not supported | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
 | Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |

@@ -1224,3 +1224,52 @@ fn error_json_show_not_found_on_clean_repo() {
         report["hints"]
     );
 }
+
+#[test]
+fn notes_append_concatenates_to_existing_note() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "first line"], p),
+        "notes add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["notes", "append", "-m", "second line"], p),
+        "notes append",
+    );
+
+    let show = run_libra_command(&["notes", "show"], p);
+    assert_cli_success(&show, "notes show after append");
+    let text = String::from_utf8_lossy(&show.stdout);
+    // Existing note + blank line + appended message.
+    assert!(
+        text.contains("first line") && text.contains("second line"),
+        "appended note keeps both messages: {text:?}"
+    );
+    let first = text.find("first line").unwrap();
+    let second = text.find("second line").unwrap();
+    assert!(first < second, "append order preserved: {text:?}");
+    assert!(
+        text[first..second].contains("\n\n"),
+        "messages separated by a blank line: {text:?}"
+    );
+}
+
+#[test]
+fn notes_append_creates_note_when_absent() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // No prior note: append behaves like add.
+    assert_cli_success(
+        &run_libra_command(&["notes", "append", "-m", "fresh note"], p),
+        "notes append (no existing note)",
+    );
+    let show = run_libra_command(&["notes", "show"], p);
+    assert_cli_success(&show, "notes show after append-create");
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains("fresh note"),
+        "append created the note"
+    );
+}

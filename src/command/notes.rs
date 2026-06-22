@@ -15,6 +15,7 @@ use crate::{
 pub const NOTES_EXAMPLES: &str = "\
 EXAMPLES:
     libra notes add -m \"Reviewed-by: Alice\"         Add a note to HEAD
+    libra notes append -m \"Deployed-by: CI\"         Append a line to HEAD's note
     libra notes show                                  Show the note on HEAD
     libra notes list                                  List all notes
     libra notes remove abc1234                        Remove a note
@@ -52,6 +53,20 @@ pub enum NotesSubcommand {
         #[clap(short, long)]
         force: bool,
     },
+    /// Append to an object's note (creating it if absent)
+    Append {
+        /// Object to annotate (defaults to HEAD)
+        #[clap(required = false)]
+        object: Option<String>,
+
+        /// Note message text (repeatable; blank lines separate messages)
+        #[clap(short, long)]
+        message: Vec<String>,
+
+        /// Read note message from file (- for stdin)
+        #[clap(short = 'F', long)]
+        file: Vec<String>,
+    },
     /// List note objects and the commits they annotate
     List {
         /// Object to list notes for (omit to list all)
@@ -77,6 +92,13 @@ pub enum NotesSubcommand {
 pub enum NotesOutput {
     #[serde(rename = "add")]
     Add {
+        #[serde(rename = "ref")]
+        notes_ref: String,
+        object: String,
+        note_hash: String,
+    },
+    #[serde(rename = "append")]
+    Append {
         #[serde(rename = "ref")]
         notes_ref: String,
         object: String,
@@ -159,6 +181,33 @@ pub async fn execute_safe(
             .await
             .map_err(NotesCliError::from)?;
             let out = NotesOutput::Add {
+                notes_ref: result.notes_ref,
+                object: result.object,
+                note_hash: result.note_hash,
+            };
+            render_output(&out, output)?;
+        }
+        NotesSubcommand::Append {
+            object,
+            message: _,
+            file: _,
+        } => {
+            let target = object.as_deref().unwrap_or("HEAD");
+            let new_content = build_note_content(argv)?;
+            // Concatenate after the existing note (separated by a blank line),
+            // or create a fresh note when the object has none — matching Git.
+            let content = match notes::show(notes_ref, Some(target)).await {
+                Ok((_, _, existing)) if !existing.trim().is_empty() => {
+                    format!("{}\n\n{}", existing.trim_end_matches('\n'), new_content)
+                }
+                Ok(_) | Err(notes::NotesError::NotFound { .. }) => new_content,
+                Err(err) => return Err(NotesCliError::from(err).into()),
+            };
+            // `force` overwrites the ref with the concatenated note.
+            let result = notes::add(notes_ref, target, &content, true)
+                .await
+                .map_err(NotesCliError::from)?;
+            let out = NotesOutput::Append {
                 notes_ref: result.notes_ref,
                 object: result.object,
                 note_hash: result.note_hash,
@@ -320,6 +369,17 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
         } => {
             println!(
                 "Added note to {} in {}",
+                short_display_hash(object),
+                notes_ref
+            );
+        }
+        NotesOutput::Append {
+            notes_ref,
+            object,
+            note_hash: _,
+        } => {
+            println!(
+                "Appended to note for {} in {}",
                 short_display_hash(object),
                 notes_ref
             );
