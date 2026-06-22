@@ -30,6 +30,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `%(HEAD)` | `*` if the ref is the currently checked-out branch, otherwise a space |
 | `%(upstream)` | The branch's upstream tracking ref (e.g. `refs/remotes/origin/main`); empty when none |
 | `%(upstream:short)` | The upstream ref with the `refs/remotes/` prefix stripped (e.g. `origin/main`) |
+| `%(subject)` | First line of the ref object's message (commit or annotated-tag message); empty for trees/blobs |
 
 ## Options
 
@@ -39,7 +40,7 @@ The `--format` option accepts a simple atom language. Supported atoms:
 | `--tags` | List tag refs under `refs/tags/`. |
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
-| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`. |
+| `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(subject)`. |
 | `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |

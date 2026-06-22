@@ -590,3 +590,56 @@ async fn test_for_each_ref_upstream_atom() {
         "branch without upstream has empty %(upstream): {s:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_subject_atom() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await; // commits with subject "initial"
+    let p = temp.path();
+
+    // %(subject) renders the first line of the commit message.
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(refname:short)|%(subject)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(subject)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l == "main|initial"),
+        "subject for main's commit should be 'initial': {s:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_subject_with_percent_paren_is_literal() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    // A commit whose subject itself contains `%(` must NOT be re-parsed as a
+    // format atom nor trip the unknown-atom error.
+    std::fs::write(p.join("x.txt"), "x\n").unwrap();
+    run_libra_command(&["add", "x.txt"], p);
+    run_libra_command(&["commit", "-m", "fix %(weird) thing", "--no-verify"], p);
+
+    let out = run_libra_command(&["for-each-ref", "--heads", "--format=%(subject)"], p);
+    assert_cli_success(&out, "for-each-ref %(subject) with %( in subject");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines().any(|l| l == "fix %(weird) thing"),
+        "subject containing %( must render literally: {s:?}"
+    );
+
+    // A genuinely unknown atom still errors.
+    let bad = run_libra_command(&["for-each-ref", "--heads", "--format=%(bogus)"], p);
+    assert!(
+        !bad.status.success(),
+        "unknown atom should fail: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}

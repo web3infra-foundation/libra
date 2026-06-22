@@ -3,10 +3,15 @@
 use std::{collections::HashMap, str::FromStr};
 
 use clap::Parser;
-use git_internal::hash::ObjectHash;
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, tag::Tag as GitTag},
+};
 use serde::Serialize;
 
 use crate::{
+    command::load_object,
+    common_utils::parse_commit_msg,
     internal::{branch::Branch, config::ConfigKv, head::Head, tag},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -525,26 +530,79 @@ fn render_format(
         .map(String::as_str)
         .unwrap_or("");
     let upstream_short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
-    let mut out = format.to_string();
-    for (atom, value) in [
-        ("%(HEAD)", head_marker),
-        ("%(upstream:short)", upstream_short),
-        ("%(upstream)", upstream),
-        ("%(refname:short)", refname_short.as_str()),
-        ("%(objectname:short)", objectname_short.as_str()),
-        ("%(refname)", entry.refname.as_str()),
-        ("%(objectname)", entry.objectname.as_str()),
-        ("%(objecttype)", entry.objecttype.as_str()),
-    ] {
-        out = out.replace(atom, value);
+    // `%(subject)`: first line of the ref object's message (commit or tag),
+    // loaded lazily only when the atom is present to avoid extra object reads.
+    let subject = if format.contains("%(subject)") {
+        subject_for(entry)
+    } else {
+        String::new()
+    };
+    // Atom name (inside `%(...)`) -> value. Single-pass substitution below
+    // writes each value literally, so a value containing `%(` is never
+    // re-parsed as an atom and never trips the unknown-atom check.
+    let atoms: [(&str, &str); 9] = [
+        ("HEAD", head_marker),
+        ("upstream:short", upstream_short),
+        ("upstream", upstream),
+        ("subject", subject.as_str()),
+        ("refname:short", refname_short.as_str()),
+        ("objectname:short", objectname_short.as_str()),
+        ("refname", entry.refname.as_str()),
+        ("objectname", entry.objectname.as_str()),
+        ("objecttype", entry.objecttype.as_str()),
+    ];
+    let mut out = String::with_capacity(format.len());
+    let mut rest = format;
+    while let Some(pos) = rest.find("%(") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos..];
+        let Some(end) = after.find(')') else {
+            return Err(unsupported_atom_error());
+        };
+        let token = &after[2..end];
+        match atoms.iter().find(|(name, _)| *name == token) {
+            Some((_, value)) => out.push_str(value),
+            None => return Err(unsupported_atom_error()),
+        }
+        rest = &after[end + 1..];
     }
-    if out.contains("%(") {
-        return Err(
-            CliError::command_usage("unsupported for-each-ref format atom")
-                .with_stable_code(StableErrorCode::CliInvalidArguments),
-        );
-    }
+    out.push_str(rest);
     Ok(out)
+}
+
+fn unsupported_atom_error() -> CliError {
+    CliError::command_usage("unsupported for-each-ref format atom")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+/// First line of the ref object's message for `%(subject)`. Reads the commit
+/// (for refs pointing at a commit) or the annotated tag object's message;
+/// empty for trees/blobs or when the object cannot be loaded.
+fn subject_for(entry: &RefEntry) -> String {
+    let Ok(hash) = ObjectHash::from_str(&entry.objectname) else {
+        return String::new();
+    };
+    let message = match entry.objecttype.as_str() {
+        // Strip a leading `gpgsig` header from signed commits so the subject is
+        // the real first message line, not the signature.
+        "commit" => load_object::<Commit>(&hash)
+            .ok()
+            .map(|c| parse_commit_msg(&c.message).0.to_string()),
+        "tag" => load_object::<GitTag>(&hash).ok().map(|t| t.message),
+        _ => None,
+    };
+    // Commit/tag messages can carry leading newlines from the header separator;
+    // strip them before taking the subject (first non-empty line).
+    message
+        .map(|m| {
+            m.trim_start_matches('\n')
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 /// The `:short` form of a ref name: strip the well-known namespace prefix
