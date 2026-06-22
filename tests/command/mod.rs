@@ -298,6 +298,7 @@ mod describe_test;
 mod diff_test;
 mod fetch_test;
 mod for_each_ref_test;
+mod format_patch_test;
 mod fsck_test;
 mod graph_test;
 mod grep_test;

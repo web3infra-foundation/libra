@@ -32,7 +32,7 @@ const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, worktree
-  History Inspection      log, shortlog, show, show-ref, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
+  History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
@@ -330,6 +330,11 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(
+        about = "Generate mbox-formatted patch files from commits",
+        after_help = command::format_patch::FORMAT_PATCH_EXAMPLES
+    )]
+    FormatPatch(command::format_patch::FormatPatchArgs),
     #[command(
         about = "Iterate over refs in a local repository with formatting and filtering",
         after_help = command::for_each_ref::FOR_EACH_REF_EXAMPLES
@@ -1211,6 +1216,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::FormatPatch(cmd_args) => {
+            command::format_patch::execute_safe(cmd_args, &output).await?
+        }
         Commands::ForEachRef(cmd_args) => {
             command::for_each_ref::execute_safe(cmd_args, &output).await?
         }

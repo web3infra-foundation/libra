@@ -31,6 +31,7 @@ pub mod diff;
 pub mod editor;
 pub mod fetch;
 pub mod for_each_ref;
+pub mod format_patch;
 pub mod fsck;
 pub mod graph;
 pub mod grep;
