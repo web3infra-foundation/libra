@@ -83,6 +83,11 @@ pub struct LsFilesArgs {
     #[clap(short = 'u', long)]
     pub unmerged: bool,
 
+    /// Force repository-root-relative paths. Accepted for Git compatibility;
+    /// Libra always prints repo-root-relative paths, so this is a no-op
+    #[clap(long)]
+    pub full_name: bool,
+
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
     pub pathspec: Vec<String>,

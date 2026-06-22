@@ -19,7 +19,8 @@ This public compatibility slice supports cached listing, modified/deleted
 filters, stage-style output, untracked listing, `.libraignore`-aware filtering
 via `--others --exclude-standard`, repository-local pathspec filtering,
 `--error-unmatch`, NUL-delimited text output via `-z`, status tags via
-`-t`, and unmerged-only listing via `-u` / `--unmerged`.
+`-t`, and unmerged-only listing via `-u` / `--unmerged`. `--full-name` is
+accepted as a no-op (Libra always prints repo-root-relative paths).
 
 Pathspecs are resolved from the caller's current working directory, not forced
 to the repository root. Exact-file and directory-prefix filtering are both
@@ -38,6 +39,7 @@ integration remain deferred.
 | `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
 | `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged). |
 | `-u`, `--unmerged` | Show only unmerged (conflict) entries — index stages 1/2/3 — in stage-style output. |
+| `--full-name` | Accepted for Git compatibility. Libra always prints repo-root-relative paths (the `git --full-name` form), so this is a no-op. |
 | `--others` | Show untracked working-tree files. |
 | `--exclude-standard` | With `--others`, honor `.libraignore` rules. |
 | `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
@@ -131,3 +133,4 @@ entries use `null` for fields that do not apply:
 | NUL output | `-z` (text mode only) | `-z` | Different model |
 | Status tags | `-t` (H/R/C/?/M) | `-t` (H/S/M/R/C/K/?) | Different model |
 | Unmerged entries | `-u` / `--unmerged` | `-u` / `--unmerged` | Different model |
+| Root-relative paths | `--full-name` (always; no-op flag) | `--full-name` (opt-in) | Different model |

@@ -603,3 +603,27 @@ fn ls_files_u_shows_unmerged_conflict_entries() {
         "clean entries excluded from -u: {s:?}"
     );
 }
+
+#[test]
+fn ls_files_full_name_accepted_as_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `--full-name` is accepted (Git compatibility) and produces the same
+    // repo-root-relative output Libra emits by default.
+    let plain = run_libra_command(&["ls-files"], p);
+    assert_cli_success(&plain, "ls-files");
+    let with_flag = run_libra_command(&["ls-files", "--full-name"], p);
+    assert_cli_success(&with_flag, "ls-files --full-name");
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&with_flag.stdout),
+        "--full-name is a no-op matching default output"
+    );
+    // Paths are repo-root-relative (the `git --full-name` form).
+    assert!(
+        String::from_utf8_lossy(&with_flag.stdout)
+            .lines()
+            .any(|l| l == "tracked.txt"),
+        "root-relative path present"
+    );
+}
