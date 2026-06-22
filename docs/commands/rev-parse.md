@@ -26,6 +26,7 @@ It also supports `--show-toplevel` to print the absolute repository root for a w
 | `--short` | Print a non-ambiguous abbreviated object ID. |
 | `--abbrev-ref` | Print the symbolic branch name instead of a commit hash. |
 | `--show-toplevel` | Print the absolute path to the top-level working tree. |
+| `--is-inside-git-dir` | Print `true` when the current directory is inside the `.libra` directory (Libra's `$GIT_DIR` equivalent), `false` otherwise. |
 | `<SPEC>` | Revision to resolve. Defaults to `HEAD` when omitted. |
 
 ## Common Commands
@@ -36,6 +37,7 @@ libra rev-parse HEAD~1
 libra rev-parse --short HEAD
 libra rev-parse --abbrev-ref HEAD
 libra rev-parse --show-toplevel
+libra rev-parse --is-inside-git-dir
 libra --json rev-parse --short HEAD
 ```
 

@@ -37,6 +37,7 @@ EXAMPLES:
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
+    libra rev-parse --is-inside-git-dir    Print true/false for .libra-directory context
     libra rev-parse --json HEAD         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -57,16 +58,20 @@ pub struct RevParseArgs {
 
     /// Verify that the revision resolves to exactly one object; fail (exit 128) otherwise.
     /// With the global `-q`/`--quiet`, failure is silent with exit code 1.
-    #[clap(long, conflicts_with_all = ["show_toplevel", "abbrev_ref", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    #[clap(long, conflicts_with_all = ["show_toplevel", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir"])]
     pub verify: bool,
 
     /// Use this revision when no SPEC is given (Git's `--default <arg>`).
-    #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir"])]
     pub default: Option<String>,
 
     /// Print "true" when run inside a working tree, "false" otherwise.
     #[clap(long = "is-inside-work-tree", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_bare_repository", "git_dir"])]
     pub is_inside_work_tree: bool,
+
+    /// Print "true" when the current directory is inside the `.libra` directory, "false" otherwise.
+    #[clap(long = "is-inside-git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    pub is_inside_git_dir: bool,
 
     /// Print "true" when the repository is bare, "false" otherwise.
     #[clap(long = "is-bare-repository", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir"])]
@@ -169,6 +174,18 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
             mode: "is_inside_work_tree",
             input: None,
             value: inside.to_string(),
+        });
+    }
+
+    if args.is_inside_git_dir {
+        // "true" when the current directory is inside `.libra` (Libra's
+        // equivalent of Git's GIT_DIR), "false" anywhere else in the worktree.
+        let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        let cwd = util::cur_dir();
+        return Ok(RevParseOutput {
+            mode: "is_inside_git_dir",
+            input: None,
+            value: util::is_sub_path(&cwd, &storage).to_string(),
         });
     }
 
@@ -545,6 +562,38 @@ mod tests {
         assert!(bare.is_bare_repository);
         let git_dir = RevParseArgs::try_parse_from(["rev-parse", "--git-dir"]).unwrap();
         assert!(git_dir.git_dir);
+        let inside_git_dir =
+            RevParseArgs::try_parse_from(["rev-parse", "--is-inside-git-dir"]).unwrap();
+        assert!(inside_git_dir.is_inside_git_dir);
+    }
+
+    #[test]
+    fn test_rev_parse_args_is_inside_git_dir_conflicts_with_spec() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--is-inside-git-dir", "HEAD"])
+            .expect_err("--is-inside-git-dir should reject SPEC");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot be used with") || rendered.contains("unexpected argument"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_rev_parse_args_is_inside_git_dir_conflicts_with_other_modes() {
+        // Like the sibling query flags, `--is-inside-git-dir` must be rejected
+        // (not silently ignored) when combined with --verify or --default.
+        for combo in [
+            vec!["rev-parse", "--verify", "--is-inside-git-dir"],
+            vec!["rev-parse", "--default", "HEAD", "--is-inside-git-dir"],
+            vec!["rev-parse", "--is-inside-git-dir", "--git-dir"],
+        ] {
+            let err = RevParseArgs::try_parse_from(combo.clone())
+                .expect_err(&format!("{combo:?} should be rejected"));
+            assert!(
+                err.to_string().contains("cannot be used with"),
+                "expected a conflict error for {combo:?}, got: {err}"
+            );
+        }
     }
 
     #[test]

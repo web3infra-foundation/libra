@@ -70,7 +70,7 @@
 | [`reset`](reset.md) | `partial` | soft/mixed/hard/path reset plus pathspec-from-file/pathspec-file-nul and no-refresh no-op supported; merge/keep not exposed |
 | [`restore`](restore.md) | `partial` | source/staged/worktree path restore supported; overlay/conflict/progress variants not exposed |
 | [`rev-list`](rev-list.md) | `partial` | multi-revision reachability, exclusions/ranges, count/limit controls, author/committer/message/path/time filters, parent filters/reset aliases, first-parent traversal, symmetric side/cherry filters including `--cherry`, parents/children and timestamp output supported; object/boundary traversal output remains incomplete |
-| [`rev-parse`](rev-parse.md) | `partial` | basic revision parsing, `--verify`, `--short[=<n>]`, `--abbrev-ref`, `--show-toplevel`, `--show-prefix`, `--show-cdup`, work-tree/bare/git-dir queries supported; default/output-filter/parseopt modes remain incomplete |
+| [`rev-parse`](rev-parse.md) | `partial` | basic revision parsing, `--verify`, `--short[=<n>]`, `--abbrev-ref`, `--show-toplevel`, `--show-prefix`, `--show-cdup`, work-tree/inside-git-dir/bare/git-dir queries supported; default/output-filter/parseopt modes remain incomplete |
 | [`revert`](revert.md) | `partial` | single/multi-commit revert, `-n`, mainline, signoff, and conflict `--continue`/`--abort` supported; skip/multi-commit todo/edit/strategy flags incomplete |
 | [`rm`](rm.md) | `partial` | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file... |
 | [`sandbox`](sandbox.md) | `intentionally-different` | Libra AI sandbox diagnostics extension, not a Git command |

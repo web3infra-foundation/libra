@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 revision 解析、`--short`、`--abbrev-ref` 和 `--show-toplevel` 已支持；verify/default、仓库状态查询、输出过滤和 parseopt 子模式尚未公开。
+- 兼容级别：`partial`。基础 revision 解析、`--short`、`--abbrev-ref`、`--show-toplevel`、`--verify`/`--default` 及仓库状态查询（`--show-prefix`/`--show-cdup`/`--is-inside-work-tree`/`--is-inside-git-dir`/`--is-bare-repository`/`--git-dir`）已支持；输出过滤和 parseopt 子模式尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,15 +46,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-parse.md`。
 - Synopsis：`libra rev-parse [OPTIONS] [SPEC]`。
-- 公开参数/子命令包括：`--short`、`--abbrev-ref`、`--show-toplevel`、`--verify`、`--default <ARG>`、`--is-inside-work-tree`、`--is-bare-repository`、`--git-dir`、`[SPEC]`（位置参数，缺省为 `HEAD`）。
-- `--verify`：断言 SPEC 解析为唯一对象，失败退出 128；配合全局 `--quiet`/`-q` 时静默退出 1。`--default <ARG>`：未提供位置 SPEC 时回退到该修订。`--is-inside-work-tree` / `--is-bare-repository` 打印 `true`/`false`；`--git-dir` 打印 `.libra` 目录路径（Git `$GIT_DIR` 等价）。
+- 公开参数/子命令包括：`--short`、`--abbrev-ref`、`--show-toplevel`、`--show-prefix`、`--show-cdup`、`--verify`、`--default <ARG>`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir`、`[SPEC]`（位置参数，缺省为 `HEAD`）。
+- `--verify`：断言 SPEC 解析为唯一对象，失败退出 128；配合全局 `--quiet`/`-q` 时静默退出 1。`--default <ARG>`：未提供位置 SPEC 时回退到该修订。`--is-inside-work-tree` / `--is-bare-repository` 打印 `true`/`false`；`--git-dir` 打印 `.libra` 目录路径（Git `$GIT_DIR` 等价）。`--is-inside-git-dir` 在当前目录位于 `.libra` 目录内时打印 `true`，否则 `false`（复用 `util::is_sub_path` 判定 cwd 是否为 `.libra` 的子路径，含相等）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 仓库状态查询 | Git `--is-inside-git-dir`、`--show-prefix`、`--show-cdup`；当前已支持 `--show-toplevel`、`--is-inside-work-tree`、`--is-bare-repository`、`--git-dir`。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| ✅ 已实现（仓库状态查询） | `--show-toplevel`、`--show-prefix`、`--show-cdup`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir` 均已支持。 | `--is-inside-git-dir` 带单元测试与集成测试（worktree→`false`，`.libra` 内→`true`）。 |
 | 输出过滤 | Git `--symbolic`、`--symbolic-full-name`、`--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>`、`--short=<n>`、`--sq` 等输出/过滤选项；当前 `--short` 不接受位数参数。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 参数解析模式 | Git `--parseopt`、`--keep-dashdash`、`--stuck-long`、`--sq-quote` 等 `--parseopt` 子模式；当前未实现。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 

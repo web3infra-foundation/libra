@@ -590,3 +590,19 @@ fn test_rev_parse_short_with_length() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim().len(), 8, "short=8 should produce 8-char hash");
 }
+
+#[test]
+fn test_rev_parse_is_inside_git_dir() {
+    let repo = create_committed_repo_via_cli();
+
+    // From the worktree root: not inside the .libra directory.
+    let out = run_libra_command(&["rev-parse", "--is-inside-git-dir"], repo.path());
+    assert_cli_success(&out, "rev-parse --is-inside-git-dir from worktree");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "false");
+
+    // From inside the .libra directory: true (Libra's GIT_DIR equivalent).
+    let libra_dir = repo.path().join(".libra");
+    let out = run_libra_command(&["rev-parse", "--is-inside-git-dir"], &libra_dir);
+    assert_cli_success(&out, "rev-parse --is-inside-git-dir from .libra");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+}
