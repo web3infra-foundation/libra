@@ -1,6 +1,6 @@
 //! Implements `for-each-ref` to enumerate refs with filtering and formatting.
 
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
@@ -109,8 +109,42 @@ pub async fn execute_safe(args: ForEachRefArgs, output: &OutputConfig) -> CliRes
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
         Head::Detached(_) => None,
     };
-    render_output(&result, &args, output, head_refname.as_deref())?;
+    // Resolve each branch's upstream tracking ref for `%(upstream)`.
+    let upstreams = resolve_upstreams(&result).await;
+    render_output(&result, &args, output, head_refname.as_deref(), &upstreams)?;
     Ok(())
+}
+
+/// Map each `refs/heads/<branch>` entry to its upstream tracking ref
+/// (`refs/remotes/<remote>/<branch>`), computed from `branch.<name>.remote` and
+/// `branch.<name>.merge`. Branches without a configured upstream are omitted.
+/// This is the standard tracking computation (default fetch refspec); custom
+/// refspec mappings are not modeled.
+async fn resolve_upstreams(entries: &[RefEntry]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        let Some(branch) = entry.refname.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let remote = ConfigKv::get(&format!("branch.{branch}.remote"))
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
+        let merge = ConfigKv::get(&format!("branch.{branch}.merge"))
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
+        if let (Some(remote), Some(merge)) = (remote, merge) {
+            let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+            map.insert(
+                entry.refname.clone(),
+                format!("refs/remotes/{remote}/{merge_short}"),
+            );
+        }
+    }
+    map
 }
 
 async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
@@ -448,6 +482,7 @@ fn render_output(
     args: &ForEachRefArgs,
     output: &OutputConfig,
     head_refname: Option<&str>,
+    upstreams: &HashMap<String, String>,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("for-each-ref", &entries.to_vec(), output);
@@ -458,7 +493,7 @@ fn render_output(
 
     for entry in entries {
         if let Some(format) = &args.format {
-            println!("{}", render_format(format, entry, head_refname)?);
+            println!("{}", render_format(format, entry, head_refname, upstreams)?);
         } else {
             println!("{} {}", entry.objectname, entry.refname);
         }
@@ -466,7 +501,12 @@ fn render_output(
     Ok(())
 }
 
-fn render_format(format: &str, entry: &RefEntry, head_refname: Option<&str>) -> CliResult<String> {
+fn render_format(
+    format: &str,
+    entry: &RefEntry,
+    head_refname: Option<&str>,
+    upstreams: &HashMap<String, String>,
+) -> CliResult<String> {
     // `:short` modifiers: the short ref name (namespace prefix stripped) and the
     // 7-char abbreviated object id. Substituted before the bare atoms (the
     // strings are distinct, so order is not load-bearing, only for clarity).
@@ -478,9 +518,18 @@ fn render_format(format: &str, entry: &RefEntry, head_refname: Option<&str>) -> 
     } else {
         " "
     };
+    // `%(upstream)`: the tracking ref (empty when none); `:short` strips the
+    // `refs/remotes/` prefix.
+    let upstream = upstreams
+        .get(&entry.refname)
+        .map(String::as_str)
+        .unwrap_or("");
+    let upstream_short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
     let mut out = format.to_string();
     for (atom, value) in [
         ("%(HEAD)", head_marker),
+        ("%(upstream:short)", upstream_short),
+        ("%(upstream)", upstream),
         ("%(refname:short)", refname_short.as_str()),
         ("%(objectname:short)", objectname_short.as_str()),
         ("%(refname)", entry.refname.as_str()),

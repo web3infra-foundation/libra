@@ -551,3 +551,42 @@ async fn test_for_each_ref_head_marker_atom() {
         "non-current branch should get a space: {s:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_upstream_atom() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    run_libra_command(&["branch", "feature-y"], p); // no upstream
+
+    // Configure main's upstream tracking ref (origin/main).
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.remote", "origin"], p),
+        "config branch.main.remote",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.merge", "refs/heads/main"], p),
+        "config branch.main.merge",
+    );
+
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--heads",
+            "--format=%(refname:short)|%(upstream)|%(upstream:short)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(upstream)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.lines()
+            .any(|l| l == "main|refs/remotes/origin/main|origin/main"),
+        "configured upstream atoms for main: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == "feature-y||"),
+        "branch without upstream has empty %(upstream): {s:?}"
+    );
+}
