@@ -31,6 +31,7 @@ EXAMPLES:
     libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
     libra ls-files -z --others          Emit NUL-delimited records for scripts
     libra ls-files -s                   Short output with stage info
+    libra ls-files -s --abbrev=8        Abbreviate object names to 8 digits
     libra ls-files -t                   Prefix each path with a status tag
     libra ls-files -u                   Show only unmerged (conflict) entries";
 
@@ -87,6 +88,12 @@ pub struct LsFilesArgs {
     /// Libra always prints repo-root-relative paths, so this is a no-op
     #[clap(long)]
     pub full_name: bool,
+
+    /// Abbreviate object names to N hex digits in `-s`/`--stage` output
+    /// (bare `--abbrev` uses 7). Libra truncates to a fixed length rather than
+    /// computing the shortest unique prefix.
+    #[clap(long, value_name = "N", num_args = 0..=1, require_equals = true, default_missing_value = "7")]
+    pub abbrev: Option<usize>,
 
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
@@ -354,13 +361,19 @@ fn render_output(
     let mut stdout = std::io::stdout().lock();
     for entry in entries {
         let mut record = if args.short || args.stage || args.unmerged {
+            let hash = entry
+                .hash
+                .as_deref()
+                .unwrap_or("0000000000000000000000000000000000000000");
+            // `--abbrev[=N]` truncates the object name to N hex digits.
+            let hash = match args.abbrev {
+                Some(n) => hash.get(..n.min(hash.len())).unwrap_or(hash),
+                None => hash,
+            };
             format!(
                 "{} {} {}\t{}",
                 entry.mode.as_deref().unwrap_or("000000"),
-                entry
-                    .hash
-                    .as_deref()
-                    .unwrap_or("0000000000000000000000000000000000000000"),
+                hash,
                 entry.stage.unwrap_or(0),
                 entry.path
             )

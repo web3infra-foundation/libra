@@ -37,6 +37,7 @@ integration remain deferred.
 | `--modified` | Show tracked paths whose working-tree content hash differs from the index. |
 | `--stage` | Print stage-style records, including conflict stages when present. |
 | `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
+| `--abbrev[=<n>]` | Abbreviate the object name to `<n>` hex digits in `-s`/`--stage` output. Bare `--abbrev` uses 7; `--abbrev=<n>` sets the length (the value requires the `=` form, so bare `--abbrev` never consumes a following pathspec). Libra truncates to a fixed length rather than computing the shortest unique prefix. |
 | `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged). |
 | `-u`, `--unmerged` | Show only unmerged (conflict) entries — index stages 1/2/3 — in stage-style output. |
 | `--full-name` | Accepted for Git compatibility. Libra always prints repo-root-relative paths (the `git --full-name` form), so this is a no-op. |
@@ -126,6 +127,7 @@ entries use `null` for fields that do not apply:
 | Modified tracked files | `--modified` | `--modified` | Use status/diff commands |
 | Deleted tracked files | `--deleted` | `--deleted` | Use status commands |
 | Stage-style output | `--stage` / `-s` | `--stage` / `-s` | Different model |
+| Abbreviate object name | `--abbrev[=<n>]` (fixed-length) | `--abbrev[=<n>]` (shortest unique) | N/A |
 | Untracked files | `--others` | `--others` | Use status/file commands |
 | Ignore-aware untracked | `--others --exclude-standard` | Same | Different model |
 | Pathspec filters | `<pathspec>...` | Supported | Different model |

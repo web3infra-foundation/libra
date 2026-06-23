@@ -7,7 +7,7 @@
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
-- 已支持：默认 cached listing、`--cached`、`--deleted`、`--modified`、`--stage` / `-s`、`--others`、`--others --exclude-standard`、`<pathspec>...`、`--error-unmatch`、`-z`、`-t`（状态标签 H/R/C/?/M）、`-u` / `--unmerged`（仅冲突条目）、`--full-name`（接受为 no-op；Libra 始终输出仓库根相对路径）、`--json` 和 `--machine`。
+- 已支持：默认 cached listing、`--cached`、`--deleted`、`--modified`、`--stage` / `-s`、`--abbrev[=<n>]`（在 `-s`/`--stage` 输出里把对象名截断为 n 位 hex，bare 即 7；取值用 `=` 形式 `require_equals`，故 bare 不会吞掉 pathspec；定长截断而非最短唯一前缀）、`--others`、`--others --exclude-standard`、`<pathspec>...`、`--error-unmatch`、`-z`、`-t`（状态标签 H/R/C/?/M）、`-u` / `--unmerged`（仅冲突条目）、`--full-name`（接受为 no-op；Libra 始终输出仓库根相对路径）、`--json` 和 `--machine`。
 - 语义说明：pathspec 从调用者当前工作目录解析；精确文件和目录前缀都可匹配；解析到仓库外的 pathspec 会被拒绝。
 - 暂未公开：ignored-only / explicit exclude-source modes、`--eol`、resolve-undo、killed/debug output、sparse-checkout integration。
 

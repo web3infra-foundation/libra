@@ -627,3 +627,43 @@ fn ls_files_full_name_accepted_as_noop() {
         "root-relative path present"
     );
 }
+
+#[test]
+fn test_ls_files_abbrev_shortens_object_name() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("f.txt"), "content\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c", "--no-verify"], p),
+        "commit",
+    );
+
+    // -s shows the full 40-char object name.
+    let full = run_libra_command(&["ls-files", "-s", "f.txt"], p);
+    assert_cli_success(&full, "ls-files -s");
+    let full_out = String::from_utf8_lossy(&full.stdout);
+    let full_hash = full_out.split_whitespace().nth(1).expect("hash field");
+    assert_eq!(full_hash.len(), 40, "full hash: {full_out:?}");
+
+    // --abbrev=8 truncates the object name to 8 digits.
+    let ab8 = run_libra_command(&["ls-files", "-s", "--abbrev=8", "f.txt"], p);
+    assert_cli_success(&ab8, "ls-files -s --abbrev=8");
+    let ab8_out = String::from_utf8_lossy(&ab8.stdout);
+    let ab8_hash = ab8_out.split_whitespace().nth(1).expect("hash field");
+    assert_eq!(ab8_hash.len(), 8, "abbrev=8 hash: {ab8_out:?}");
+    assert!(
+        full_hash.starts_with(ab8_hash),
+        "abbrev is a prefix of the full hash"
+    );
+
+    // Bare --abbrev defaults to 7.
+    let ab = run_libra_command(&["ls-files", "-s", "--abbrev", "f.txt"], p);
+    assert_cli_success(&ab, "ls-files -s --abbrev");
+    let ab_out = String::from_utf8_lossy(&ab.stdout);
+    assert_eq!(
+        ab_out.split_whitespace().nth(1).expect("hash").len(),
+        7,
+        "bare --abbrev = 7: {ab_out:?}"
+    );
+}
