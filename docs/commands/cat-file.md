@@ -33,11 +33,14 @@ branch.
 | `-s` | | Print the object size in bytes. |
 | `-p` | | Pretty-print the object content. |
 | `-e` | | Check if the object exists (exit status only, no stdout). Does not support `--json`. |
+| `--batch-check[=<fmt>]` | | Read object names from stdin (one per line); print `<sha> <type> <size>` (or `<input> missing`). Optional format atoms `%(objectname)`/`%(objecttype)`/`%(objectsize)`. |
+| `--batch[=<fmt>]` | | Like `--batch-check` plus the raw object contents and a trailing newline. |
+| `--batch-command[=<fmt>]` | | Read commands from stdin: `info <object>` (header only) or `contents <object>` (header + contents). `flush` requires `--buffer`, which is not exposed. |
 | `--ai <ID>` | | Pretty-print an AI object by ID. Accepts `TYPE:ID` to disambiguate. |
 | `--ai-type <ID>` | | Print the AI object type for the given ID. |
 | `--ai-list <TYPE>` | | List all AI objects of the given type (e.g., `intent`, `patchset`, `event`). |
 | `--ai-list-types` | | List all AI object types present in the history branch. |
-| `<OBJECT>` | | Git object hash or ref. Required for `-t`/`-s`/`-p`/`-e`; ignored for `--ai*` modes. |
+| `<OBJECT>` | | Git object hash or ref. Required for `-t`/`-s`/`-p`/`-e`; ignored for `--ai*` modes; batch modes read object names from stdin instead. |
 
 ### Examples
 
@@ -181,15 +184,15 @@ interface. This means a single command can answer both "what type is this
 commit?" and "what does this AI plan contain?" -- which is especially useful
 during debugging of agent workflows.
 
-### Why no batch mode?
+### Batch modes and structured output
 
-Git's `cat-file --batch` reads object IDs from stdin in a streaming fashion,
-which is important when processing millions of objects in scripts. Libra targets
-a different workflow: structured JSON output lets agents retrieve object data
-in a single call, and the AI inspection modes already support listing all
-objects of a type. Batch mode would add complexity without a clear use case in
-the agent-native workflow. If bulk inspection becomes necessary, it can be added
-as `--batch` later without breaking the existing interface.
+Git's batch modes read object IDs (or commands) from stdin for bulk inspection.
+Libra exposes `--batch-check`, `--batch`, and `--batch-command` (the latter
+dispatching `info`/`contents` per line), all sharing the same per-object
+formatter with optional `=<format>` atom expansion. For agents, `--json` remains
+the recommended interface — it returns typed fields in one call. Streaming
+`--buffer`/`flush` and `--batch-all-objects` are not exposed; without `--buffer`,
+the `flush` command is rejected exactly as Git does.
 
 ### Why does `-e` stay human-only?
 
@@ -208,7 +211,7 @@ instead -- if the object does not exist, the JSON response will contain an error
 | Print object size | `-s` | `-s` | N/A |
 | Pretty-print content | `-p` | `-p` | N/A (`jj file show` for blobs) |
 | Check existence | `-e` | `-e` | N/A |
-| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]` (default output plus `%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms; `--batch-command` / `--batch-all-objects` not exposed) | `--batch`, `--batch-check` | N/A |
+| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]`, `--batch-command[=<format>]` (info/contents; `%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms; `--batch-all-objects` and `--buffer`/`flush` not exposed) | `--batch`, `--batch-check`, `--batch-command` | N/A |
 | AI object inspection | `--ai`, `--ai-type` | N/A | N/A |
 | AI object listing | `--ai-list`, `--ai-list-types` | N/A | N/A |
 | JSON output | `--json` | No | No |

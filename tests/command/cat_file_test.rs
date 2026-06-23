@@ -965,3 +965,69 @@ fn test_cat_file_cli_outside_repository_returns_fatal_128() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn test_cat_file_batch_command_dispatches_info_and_contents() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let run_bc = |stdin_body: String| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+            .current_dir(temp_path)
+            .args(["cat-file", "--batch-command"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cat-file --batch-command");
+        child
+            .stdin
+            .take()
+            .expect("child stdin")
+            .write_all(stdin_body.as_bytes())
+            .expect("Failed to write batch-command input");
+        child
+            .wait_with_output()
+            .expect("Failed to wait on cat-file")
+    };
+
+    // `info` prints the header only; `contents` adds the object body; a missing
+    // object reports "<spec> missing".
+    let out = run_bc(format!(
+        "info {head_hash}\ncontents {head_hash}\ninfo not-a-real-ref\n"
+    ));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(&format!("{head_hash} commit ")),
+        "info/contents header: {s}"
+    );
+    assert!(
+        s.contains("first commit") && s.contains("tree "),
+        "contents body: {s}"
+    );
+    assert!(s.contains("not-a-real-ref missing"), "missing line: {s}");
+
+    // `flush` is rejected without --buffer (Libra does not expose --buffer).
+    let flush = run_bc("flush\n".to_string());
+    assert!(!flush.status.success(), "flush must error without --buffer");
+
+    // An unknown command is a usage error.
+    let unknown = run_bc("bogus deadbeef\n".to_string());
+    assert!(!unknown.status.success(), "unknown command must error");
+}

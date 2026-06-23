@@ -44,11 +44,14 @@ const CAT_FILE_LONG_ABOUT: &str = "Inspect Git objects or Libra AI history objec
 
 Modes:
   - Git modes: use exactly one of -t/-s/-p/-e and provide OBJECT.
+  - Git batch modes (stdin): --batch-check / --batch / --batch-command read object
+    names (or info/contents commands) from stdin instead of OBJECT, with an optional
+    =<format> for the header line.
   - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID or TYPE:ID.
   - AI listing modes: use --ai-list <TYPE> or --ai-list-types.
 
 Notes:
-  - OBJECT is ignored for all --ai* modes.
+  - OBJECT is ignored for all --ai* and --batch* modes.
   - --ai and --ai-type search the AI history branch and can resolve persisted session objects such as ai_session.
   - If the same ID exists under multiple AI types, pass TYPE:ID to disambiguate.
   - --ai on ai_session objects prints a unified session summary before full JSON.
@@ -57,6 +60,7 @@ Notes:
 const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    libra cat-file --batch-command                          Read info/contents commands from stdin (one per line)
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
     libra cat-file --ai-list-types                          List every AI object type in the history branch
     libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
@@ -98,6 +102,13 @@ pub struct CatFileArgs {
     /// Accepts an optional format string (e.g. `--batch="%(objectname) %(objecttype)"`).
     #[clap(long = "batch", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub batch: Option<String>,
+
+    /// Read commands from stdin (one per line): `info <object>` prints the
+    /// `<sha> <type> <size>` header and `contents <object>` adds the object
+    /// contents. Accepts an optional format string for the header. (`flush`
+    /// requires Git's `--buffer`, which Libra does not expose.)
+    #[clap(long = "batch-command", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub batch_command: Option<String>,
 
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
@@ -348,6 +359,10 @@ pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult
         return run_batch(true, fmt).await;
     }
 
+    if let Some(fmt) = &args.batch_command {
+        return run_batch_command(fmt).await;
+    }
+
     if args.check_exist && !output.is_json() {
         execute(args).await;
         return Ok(());
@@ -522,31 +537,109 @@ async fn run_batch(include_content: bool, format: &str) -> CliResult<()> {
         if spec.is_empty() {
             continue;
         }
-        let mut buf: Vec<u8> = Vec::new();
-        match resolve_object_safe(spec, &storage).await {
-            Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
-                (Ok(obj_type), Ok(data)) => {
-                    let header = if format.is_empty() {
-                        format!("{hash} {obj_type} {}\n", data.len())
-                    } else {
-                        format_batch_line(format, &hash, &obj_type.to_string(), data.len())
-                    };
-                    buf.extend_from_slice(header.as_bytes());
-                    if include_content {
-                        buf.extend_from_slice(&data);
-                        buf.push(b'\n');
-                    }
-                }
-                _ => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
-            },
-            Err(_) => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
-        }
+        let buf = build_batch_object(spec, include_content, format, &storage).await;
         match out.write_all(&buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
             Err(e) => {
                 return Err(CliError::fatal(format!(
                     "failed to write cat-file {mode} output: {e}"
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the batch output bytes for one object spec: the `<sha> <type> <size>`
+/// header (or `format`-expanded line), optionally followed by the raw contents
+/// and a trailing newline (`include_content`), or `<spec> missing` when the
+/// object cannot be resolved or loaded. Shared by `--batch`/`--batch-check` and
+/// the `--batch-command` `contents`/`info` commands.
+async fn build_batch_object(
+    spec: &str,
+    include_content: bool,
+    format: &str,
+    storage: &ClientStorage,
+) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    match resolve_object_safe(spec, storage).await {
+        Ok(hash) => match (storage.get_object_type(&hash), storage.get(&hash)) {
+            (Ok(obj_type), Ok(data)) => {
+                let header = if format.is_empty() {
+                    format!("{hash} {obj_type} {}\n", data.len())
+                } else {
+                    format_batch_line(format, &hash, &obj_type.to_string(), data.len())
+                };
+                buf.extend_from_slice(header.as_bytes());
+                if include_content {
+                    buf.extend_from_slice(&data);
+                    buf.push(b'\n');
+                }
+            }
+            _ => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
+        },
+        Err(_) => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
+    }
+    buf
+}
+
+/// `cat-file --batch-command`: read one command per line from stdin and dispatch
+/// `info <object>` (header only, like `--batch-check`) or `contents <object>`
+/// (header + contents, like `--batch`). Libra does not expose `--buffer`, so the
+/// `flush` command is rejected exactly as Git does without buffered mode.
+async fn run_batch_command(format: &str) -> CliResult<()> {
+    use std::io::{Read, Write};
+
+    let storage = ClientStorage::init(path::objects());
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to read cat-file --batch-command input: {e}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for raw in input.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (command, arg) = match line.split_once(char::is_whitespace) {
+            Some((cmd, rest)) => (cmd, rest.trim()),
+            None => (line, ""),
+        };
+        let include_content = match command {
+            "contents" => true,
+            "info" => false,
+            "flush" => {
+                return Err(CliError::command_usage("flush is only for --buffer mode")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "unknown command '{other}' in --batch-command"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("supported commands: contents <object>, info <object>"));
+            }
+        };
+        if arg.is_empty() {
+            return Err(CliError::command_usage(format!(
+                "missing object argument for '{command}'"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        let buf = build_batch_object(arg, include_content, format, &storage).await;
+        match out.write_all(&buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => {
+                return Err(CliError::fatal(format!(
+                    "failed to write cat-file --batch-command output: {e}"
                 ))
                 .with_stable_code(StableErrorCode::IoWriteFailed));
             }
