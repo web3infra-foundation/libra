@@ -45,6 +45,7 @@ EXAMPLES:
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
+    libra diff --cached --check             Warn about whitespace errors on added lines
     libra --json diff --staged              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -120,6 +121,12 @@ pub struct DiffArgs {
     /// `--name-status` then emits the status and path as separate NUL fields.
     #[clap(short = 'z', long = "null")]
     pub null: bool,
+
+    /// Warn about whitespace errors on added lines instead of printing the diff.
+    /// Detects trailing whitespace and space-before-tab in the indent; exits 2
+    /// when any problem is found. (Git's blank-at-eof check is not performed.)
+    #[clap(long = "check")]
+    pub check: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -633,11 +640,83 @@ fn record_diff_content_error(slot: &Rc<RefCell<Option<DiffError>>>, error: DiffE
     }
 }
 
+/// Identify the first whitespace problem on an added line's content (the text
+/// after the leading `+`). Returns `None` for a clean line. Checks Git's two
+/// most common defaults: trailing whitespace (`blank-at-eol`) and a space
+/// immediately before a tab in the leading indent (`space-before-tab`).
+fn whitespace_problem(content: &str) -> Option<&'static str> {
+    if content.ends_with(' ') || content.ends_with('\t') {
+        return Some("trailing whitespace");
+    }
+    let indent: String = content
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    if indent.contains(" \t") {
+        return Some("space before tab in indent");
+    }
+    None
+}
+
+/// Scan one file's unified diff for whitespace errors on added (`+`) lines,
+/// tracking new-file line numbers from each hunk header. Returns one
+/// `path:line: message` string per problem.
+fn check_whitespace_in_file(path: &str, raw_diff: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut new_lineno = 0usize;
+    for line in raw_diff.lines() {
+        if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@`: the next added/context line is new-file line c.
+            if let Some(after_plus) = line.split('+').nth(1)
+                && let Some(start) = after_plus
+                    .split([',', ' '])
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+            {
+                new_lineno = start;
+            }
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            // File headers — not content; do not advance.
+        } else if let Some(content) = line.strip_prefix('+') {
+            // Added line: check whitespace, then advance the new-file counter.
+            if let Some(msg) = whitespace_problem(content) {
+                problems.push(format!("{path}:{new_lineno}: {msg}"));
+            }
+            new_lineno += 1;
+        } else if line.starts_with(' ') {
+            // Context line: advances the new-file counter.
+            new_lineno += 1;
+        }
+        // Everything else — removed (`-`) lines, the `\ No newline at end of
+        // file` marker, and `diff --git`/`index`/mode headers — is neither an
+        // added nor a context line and does not advance the counter.
+    }
+    problems
+}
+
+/// `diff --check`: print whitespace warnings and exit 2 when any are found.
+fn render_diff_check(result: &DiffOutput) -> CliResult<()> {
+    let problems: Vec<String> = result
+        .files
+        .iter()
+        .flat_map(|file| check_whitespace_in_file(&file.path, &file.raw_diff))
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
+    }
+    println!("{}", problems.join("\n"));
+    Err(CliError::silent_exit(2))
+}
+
 fn render_diff_output(
     args: &DiffArgs,
     result: &DiffOutput,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    // `--check` replaces the normal diff output with whitespace-error warnings.
+    if args.check {
+        return render_diff_check(result);
+    }
     if output.is_json() {
         emit_json_data("diff", result, output)?;
         // `--exit-code` applies regardless of output format: emit the JSON, then
@@ -829,6 +908,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         exit_code: false,
         no_patch: false,
         null: false,
+        check: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

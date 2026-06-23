@@ -1096,3 +1096,45 @@ fn test_diff_z_nul_terminates_name_outputs() {
         plain.stdout
     );
 }
+
+#[test]
+fn test_diff_check_reports_whitespace_errors() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("ws.txt"), "clean\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ws.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+
+    // Stage a change with trailing whitespace (line 2) and space-before-tab (line 3).
+    std::fs::write(p.join("ws.txt"), "clean\ntrailing   \n \tindent\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ws.txt"], p), "stage ws");
+
+    let check = run_libra_command(&["diff", "--cached", "--check"], p);
+    assert_eq!(
+        check.status.code(),
+        Some(2),
+        "diff --check exits 2 when problems are found"
+    );
+    let out = String::from_utf8_lossy(&check.stdout);
+    assert!(
+        out.contains("ws.txt:2: trailing whitespace"),
+        "trailing ws: {out:?}"
+    );
+    assert!(
+        out.contains("ws.txt:3: space before tab in indent"),
+        "space-before-tab: {out:?}"
+    );
+
+    // A clean staged change reports nothing and exits 0.
+    std::fs::write(p.join("ws.txt"), "clean\ntidy line\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ws.txt"], p), "stage tidy");
+    let clean = run_libra_command(&["diff", "--cached", "--check"], p);
+    assert_cli_success(&clean, "diff --check (clean) exits 0");
+    assert!(
+        String::from_utf8_lossy(&clean.stdout).trim().is_empty(),
+        "no warnings for a clean diff"
+    );
+}

@@ -9,7 +9,7 @@ libra diff [<pathspec>...]
 libra diff --staged [<pathspec>...]
 libra diff --old <commit> --new <commit> [<pathspec>...]
 libra diff [--name-only | --name-status | --numstat | --stat | --shortstat | --summary]
-           [-s | --no-patch] [--exit-code] [-z]
+           [-s | --no-patch] [--exit-code] [--check] [-z]
 libra diff [--algorithm <name>] [--output <file>]
 ```
 
@@ -40,6 +40,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
 | Exit code | | `--exit-code` | Still print the diff, but exit with code 1 when there are differences (0 otherwise). Unlike `--quiet`, the diff is not suppressed. |
 | NUL output | `-z` | `--null` | NUL-terminate `--name-only`/`--name-status`/`--numstat` records (and split the `--name-status` status and path into separate NUL fields); other modes are unaffected. |
+| Whitespace check | | `--check` | Instead of the diff, warn about whitespace errors on added lines (trailing whitespace and space-before-tab in the indent), printing `<path>:<line>: <message>` and exiting 2 when any are found. Git's blank-at-eof check is not performed; takes precedence over other output modes. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -226,6 +227,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Suppress patch | `-s` / `--no-patch` | `-s` / `--no-patch` | N/A |
 | Exit code | `--exit-code` | `--exit-code` | N/A |
 | NUL-terminated output | `-z` / `--null` | `-z` | N/A |
+| Whitespace check | `--check` (trailing-ws / space-before-tab) | `--check` | N/A |
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
 | Binary diff | Not supported | `--binary` | N/A |
 | Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |
