@@ -1194,3 +1194,23 @@ fn diff_text_flag_is_accepted_noop() {
         );
     }
 }
+
+#[test]
+fn diff_no_ext_diff_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("e.txt"), "x\ny\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "e.txt"], p), "stage e.txt");
+
+    let plain = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&plain, "diff --cached");
+    // `--no-ext-diff` is accepted and produces identical output: Libra has no
+    // external diff drivers, so it always uses the built-in diff engine.
+    let out = run_libra_command(&["diff", "--cached", "--no-ext-diff"], p);
+    assert_cli_success(&out, "diff --cached --no-ext-diff");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "diff --no-ext-diff matches plain diff (no-op)"
+    );
+}

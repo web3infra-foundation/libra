@@ -43,6 +43,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Whitespace check | | `--check` | Instead of the diff, warn about whitespace errors on added lines (trailing whitespace and space-before-tab in the indent), printing `<path>:<line>: <message>` and exiting 2 when any are found. Git's blank-at-eof check is not performed; takes precedence over other output modes. |
 | Reverse | `-R` | `--reverse` | Swap the two sides so additions become deletions and vice-versa (the patch that would undo the change). |
 | Text | `-a` | `--text` | Treat all files as text. Accepted no-op: Libra's diff never detects binary files, so it always shows the content diff (it never prints "Binary files differ"). Distinct from `--binary` (binary-patch format), which is not supported. |
+| No external diff | | `--no-ext-diff` | Disallow external diff drivers. Accepted no-op: Libra has no external diff drivers and always uses its built-in engine. (The external diff tool itself — `--ext-diff` / `diff.external` — is not supported.) |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -237,7 +238,8 @@ These Git options provide alternative diff presentations that are useful for pro
 | Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |
 | Ignore whitespace | Not supported | `-w` / `--ignore-all-space` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
-| External diff tool | Not supported | `--ext-diff` / `--no-ext-diff` | `--tool <name>` |
+| Disallow external diff | `--no-ext-diff` (no-op; always built-in) | `--no-ext-diff` | N/A |
+| External diff tool | Not supported | `--ext-diff` / `diff.external` | `--tool <name>` |
 | Quiet (exit code only) | `--quiet` | `--quiet` | N/A |
 | JSON output | `--json` | Not supported | N/A |
 | Rename detection | Not supported | `-M` / `--find-renames` | Automatic |

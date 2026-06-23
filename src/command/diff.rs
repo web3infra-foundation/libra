@@ -139,6 +139,12 @@ pub struct DiffArgs {
     /// diff of every file (it never prints "Binary files differ").
     #[clap(short = 'a', long = "text")]
     pub text: bool,
+
+    /// Disallow external diff drivers. Accepted for Git parity and is a no-op:
+    /// Libra has no external diff driver support and always uses its built-in
+    /// diff engine, so external drivers are never invoked to begin with.
+    #[clap(long = "no-ext-diff")]
+    pub no_ext_diff: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -941,6 +947,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         check: false,
         reverse: false,
         text: false,
+        no_ext_diff: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))
