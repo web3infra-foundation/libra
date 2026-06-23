@@ -282,7 +282,7 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 | Quiet 模式 | `git status -q` | N/A | `libra status --quiet`（全局标志） |
 | 列显示 | `git status --column` | N/A | N/A |
 | Ahead/behind 显示 | `git status -sb`（仅文本） | N/A | 人类 + JSON 中结构化 `upstream` 对象 |
-| 查找 renames | `git status -M` | 自动 | N/A |
+| 查找 renames | `git status -M` | 自动 | `--find-renames` / `--renames` |
 | 忽略 submodules | `git status --ignore-submodules` | N/A | N/A（无 submodules） |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
@@ -313,5 +313,5 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 
 - `--porcelain v2` 被接受，但当前产生 v1 格式输出；使用 `--json` 获取完整结构化数据
 - jj 的 `jj status` 始终使用短格式，并且不区分已暂存与未暂存更改（jj 没有暂存区）
-- 不支持 Git 的 `--find-renames` / `-M`；Libra status 尚未实现 rename 检测
+- 通过 `--find-renames[=<n>]` 及 `--renames`/`--no-renames` 开关支持重命名检测；不暴露 Git 的短别名 `-M`
 - 不支持 `--column` 显示

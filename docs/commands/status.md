@@ -101,6 +101,17 @@ libra status --find-renames
 libra status --find-renames=75
 ```
 
+### `--renames` / `--no-renames`
+
+Toggle rename detection. `--renames` enables it at the default (or `--find-renames`)
+threshold; `--no-renames` disables it and overrides `--renames`/`--find-renames` when
+combined.
+
+```bash
+libra status --renames
+libra status --no-renames
+```
+
 Show the number of stash entries. Only effective in standard (long) output mode.
 
 ```bash
@@ -372,7 +383,7 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Quiet mode | `git status -q` | N/A | `libra status --quiet` (global flag) |
 | Column display | `git status --column` | N/A | N/A |
 | Ahead/behind display | `git status -sb` (text only) | N/A | Human + structured `upstream` object in JSON |
-| Find renames | `git status -M` | Automatic | N/A |
+| Find renames | `git status -M` | Automatic | `--find-renames` / `--renames` |
 | Ignore submodules | `git status --ignore-submodules` | N/A | N/A (no submodules) |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -404,5 +415,5 @@ Every `StatusError` variant maps to an explicit `StableErrorCode`.
 
 - `--porcelain v2` is accepted but currently produces v1-format output; use `--json` for full structured data
 - jj's `jj status` always uses a short format and does not distinguish staged from unstaged changes (jj has no staging area)
-- Git's `--find-renames` / `-M` is not supported; rename detection is not yet implemented in Libra's status
+- Rename detection is supported via `--find-renames[=<n>]` and the `--renames`/`--no-renames` toggles; Git's short `-M` alias is not exposed
 - `--column` display is not supported

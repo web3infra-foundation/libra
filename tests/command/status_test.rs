@@ -2432,3 +2432,68 @@ fn test_status_find_renames_honors_threshold() {
         "100% threshold should not match different names/content: {stdout}"
     );
 }
+
+#[test]
+#[serial]
+fn test_status_renames_and_no_renames_toggle_detection() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(run_libra_command(&["init"], &repo).status.success());
+    assert!(
+        run_libra_command(&["config", "set", "user.name", "Test"], &repo)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["config", "set", "user.email", "t@e.test"], &repo)
+            .status
+            .success()
+    );
+
+    std::fs::write(repo.join("old.txt"), "content").unwrap();
+    assert!(
+        run_libra_command(&["add", "old.txt"], &repo)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], &repo)
+            .status
+            .success()
+    );
+
+    std::fs::remove_file(repo.join("old.txt")).unwrap();
+    std::fs::write(repo.join("new.txt"), "content").unwrap();
+
+    // --renames enables detection (like --find-renames at the default threshold).
+    let renames = run_libra_command(&["status", "--renames", "--short"], &repo);
+    assert!(renames.status.success());
+    let r = String::from_utf8_lossy(&renames.stdout);
+    assert!(r.contains('R'), "--renames should detect the rename: {r}");
+
+    // --no-renames disables detection: old shows as deleted, new as untracked.
+    let no_renames = run_libra_command(&["status", "--no-renames", "--short"], &repo);
+    assert!(no_renames.status.success());
+    let n = String::from_utf8_lossy(&no_renames.stdout);
+    assert!(
+        !n.contains('R'),
+        "--no-renames must not report a rename: {n}"
+    );
+    assert!(
+        n.contains("old.txt") && n.contains("new.txt"),
+        "both paths listed: {n}"
+    );
+
+    // --no-renames overrides --find-renames (no rename reported).
+    let both = run_libra_command(
+        &["status", "--no-renames", "--find-renames", "--short"],
+        &repo,
+    );
+    assert!(both.status.success());
+    let b = String::from_utf8_lossy(&both.stdout);
+    assert!(
+        !b.contains('R'),
+        "--no-renames must override --find-renames: {b}"
+    );
+}

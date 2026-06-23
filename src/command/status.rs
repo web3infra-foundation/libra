@@ -53,6 +53,7 @@ EXAMPLES:
     libra status --show-stash          Show stash count
     libra status --ignored             Include ignored files
     libra status --untracked-files=no  Hide untracked files
+    libra status --renames             Detect renames (--no-renames disables)
     libra status --json                Structured JSON output for agents
     libra status --exit-code           Exit 1 if working tree is dirty
     libra status --quiet --exit-code   Silent dirty check for scripts";
@@ -126,6 +127,16 @@ pub struct StatusArgs {
         default_missing_value = "50"
     )]
     pub find_renames: Option<u8>,
+
+    /// Enable rename detection at the default (or `--find-renames`) threshold
+    /// (Git's `--renames`).
+    #[clap(long = "renames", overrides_with = "no_renames")]
+    pub renames: bool,
+
+    /// Disable rename detection, overriding `--renames`/`--find-renames`
+    /// (Git's `--no-renames`).
+    #[clap(long = "no-renames", overrides_with = "renames")]
+    pub no_renames: bool,
 
     /// Exit with code 1 if the working tree has changes.
     /// Can be combined with --quiet for silent dirty checking.
@@ -361,8 +372,18 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
         UntrackedFiles::All => {}
     }
 
+    // Resolve rename detection: `--no-renames` wins (off); otherwise `--renames`
+    // (or `--find-renames`) enables it at the given threshold (default 50).
+    let rename_threshold = if args.no_renames {
+        None
+    } else if args.renames || args.find_renames.is_some() {
+        Some(args.find_renames.unwrap_or(50))
+    } else {
+        None
+    };
+
     // Apply rename detection before collapsing untracked dirs / porcelain metadata.
-    if let Some(threshold) = args.find_renames
+    if let Some(threshold) = rename_threshold
         && threshold > 0
     {
         detect_renames_in_changes(&mut staged, threshold, head_oid.as_ref()).await?;
