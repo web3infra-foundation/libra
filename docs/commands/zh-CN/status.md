@@ -14,7 +14,7 @@ libra status [OPTIONS]
 
 `libra status` 显示工作树和暂存区状态：哪些文件已暂存到下一次提交，哪些有尚未暂存的修改，哪些未跟踪。它还报告当前分支、detached HEAD 状态和 upstream tracking 信息。
 
-该命令计算 HEAD、索引和工作树之间的 diff，将文件分类到 staged、unstaged 和 untracked 类别。它支持多种输出格式：人类可读长格式（默认）、短格式（`--short`）、机器可读 porcelain 格式，以及供代理消费的结构化 JSON。
+该命令计算 HEAD、索引和工作树之间的 diff，将文件分类到 staged、unstaged 和 untracked 类别。它支持多种输出格式：人类可读长格式（默认，也可用 `--long` 显式选择）、短格式（`--short`）、机器可读 porcelain 格式，以及供代理消费的结构化 JSON。
 
 ## 选项
 
@@ -25,6 +25,14 @@ libra status [OPTIONS]
 ```bash
 libra status -s
 libra status --short
+```
+
+### `--long`
+
+以长格式输出。这是 Libra 的默认格式，故该标志仅为 Git 对齐而接受、显式选择默认渲染；与 `--short`/`--porcelain` 互斥。
+
+```bash
+libra status --long
 ```
 
 ### `--porcelain [VERSION]`
@@ -272,6 +280,7 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 | 参数 / 标志 | Git | jj | Libra |
 |---|---|---|---|
 | 显示 status | `git status` | `jj status` / `jj st` | `libra status` |
+| 长格式 | `git status --long`（默认） | N/A | `libra status --long`（默认） |
 | 短格式 | `git status -s` / `--short` | N/A（始终短） | `libra status -s` / `--short` |
 | Porcelain v1 | `git status --porcelain` | N/A | `libra status --porcelain` |
 | Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2`（v1 语义） |

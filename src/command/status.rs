@@ -80,6 +80,12 @@ pub struct StatusArgs {
     #[clap(short = 's', long = "short", conflicts_with = "porcelain")]
     pub short: bool,
 
+    /// Give the output in the long-format. This is Libra's default, so the flag
+    /// is accepted for Git parity and simply selects the default rendering;
+    /// it conflicts with `--short`/`--porcelain`.
+    #[clap(long = "long", conflicts_with_all = ["short", "porcelain"])]
+    pub long_format: bool,
+
     /// Output with branch info (short or porcelain mode)
     #[clap(short = 'b', long = "branch")]
     pub branch: bool,

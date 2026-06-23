@@ -2529,3 +2529,34 @@ fn test_status_short_b_alias_shows_branch_header() {
         "no branch header without -b: {out_without:?}"
     );
 }
+
+#[test]
+fn test_status_long_selects_default_and_conflicts() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("f2.txt"), "x").unwrap();
+
+    // `--long` selects Libra's default long format (parity no-op).
+    let long = run_libra_command(&["status", "--long"], p);
+    assert_cli_success(&long, "status --long");
+    let plain = run_libra_command(&["status"], p);
+    assert_cli_success(&plain, "status");
+    assert_eq!(
+        String::from_utf8_lossy(&long.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "--long matches the default output"
+    );
+    assert!(
+        String::from_utf8_lossy(&long.stdout).contains("On branch"),
+        "long format shows the branch header"
+    );
+
+    // `--long` conflicts with `--short` and `--porcelain`.
+    let conflict_short = run_libra_command(&["status", "--long", "--short"], p);
+    assert!(!conflict_short.status.success(), "--long --short conflicts");
+    let conflict_porcelain = run_libra_command(&["status", "--long", "--porcelain"], p);
+    assert!(
+        !conflict_porcelain.status.success(),
+        "--long --porcelain conflicts"
+    );
+}

@@ -18,7 +18,7 @@ reports the current branch, detached HEAD state, and upstream tracking informati
 
 The command computes the diff between HEAD, the index, and the working tree to classify files
 into staged, unstaged, and untracked categories. It supports multiple output formats: a
-human-readable long format (default), a short format (`--short`), a machine-readable porcelain
+human-readable long format (default, also selectable explicitly with `--long`), a short format (`--short`), a machine-readable porcelain
 format, structured JSON for agent consumption, and `-z` NUL-terminated machine output. It can
 also detect renames (`--find-renames`), align output into columns (`--column`), and control
 whether upstream ahead/behind counts are shown (`--ahead-behind` / `--no-ahead-behind`).
@@ -374,6 +374,7 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Parameter / Flag | Git | jj | Libra |
 |---|---|---|---|
 | Show status | `git status` | `jj status` / `jj st` | `libra status` |
+| Long format | `git status --long` (default) | N/A | `libra status --long` (default) |
 | Short format | `git status -s` / `--short` | N/A (always short) | `libra status -s` / `--short` |
 | Porcelain v1 | `git status --porcelain` | N/A | `libra status --porcelain` |
 | Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2` (v1 semantics) |
