@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ batch 格式串（`=<format>`）已支持；`--batch-all-objects` 和 `-e` 的 JSON/machine 输出尚未公开（`flush` 需 `--buffer`，未公开）。
+- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ `--batch-all-objects`（配合 --batch/--batch-check，遍历 loose+packed，按 id 排序）/ batch 格式串（`=<format>`）已支持；`-e` 的 JSON/machine 输出尚未公开（`flush`/`--buffer`、`--follow-symlinks` 未公开）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-04 `e832538e`（`feat(cat-file): implement basic batch-check engine and stdin stream parser (v0.17.1299)`）：当前 `CatFileArgs` 已公开 `--batch-check`（含可选 `=<format>` 原子展开）与 `--batch` stdin 模式；当前事实以源码为准。
-- 2026-06-04 `2946746e`（`feat(cat-file): support batch-all-objects scanning and follow-symlinks resolution (v0.17.1301)`）：历史资料中曾记录 batch-all/follow-symlinks 方向，但当前 `CatFileArgs` 未公开对应 flag；当前事实以源码为准。
+- 2026-06-04 `2946746e`（`feat(cat-file): support batch-all-objects scanning and follow-symlinks resolution (v0.17.1301)`）：当前 `CatFileArgs` 已公开 `--batch-all-objects`（配合 --batch/--batch-check 遍历 loose+packed，`collect_all_object_ids` 走 objects/AB/CDEF + 解析 objects/pack/*.idx，去重并按 id 排序）；`--follow-symlinks` 仍未公开；当前事实以源码为准。
 - 2026-06-04 `dac8f161`（`feat(cat-file): support full batch content output and buffering control (v0.17.1300)`）：当前 `CatFileArgs` 已公开 `--batch` 完整内容输出与 `--batch-command`（info/contents）；但 `--buffer` 缓冲控制仍未公开（故 `flush` 命令报错）；当前事实以源码为准。
 - 2026-05-24 `8a1c5784`（`fix(cat-file): tighten error code mapping for remaining legacy paths`）：实现修正：tighten error code mapping for remaining legacy paths；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-07 `a3d7a262`（`test(cat-file): isolate batch helper processes`）：测试契约：isolate batch helper processes；相关行为已有回归守卫，后续变更需要继续满足。
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cat-file.md`。
 - Synopsis：`libra cat-file [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--batch`、`--batch-command`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。`--batch-check` 与 `--batch` 共享 `build_batch_object`：前者仅 header，后者 header + raw 内容 + 换行；每个对象单次缓冲写出以统一处理 BrokenPipe。`--batch-command` 从 stdin 逐行解析命令 `info <object>`（同 --batch-check）/ `contents <object>`（同 --batch），复用 `build_batch_object`；`flush` 因 Libra 不公开 `--buffer` 而报 `LBR-CLI-002`，未知命令同样报错。
+- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--batch`、`--batch-command`、`--batch-all-objects`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。`--batch-check` 与 `--batch` 共享 `build_batch_object`：前者仅 header，后者 header + raw 内容 + 换行；每个对象单次缓冲写出以统一处理 BrokenPipe。`--batch-command` 从 stdin 逐行解析命令 `info <object>`（同 --batch-check）/ `contents <object>`（同 --batch），复用 `build_batch_object`；`flush` 因 Libra 不公开 `--buffer` 而报 `LBR-CLI-002`，未知命令同样报错。`--batch-all-objects`（配合 `--batch`/`--batch-check`）以 `collect_all_object_ids`（loose objects/AB/CDEF + 解析 objects/pack/*.idx，去重并按 id 排序）替代 stdin 列表；缺 mode 时报 `LBR-CLI-002`。
 
 
 ## 还未实现的功能
@@ -60,7 +60,8 @@ flowchart TD
 | ✅ 已实现（部分） | Batch mode `--batch-check` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>`，无法解析时输出 `<input> missing`；支持可选 `=<format>` 原子展开（`%(objectname)`/`%(objecttype)`/`%(objectsize)`）。带 stdin 集成测试。 |
 | ✅ 已实现（部分） | Batch mode `--batch` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>` + raw 对象内容 + 换行（二进制安全，单次缓冲写出），无法解析时输出 `<input> missing`；与 `--batch-check` 共享 `build_batch_object` 及同一 `=<format>` 原子展开。带 stdin 集成测试。 |
 | ✅ 已实现（部分） | Batch mode `--batch-command` | 从 stdin 逐行读命令：`info <object>`（header，同 --batch-check）/ `contents <object>`（header + 内容，同 --batch），复用 `build_batch_object`（含同一 `=<format>`）；`flush` 需 `--buffer`（未公开）→报错，未知命令报错。带 stdin 集成测试。 |
-| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--batch-all-objects`、`--buffer`；当前说明：延后。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现（部分） | Batch mode `--batch-all-objects` | 配合 `--batch`/`--batch-check`，用 `collect_all_object_ids`（loose objects/AB/CDEF + 解析 objects/pack/*.idx 的 `parse_index`，去重并按 id 排序）替代 stdin 对象列表；缺 `--batch`/`--batch-check` 时报 `LBR-CLI-002`。带集成测试。 |
+| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--buffer`、`--follow-symlinks`；当前说明：延后。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 不支持 argument combination | 当前状态：LBR-CLI-002；Git/相关参数：129。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

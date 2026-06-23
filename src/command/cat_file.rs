@@ -47,6 +47,8 @@ Modes:
   - Git batch modes (stdin): --batch-check / --batch / --batch-command read object
     names (or info/contents commands) from stdin instead of OBJECT, with an optional
     =<format> for the header line.
+  - --batch-all-objects (with --batch/--batch-check): operate on every object in the
+    store (loose + packed, in id order) instead of reading stdin.
   - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID or TYPE:ID.
   - AI listing modes: use --ai-list <TYPE> or --ai-list-types.
 
@@ -61,6 +63,7 @@ const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
     libra cat-file --batch-command                          Read info/contents commands from stdin (one per line)
+    libra cat-file --batch-check --batch-all-objects         List every object in the store (loose + packed), id-ordered
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
     libra cat-file --ai-list-types                          List every AI object type in the history branch
     libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7…    Look up an AI object by TYPE:ID
@@ -109,6 +112,12 @@ pub struct CatFileArgs {
     /// requires Git's `--buffer`, which Libra does not expose.)
     #[clap(long = "batch-command", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub batch_command: Option<String>,
+
+    /// With `--batch` or `--batch-check`, operate on every object in the
+    /// repository (loose and packed) instead of reading names from stdin.
+    /// Output is ordered by object id.
+    #[clap(long = "batch-all-objects")]
+    pub batch_all_objects: bool,
 
     // ── AI object modes ─────────────────────────────────────────────────
     /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
@@ -351,6 +360,22 @@ pub async fn execute(args: CatFileArgs) {
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    if args.batch_all_objects {
+        // `--batch-all-objects` is a modifier for `--batch` / `--batch-check`;
+        // it replaces the stdin object list with every object in the store.
+        let (include_content, fmt) = match (&args.batch, &args.batch_check) {
+            (Some(fmt), _) => (true, fmt.as_str()),
+            (_, Some(fmt)) => (false, fmt.as_str()),
+            _ => {
+                return Err(CliError::command_usage(
+                    "--batch-all-objects requires --batch or --batch-check",
+                )
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+        };
+        return run_batch_all_objects(include_content, fmt).await;
+    }
+
     if let Some(fmt) = &args.batch_check {
         return run_batch(false, fmt).await;
     }
@@ -583,6 +608,103 @@ async fn build_batch_object(
         Err(_) => buf.extend_from_slice(format!("{spec} missing\n").as_bytes()),
     }
     buf
+}
+
+/// `cat-file --batch[-check] --batch-all-objects`: emit a batch line for every
+/// object in the store (loose and packed) instead of reading names from stdin.
+/// Objects are emitted in ascending object-id order.
+async fn run_batch_all_objects(include_content: bool, format: &str) -> CliResult<()> {
+    use std::io::Write;
+
+    let storage = ClientStorage::init(path::objects());
+    let ids = collect_all_object_ids(&storage)?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for id in ids {
+        let buf = build_batch_object(&id.to_string(), include_content, format, &storage).await;
+        match out.write_all(&buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => {
+                return Err(CliError::fatal(format!(
+                    "failed to write cat-file --batch-all-objects output: {e}"
+                ))
+                .with_stable_code(StableErrorCode::IoWriteFailed));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enumerate every object id in the local store: loose objects under
+/// `objects/AB/CDEF…` plus packed objects listed in each `objects/pack/*.idx`.
+/// Ids are de-duplicated (an object may be both loose and packed) and returned
+/// in ascending hex order to match Git's `--batch-all-objects` ordering. A pack
+/// index that fails to parse is skipped rather than aborting the whole listing.
+fn collect_all_object_ids(storage: &ClientStorage) -> CliResult<Vec<ObjectHash>> {
+    use std::collections::HashSet;
+
+    let io_err = |e: std::io::Error| {
+        CliError::fatal(format!("failed to enumerate objects: {e}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    };
+
+    let mut set: HashSet<ObjectHash> = HashSet::new();
+    let objects_dir = storage.base_path();
+    if !objects_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    for entry in std::fs::read_dir(objects_dir).map_err(io_err)? {
+        let entry = entry.map_err(io_err)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if dir_name.len() != 2 || !dir_name.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        for sub in std::fs::read_dir(&path).map_err(io_err)? {
+            let sub = sub.map_err(io_err)?;
+            let sub_path = sub.path();
+            if !sub_path.is_file() {
+                continue;
+            }
+            let Some(file_name) = sub_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Ok(bytes) = hex::decode(format!("{dir_name}{file_name}"))
+                && let Ok(hash) = ObjectHash::from_bytes(&bytes)
+            {
+                set.insert(hash);
+            }
+        }
+    }
+
+    let pack_dir = objects_dir.join("pack");
+    if pack_dir.exists() {
+        for entry in std::fs::read_dir(&pack_dir).map_err(io_err)? {
+            let entry = entry.map_err(io_err)?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("idx") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).map_err(io_err)?;
+            if let Ok(parsed) = super::verify_pack_index::parse_index(&bytes) {
+                for parsed_entry in parsed.entries {
+                    set.insert(parsed_entry.hash);
+                }
+            }
+        }
+    }
+
+    let mut ids: Vec<ObjectHash> = set.into_iter().collect();
+    ids.sort_by_key(|h| h.to_string());
+    Ok(ids)
 }
 
 /// `cat-file --batch-command`: read one command per line from stdin and dispatch

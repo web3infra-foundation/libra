@@ -1031,3 +1031,68 @@ fn test_cat_file_batch_command_dispatches_info_and_contents() {
     let unknown = run_bc("bogus deadbeef\n".to_string());
     assert!(!unknown.status.success(), "unknown command must error");
 }
+
+#[test]
+fn test_cat_file_batch_all_objects_lists_sorted_objects() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-check", "--batch-all-objects"])
+        .output()
+        .expect("Failed to run cat-file --batch-all-objects");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    // The first commit produces at least a commit, a tree, and a blob.
+    assert!(lines.len() >= 3, "expected >= 3 objects, got: {stdout}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with(&head_hash) && l.contains(" commit ")),
+        "HEAD commit must be listed: {stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains(" tree ")),
+        "a tree must be listed: {stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains(" blob ")),
+        "a blob must be listed: {stdout}"
+    );
+
+    // Objects are emitted in ascending object-id order.
+    let hashes: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split(' ').next().unwrap_or(""))
+        .collect();
+    let mut sorted = hashes.clone();
+    sorted.sort_unstable();
+    assert_eq!(hashes, sorted, "objects must be sorted by id: {stdout}");
+
+    // Without --batch / --batch-check it is a usage error.
+    let bad = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--batch-all-objects"])
+        .output()
+        .expect("Failed to run cat-file --batch-all-objects (no mode)");
+    assert!(
+        !bad.status.success(),
+        "--batch-all-objects requires --batch/--batch-check"
+    );
+}
