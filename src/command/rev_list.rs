@@ -43,6 +43,11 @@ pub struct RevListArgs {
     #[clap(long, value_name = "N", default_value_t = 0)]
     pub skip: usize,
 
+    /// Output the selected commits in reverse order. Commit limiting
+    /// (`--max-count`/`--skip`) is applied first, then the result is reversed.
+    #[clap(long)]
+    pub reverse: bool,
+
     /// Print only the number of commits after filters
     #[clap(long)]
     pub count: bool,
@@ -171,7 +176,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let message_filter = rev_list_message_filter(args)?;
     let parent_filter = parent_count_filter(args);
 
-    let commits = commits
+    let mut commits = commits
         .into_iter()
         .filter(|selected| commit_matches_author(&selected.commit, author_filter.as_deref()))
         .filter(|selected| commit_matches_committer(&selected.commit, committer_filter.as_deref()))
@@ -181,6 +186,12 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
+    // `--reverse` reverses the already-limited selection (Git applies commit
+    // limiting first, then reverses for output). Order-independent `--count` is
+    // unaffected.
+    if args.reverse {
+        commits.reverse();
+    }
     let count_fields = if args.count {
         rev_list_count_fields(&commits, args)
     } else {

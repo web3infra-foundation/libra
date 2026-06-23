@@ -10,7 +10,7 @@ libra rev-list [OPTIONS] [SPEC]
 
 ## 说明
 
-`libra rev-list` 会将修订输入解析为提交，遍历可达历史，应用可选的父提交数量过滤和计数/限制过滤，并按从新到旧的顺序打印提交 ID。省略 `<SPEC>` 时，命令默认为 `HEAD`。输出格式可以通过 `--parents` 增加父提交 ID，也可以通过 `--timestamp` 增加提交者时间戳。
+`libra rev-list` 会将修订输入解析为提交，遍历可达历史，应用可选的父提交数量过滤和计数/限制过滤，并按从新到旧的顺序打印提交 ID。省略 `<SPEC>` 时，命令默认为 `HEAD`。输出格式可以通过 `--parents` 增加父提交 ID，也可以通过 `--timestamp` 增加提交者时间戳。`--reverse` 将输出翻转为从旧到新（在提交限制之后应用）。
 
 ## 选项
 
@@ -18,6 +18,7 @@ libra rev-list [OPTIONS] [SPEC]
 |------|-------------|
 | `-n <N>`, `--max-count <N>` | 排序后最多输出 `N` 个提交。 |
 | `--skip <N>` | 输出或计数前跳过前 `N` 个提交。 |
+| `--reverse` | 反转所选提交的输出顺序。先应用提交限制（`--max-count`/`--skip`），再反转结果。 |
 | `--count` | 只打印过滤后的提交数量。 |
 | `--merges` | 只打印至少有两个父提交的 merge commit。 |
 | `--no-merges` | 排除至少有两个父提交的 merge commit。 |
@@ -34,6 +35,7 @@ libra rev-list
 libra rev-list HEAD
 libra rev-list --count HEAD
 libra rev-list -n 5 HEAD
+libra rev-list --reverse HEAD
 libra rev-list --skip 5 --max-count 10 HEAD
 libra rev-list --merges HEAD
 libra rev-list --no-merges HEAD

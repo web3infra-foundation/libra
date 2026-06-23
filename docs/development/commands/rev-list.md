@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
+`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp`、`--reverse` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children` 和 `--timestamp` 已支持；更广义对象遍历输出尚未公开。
+- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp` 和 `--reverse`（先做提交限制再反转输出）已支持；更广义对象遍历输出尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -58,7 +58,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-list.md`。
 - Synopsis：`libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]`。
-- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`-- <PATH>...`、`--parents`、`--children`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
+- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--reverse`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`-- <PATH>...`、`--parents`、`--children`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
 
 
 ## 还未实现的功能

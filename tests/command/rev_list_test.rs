@@ -241,3 +241,43 @@ async fn test_rev_list_accepts_fully_qualified_remote_tracking_ref() {
         head.to_string()
     );
 }
+
+#[test]
+fn test_rev_list_reverse_outputs_oldest_first() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+    let p = repo.path();
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    let parent = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~1"], p).stdout)
+        .trim()
+        .to_string();
+
+    // --reverse flips the default newest-first order to oldest-first.
+    let out = run_libra_command(&["rev-list", "--reverse", "HEAD"], p);
+    assert_cli_success(&out, "rev-list --reverse HEAD");
+    let lines = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![parent.clone(), head.clone()],
+        "reverse = oldest first"
+    );
+
+    // Commit limiting is applied BEFORE the reverse: `-n 1` selects the newest
+    // (head); reversing a single commit is still head. (Were it reverse-first,
+    // the output would be the parent.)
+    let out2 = run_libra_command(&["rev-list", "-n", "1", "--reverse", "HEAD"], p);
+    assert_cli_success(&out2, "rev-list -n 1 --reverse HEAD");
+    let lines2 = String::from_utf8_lossy(&out2.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines2,
+        vec![head.clone()],
+        "limit-then-reverse keeps the newest"
+    );
+}
