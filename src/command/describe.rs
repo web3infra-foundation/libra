@@ -9,7 +9,11 @@ use git_internal::{
 
 use crate::{
     command::{load_object, status},
-    internal::tag::{self, TagObject},
+    internal::{
+        branch::Branch,
+        config::ConfigKv,
+        tag::{self, TagObject},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -28,6 +32,7 @@ const DESCRIBE_EXAMPLES: &str = "\
 EXAMPLES:
     libra describe                  Describe HEAD using the nearest annotated tag
     libra describe --tags           Include lightweight tags (not just annotated ones) in the search
+    libra describe --all            Use any ref (branches/remotes/tags), shown with heads/remotes/tags prefix
     libra describe --always         Fall back to abbreviated commit hash when no tag matches
     libra describe --exact-match    Only succeed when HEAD exactly matches a tag
     libra describe --long           Force tag-0-gHASH form for exact tag matches
@@ -54,6 +59,12 @@ pub struct DescribeArgs {
     /// Consider any tag in refs/tags (not just annotated tags) when describing
     #[clap(long)]
     pub tags: bool,
+
+    /// Use any ref (local branches, remote-tracking branches, and tags), not
+    /// just tags; names are shown with their `heads/`, `remotes/`, or `tags/`
+    /// prefix (Git's `--all`).
+    #[clap(long)]
+    pub all: bool,
 
     /// Use N hex digits for the abbreviated commit hash (default: 7)
     #[clap(long, value_name = "N")]
@@ -130,7 +141,10 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     if long_format && abbrev == 0 {
         return Err(DescribeError::LongWithAbbrevZero);
     }
-    let include_lightweight = args.tags;
+    // `--all` considers every ref (branches + remotes + tags), which implies
+    // even lightweight tags are candidates.
+    let include_all = args.all;
+    let include_lightweight = args.tags || include_all;
     // `--candidates 0` means "only exact matches", which is exactly the
     // `--exact-match` behavior (Git documents `--candidates 0` this way).
     let exact_match = args.exact_match || args.candidates == Some(0);
@@ -154,11 +168,16 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
 
         // Only include light-weight tags if --tags is specified
         if is_annotated || include_lightweight {
-            let tag_name = t.name;
-            // Apply --match / --exclude name filters (exclude wins over match).
-            if !tag_passes_filters(&tag_name, &matchers, &excluders) {
+            // Apply --match / --exclude name filters to the bare tag name
+            // (exclude wins over match), then prefix with `tags/` under --all.
+            if !tag_passes_filters(&t.name, &matchers, &excluders) {
                 continue;
             }
+            let tag_name = if include_all {
+                format!("tags/{}", t.name)
+            } else {
+                t.name
+            };
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
                 TagObject::Tag(tg) => tg.object_hash,
@@ -176,6 +195,36 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
                         is_annotated,
                     },
                 );
+            }
+        }
+    }
+
+    // Under --all, also consider local branches (`heads/<name>`) and
+    // remote-tracking branches (`remotes/<remote>/<name>`) as candidates.
+    // Tags take precedence at a shared commit (inserted first), then heads,
+    // then remotes; `or_insert_with` never overrides an existing tag entry.
+    if include_all {
+        let mut locals = Branch::list_branches_result(None)
+            .await
+            .map_err(|e| DescribeError::CorruptReference(e.to_string()))?;
+        locals.sort_by(|a, b| a.name.cmp(&b.name));
+        for branch in locals {
+            tag_map.entry(branch.commit).or_insert_with(|| TagInfo {
+                name: format!("heads/{}", branch.name),
+                is_annotated: false,
+            });
+        }
+
+        for remote in describe_remote_names().await? {
+            let mut remote_branches = Branch::list_branches_result(Some(&remote))
+                .await
+                .map_err(|e| DescribeError::CorruptReference(e.to_string()))?;
+            remote_branches.sort_by(|a, b| a.name.cmp(&b.name));
+            for branch in remote_branches {
+                tag_map.entry(branch.commit).or_insert_with(|| TagInfo {
+                    name: format!("remotes/{}/{}", remote, branch.name),
+                    is_annotated: false,
+                });
             }
         }
     }
@@ -322,6 +371,24 @@ fn tag_passes_filters(name: &str, matchers: &[wax::Glob<'_>], excluders: &[wax::
     matchers
         .iter()
         .any(|glob| wax::Program::is_match(glob, name))
+}
+
+/// Enumerate configured remote names (for `--all`) from `remote.<name>.*`
+/// config keys, mirroring `remote`'s own listing. Returns a sorted, de-duped
+/// list so describe output is deterministic.
+async fn describe_remote_names() -> Result<Vec<String>, DescribeError> {
+    let entries = ConfigKv::get_by_prefix("remote.")
+        .await
+        .map_err(|e| DescribeError::CorruptReference(e.to_string()))?;
+    let mut names = std::collections::BTreeSet::new();
+    for entry in entries {
+        if let Some(rest) = entry.key.strip_prefix("remote.")
+            && let Some((name, _subkey)) = rest.rsplit_once('.')
+        {
+            names.insert(name.to_string());
+        }
+    }
+    Ok(names.into_iter().collect())
 }
 
 fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: bool) -> bool {

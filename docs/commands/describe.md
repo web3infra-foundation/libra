@@ -46,6 +46,7 @@ this command.
 |------|-------------|---------|
 | `<COMMIT>` | The commit-ish to describe. Accepts `HEAD`, branch names, tag names, raw SHA-1, `HEAD~N`. | `HEAD` |
 | `--tags` | Include lightweight tags in the search (not just annotated tags). | Off |
+| `--all` | Consider any ref (local branches, remote-tracking branches, and tags, including lightweight ones), not just tags. Names are shown with their `heads/`, `remotes/`, or `tags/` prefix; at a shared commit tags win, then heads, then remotes. | Off |
 | `--abbrev <N>` | Number of hex digits for the abbreviated commit hash in the output. | `7` |
 | `--always` | When no tag can describe the target, fall back to the abbreviated commit hash instead of failing. | Off |
 | `--exact-match` | Only succeed when the target commit exactly matches a tag. | Off |
@@ -230,10 +231,13 @@ exposed for its well-defined boundary: `N=0` means "only exact matches"
 (equivalent to `--exact-match`), while `N>=1` keeps Libra's predictable
 nearest-tag BFS (the candidate bound only affects which of several equally
 reachable tags Git would prefer, which Libra resolves deterministically).
-`--contains` and `--all` remain unimplemented: they depend on Git's
-reverse-walk containment / all-refs algorithms, which Libra's predictable BFS
-does not provide. They can be added incrementally if real users or agents
-need them.
+`--all` is supported: branches (`heads/`), remote-tracking branches
+(`remotes/`), and tags (`tags/`, including lightweight ones) are all folded
+into the candidate set for the same BFS, with tags taking precedence at a
+shared commit, then heads, then remotes. `--contains` remains unimplemented:
+it depends on Git's reverse-walk containment algorithm, which Libra's
+predictable forward BFS does not provide. It can be added incrementally if
+real users or agents need it.
 
 ### Why include both string and structured fields?
 
@@ -268,6 +272,7 @@ search, but this has not been a problem in practice.
 | Exclude tag pattern | `--exclude <glob>` (exclude wins over match) | `--exclude <glob>` | N/A |
 | Candidate count | `--candidates <N>` (N=0 ⇒ exact-match; N≥1 ⇒ nearest-tag BFS) | `--candidates=<N>` (default 10) | N/A |
 | First-parent only | `--first-parent` | `--first-parent` | N/A |
+| Consider all refs | `--all` (heads/remotes/tags, prefixed) | `--all` | N/A |
 | Dirty suffix | `--dirty[=<mark>]` | `--dirty[=<mark>]` | N/A |
 | JSON output | `--json` with typed fields | No | No |
 | Algorithm | BFS (shortest path) | Heuristic multi-candidate | N/A |

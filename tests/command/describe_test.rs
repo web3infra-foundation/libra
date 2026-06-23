@@ -478,3 +478,38 @@ fn test_describe_candidates_zero_requires_exact_match() {
         "describe --candidates abc should be rejected"
     );
 }
+
+#[test]
+fn test_describe_all_uses_branches_and_tags_with_prefix() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert!(
+        run_libra_command(&["tag", "-m", "release", "v1"], p)
+            .status
+            .success(),
+        "create annotated tag"
+    );
+
+    // At the tagged commit both a tag and the branch tip point here; under
+    // --all tags take precedence and are shown with the `tags/` prefix.
+    let at_tag = run_libra_command(&["describe", "--all"], p);
+    assert!(at_tag.status.success(), "describe --all at tag");
+    let s = String::from_utf8_lossy(&at_tag.stdout);
+    assert_eq!(s.trim(), "tags/v1", "expected tags/v1, got: {s:?}");
+
+    // Advance the branch one commit; now its tip is the nearest ref and is
+    // shown with the `heads/` prefix.
+    assert!(
+        run_libra_command(&["commit", "--allow-empty", "-m", "c1", "--no-verify"], p)
+            .status
+            .success(),
+        "advance branch"
+    );
+    let at_branch = run_libra_command(&["describe", "--all"], p);
+    assert!(at_branch.status.success(), "describe --all at branch tip");
+    let b = String::from_utf8_lossy(&at_branch.stdout);
+    assert!(
+        b.trim().starts_with("heads/"),
+        "expected a heads/ ref at the branch tip, got: {b:?}"
+    );
+}
