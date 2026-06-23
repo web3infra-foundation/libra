@@ -20,7 +20,7 @@ libra agent rpc <subcommand>
 
 `libra agent` manages Libra's external-agent capture surface. It installs and
 removes provider hooks, reports captured session/checkpoint state, exposes
-read-only diagnostics, and can push `refs/libra/agent-traces` to a remote.
+read-only diagnostics, and can push `refs/libra/traces` to a remote.
 
 Stable installable agents currently include `claude-code` and `gemini`. Preview
 adapters are discoverable in code but are skipped by install/uninstall until
@@ -44,7 +44,7 @@ their hook installation path is implemented.
 | `checkpoint rewind <id>` | Inspect or apply a working-tree rewind for one checkpoint |
 | `clean` | Clean up temporary checkpoints from stopped sessions |
 | `doctor` | Diagnose hook installation and capture state |
-| `push` | Push `refs/libra/agent-traces` to a remote |
+| `push` | Push `refs/libra/traces` to a remote |
 | `rpc list` | List discovered `libra-agent-*` binaries on `PATH` |
 | `rpc invoke` | Invoke one JSON-RPC method on a `libra-agent-*` binary |
 
@@ -115,10 +115,10 @@ libra agent clean --all
 # Diagnose hook installation and capture state
 libra agent doctor
 
-# Push refs/libra/agent-traces to the default remote
+# Push refs/libra/traces to the default remote
 libra agent push
 
-# Push refs/libra/agent-traces to a named remote
+# Push refs/libra/traces to a named remote
 libra agent push --remote origin
 
 # Discover libra-agent-<name> RPC binaries on PATH

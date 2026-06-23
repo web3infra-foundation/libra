@@ -978,49 +978,49 @@ fn test_checkout_json_reserved_branch_reports_invalid_target() {
 }
 
 /// opencode.md OC-Phase 3 acceptance criterion 5 requires that
-/// `checkout` refuse to route user work onto `agent-traces`, the same
+/// `checkout` refuse to route user work onto `traces`, the same
 /// way it already refuses `intent`. The branch is reserved for the
 /// external-agent capture subsystem (CEX-EntireIO) and any user-driven
 /// checkout that lands on it would let `restore` / `reset` rewind
 /// working state to AI-managed commits.
 #[test]
-fn test_checkout_agent_traces_branch_reports_invalid_target() {
+fn test_checkout_traces_branch_reports_invalid_target() {
     use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
     let repo = create_committed_repo_via_cli();
 
-    let output = run_libra_command(&["--json", "checkout", "agent-traces"], repo.path());
+    let output = run_libra_command(&["--json", "checkout", "traces"], repo.path());
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
-        report.message.contains("'agent-traces'"),
-        "error message must name the agent-traces branch verbatim, got: {}",
+        report.message.contains("'traces'"),
+        "error message must name the traces branch verbatim, got: {}",
         report.message,
     );
 }
 
 /// Counterpart that exercises the create-new-branch path: `checkout -b
-/// agent-traces` must fail, otherwise a user (or stray AI agent) could
+/// traces` must fail, otherwise a user (or stray AI agent) could
 /// clobber the reserved capture ref by creating a same-named local
 /// branch and pushing it.
 #[test]
-fn test_checkout_create_agent_traces_branch_is_blocked() {
+fn test_checkout_create_traces_branch_is_blocked() {
     use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
     let repo = create_committed_repo_via_cli();
 
-    let output = run_libra_command(&["--json", "checkout", "-b", "agent-traces"], repo.path());
+    let output = run_libra_command(&["--json", "checkout", "-b", "traces"], repo.path());
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
-        report.message.contains("'agent-traces'"),
-        "error message must name the agent-traces branch verbatim, got: {}",
+        report.message.contains("'traces'"),
+        "error message must name the traces branch verbatim, got: {}",
         report.message,
     );
 }

@@ -1410,7 +1410,7 @@ impl PublishAiExportPlanner for HistoryBackedPublishAiExportPlanner {
             revision_oid: input.revision_oid.clone(),
             ai_version_id: format!("ai-{}", input.revision_oid),
             generated_at: input.generated_at,
-            ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+            ai_object_model_reference: "docs/ai/object-model-reference.md".to_string(),
             redaction_mode: input.redaction_mode,
             redaction_rules_version: input.redaction_rules_version,
             associated_ids: AiBundleAssociatedIds {
@@ -3240,7 +3240,7 @@ mod tests {
                 revision_oid: input.revision_oid.clone(),
                 ai_version_id: format!("ai-{}", input.revision_oid),
                 generated_at: input.generated_at,
-                ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+                ai_object_model_reference: "docs/ai/object-model-reference.md".to_string(),
                 redaction_mode: input.redaction_mode,
                 redaction_rules_version: input.redaction_rules_version.clone(),
                 associated_ids: AiBundleAssociatedIds {

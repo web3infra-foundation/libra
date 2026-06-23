@@ -825,7 +825,7 @@ impl ClientStorage {
 /// usual `ClientStorage::put` path — currently agent capture transcript and
 /// metadata blobs, which `HistoryManager::append_checkpoint_commit` writes
 /// directly via [`crate::utils::object::write_git_object`] for the orphan
-/// `refs/libra/agent-traces` history.
+/// `refs/libra/traces` history.
 ///
 /// Why this exists: cloud sync uploads only the rows it finds in
 /// `object_index` — anything that bypasses `object_index` is invisible to

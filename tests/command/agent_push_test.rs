@@ -1,8 +1,8 @@
 //! Integration coverage for `libra agent push`.
 //!
-//! The external-agent capture plan reserves `refs/libra/agent-traces` for
+//! The external-agent capture plan reserves `refs/libra/traces` for
 //! transport. This test keeps the wrapper pinned to that private destination
-//! instead of accidentally publishing `agent-traces` as a normal branch.
+//! instead of accidentally publishing `traces` as a normal branch.
 
 #[cfg(unix)]
 use std::{
@@ -13,7 +13,7 @@ use std::{
 
 #[cfg(unix)]
 use libra::{
-    internal::branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+    internal::branch::{TRACES_BRANCH, Branch as InternalBranch},
     utils::test::ChangeDirGuard,
 };
 #[cfg(unix)]
@@ -132,11 +132,11 @@ fn init_repo_with_agent_traces_tip(local_dir: &Path) -> String {
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     runtime
         .block_on(InternalBranch::update_branch(
-            AGENT_TRACES_BRANCH,
+            TRACES_BRANCH,
             &head,
             None,
         ))
-        .expect("failed to point agent-traces branch at HEAD");
+        .expect("failed to point traces branch at HEAD");
 
     head
 }
@@ -191,13 +191,13 @@ fn agent_push_writes_private_agent_traces_ref() {
             "--git-dir",
             remote_dir.to_str().unwrap(),
             "rev-parse",
-            "refs/libra/agent-traces",
+            "refs/libra/traces",
         ])
         .output()
         .expect("failed to read remote private ref");
     assert!(
         private_ref_out.status.success(),
-        "remote refs/libra/agent-traces should exist, stderr: {}",
+        "remote refs/libra/traces should exist, stderr: {}",
         String::from_utf8_lossy(&private_ref_out.stderr)
     );
     let private_ref = String::from_utf8(private_ref_out.stdout)
@@ -212,12 +212,12 @@ fn agent_push_writes_private_agent_traces_ref() {
             remote_dir.to_str().unwrap(),
             "rev-parse",
             "--verify",
-            "refs/heads/agent-traces",
+            "refs/heads/traces",
         ])
         .output()
-        .expect("failed to check public agent-traces branch");
+        .expect("failed to check public traces branch");
     assert!(
         !public_branch_out.status.success(),
-        "agent push must not create refs/heads/agent-traces"
+        "agent push must not create refs/heads/traces"
     );
 }

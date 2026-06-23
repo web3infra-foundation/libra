@@ -51,9 +51,9 @@
 //! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
 //!
 //! Cross-references for agents extending this command:
-//! - Agent workflow and object model: `docs/agent/agent-workflow.md`
-//! - MCP upgrade and transport notes: `docs/agent/mcp-upgrade-report.md`
-//! - IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`
+//! - Agent workflow and object model: `docs/ai/workflow.md`
+//! - MCP split, transport, and object-model notes: `docs/development/mcp.md`
+//! - IntentSpec contract examples: `docs/ai/intentspec_typical.yaml`
 
 use std::{
     collections::BTreeMap,
@@ -618,7 +618,7 @@ pub struct CodeArgs {
     /// Codex plan-first mode: require an approved plan before execution.
     ///
     /// When `--provider=codex`, this defaults to ON so the session
-    /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
+    /// follows `docs/ai/workflow.md` Phase 0/1 (read-only intent &
     /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
     /// opt out for a single session. For non-Codex providers, omit the flag —
     /// Libra drives Phase 0/1 through its own tool loop.
@@ -1482,7 +1482,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     // AI user story: MCP bridge tools let the agent persist intent/task/run,
     // evidence, provenance, and Libra VCS operations in the same workflow graph
     // that external MCP clients use. Keep these names aligned with
-    // `docs/agent/intentspec_typical.yaml` and `docs/agent/agent-workflow.md`.
+    // `docs/ai/intentspec_typical.yaml` and `docs/ai/workflow.md`.
     for (name, handler) in McpBridgeHandler::all_handlers(mcp_server.clone()) {
         builder = builder.register(name, handler);
     }

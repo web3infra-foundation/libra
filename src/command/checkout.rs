@@ -14,7 +14,7 @@ use crate::{
     },
     info_println,
     internal::{
-        branch::{AGENT_TRACES_BRANCH, Branch, BranchStoreError, INTENT_BRANCH},
+        branch::{Branch, BranchStoreError, is_ai_managed_branch},
         head::Head,
     },
     utils::{
@@ -265,19 +265,19 @@ async fn run_checkout(
     }
 
     if let Some(ref branch_name) = args.branch
-        && (branch_name == INTENT_BRANCH || branch_name == AGENT_TRACES_BRANCH)
+        && is_ai_managed_branch(branch_name)
     {
         return Err(CheckoutError::CheckingOutBranchBlocked(branch_name.clone()));
     }
     if let Some(ref new_branch_name) = args.new_branch
-        && (new_branch_name == INTENT_BRANCH || new_branch_name == AGENT_TRACES_BRANCH)
+        && is_ai_managed_branch(new_branch_name)
     {
         return Err(CheckoutError::CreatingBranchBlocked(
             new_branch_name.clone(),
         ));
     }
     if let Some(ref force_new_branch_name) = args.force_new_branch
-        && (force_new_branch_name == INTENT_BRANCH || force_new_branch_name == AGENT_TRACES_BRANCH)
+        && is_ai_managed_branch(force_new_branch_name)
     {
         return Err(CheckoutError::CreatingBranchBlocked(
             force_new_branch_name.clone(),
@@ -535,7 +535,7 @@ async fn switch_branch_with_output(
     branch_name: &str,
     output: &OutputConfig,
 ) -> Result<ObjectHash, CheckoutError> {
-    if branch_name == INTENT_BRANCH || branch_name == AGENT_TRACES_BRANCH {
+    if is_ai_managed_branch(branch_name) {
         return Err(CheckoutError::SwitchingToBranchBlocked(
             branch_name.to_string(),
         ));

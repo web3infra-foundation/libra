@@ -28,7 +28,7 @@
 //!
 //! Per `docs/development/commands/_general.md` lines 1551-1556, Goal mode lives in
 //! the `libra code` namespace and **must not** touch `agent_session`,
-//! `agent_checkpoint`, or `refs/libra/agent-traces` (entire.md ownership
+//! `agent_checkpoint`, or `refs/libra/traces` (entire.md ownership
 //! boundary). A fresh module makes the boundary visible and stops a
 //! drive-by edit from accidentally cross-wiring Goal events into the
 //! external `ObservedAgent` capture path.

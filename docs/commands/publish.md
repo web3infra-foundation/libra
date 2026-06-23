@@ -410,5 +410,5 @@ CLI surface stay in sync (cross-cutting `--help` EXAMPLES rollout, see
 - `libra cloud` — private Cloudflare backup that `publish` builds on
   top of.
 - `docs/development/commands/publish.md` — internal design + phased rollout.
-- `docs/agent/ai-object-model-reference.md` — the AI object model
+- `docs/ai/object-model-reference.md` — the AI object model
   contract `publish` exports.

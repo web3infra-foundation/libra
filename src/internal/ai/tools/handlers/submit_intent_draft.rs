@@ -18,8 +18,8 @@ use crate::internal::ai::tools::{
 ///
 /// AI user story: let the agent convert a natural-language request into the
 /// formal IntentSpec planning shape before execution tasks are compiled. Keep
-/// this aligned with `docs/agent/intent-spec.md` and
-/// `docs/agent/intentspec_typical.yaml`.
+/// this aligned with `docs/ai/intent-spec.md` and
+/// `docs/ai/intentspec_typical.yaml`.
 pub struct SubmitIntentDraftHandler;
 
 #[async_trait]

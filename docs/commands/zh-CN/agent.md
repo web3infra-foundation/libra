@@ -18,7 +18,7 @@ libra agent rpc <subcommand>
 
 ## 说明
 
-`libra agent` 管理 Libra 的外部代理捕获表面。它安装和移除提供商 hook，报告已捕获的 session/checkpoint 状态，暴露只读诊断，并可将 `refs/libra/agent-traces` 推送到远程。
+`libra agent` 管理 Libra 的外部代理捕获表面。它安装和移除提供商 hook，报告已捕获的 session/checkpoint 状态，暴露只读诊断，并可将 `refs/libra/traces` 推送到远程。
 
 当前稳定可安装代理包括 `claude-code` 和 `gemini`。预览适配器可在代码中发现，但在其 hook 安装路径实现之前，会被安装/卸载流程跳过。
 
@@ -40,7 +40,7 @@ libra agent rpc <subcommand>
 | `checkpoint rewind <id>` | 检查或应用某个 checkpoint 的工作树回退 |
 | `clean` | 清理已停止会话的临时 checkpoint |
 | `doctor` | 诊断 hook 安装和捕获状态 |
-| `push` | 将 `refs/libra/agent-traces` 推送到远程 |
+| `push` | 将 `refs/libra/traces` 推送到远程 |
 | `rpc list` | 列出 `PATH` 上发现的 `libra-agent-*` 二进制文件 |
 | `rpc invoke` | 在某个 `libra-agent-*` 二进制文件上调用一个 JSON-RPC 方法 |
 
@@ -110,10 +110,10 @@ libra agent clean --all
 # 诊断 hook 安装和捕获状态
 libra agent doctor
 
-# 将 refs/libra/agent-traces 推送到默认远程
+# 将 refs/libra/traces 推送到默认远程
 libra agent push
 
-# 将 refs/libra/agent-traces 推送到具名远程
+# 将 refs/libra/traces 推送到具名远程
 libra agent push --remote origin
 
 # 发现 PATH 上的 libra-agent-<name> RPC 二进制文件

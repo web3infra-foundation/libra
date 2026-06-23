@@ -1,10 +1,10 @@
-# IntentSpec Design
+# IntentSpec 设计
 
-> Local implementation note (2026-03-13)
+> 本地实现说明（2026-03-13）
 >
-> Libra currently accepts structured objectives in `intent.objectives[]`,
-> where each objective is `{ title, kind }` and `kind` is one of
-> `implementation` or `analysis`.
+> Libra 目前在 `intent.objectives[]` 中接受结构化目标，
+> 其中每个 objective 为 `{ title, kind }`，`kind` 取
+> `implementation` 或 `analysis` 之一。
 
 **Version:** 1.0.0  
 **Spec foundations:** JSON Schema Draft 2020-12 · NIST SSDF · SLSA v1.0 · OWASP LLM Top 10 (2025)  
@@ -12,30 +12,30 @@
 
 ---
 
-## Table of Contents
+## 目录
 
-1. [Design Philosophy & Architecture Layers](#1-design-philosophy--architecture-layers)
-2. [Complete JSON Schema (with Libra Extension)](#2-complete-json-schema-with-libra-extension)
-3. [Field Reference](#3-field-reference)
-4. [Field Quick-Reference Table](#4-field-quick-reference-table)
-5. [Example 1 — Minimal (low-risk bugfix)](#5-example-1--minimal-low-risk-bugfix)
-6. [Example 2 — Typical (medium-risk new feature)](#6-example-2--typical-medium-risk-new-feature)
-7. [Example 3 — High-assurance (high-risk security fix)](#7-example-3--high-assurance-high-risk-security-fix)
-8. [Example Parameter Comparison](#8-example-parameter-comparison)
+1. [设计哲学与架构分层](#1-设计哲学与架构分层)
+2. [完整 JSON Schema（含 Libra 扩展）](#2-完整-json-schema含-libra-扩展)
+3. [字段参考](#3-字段参考)
+4. [字段速查表](#4-字段速查表)
+5. [示例 1 —— 最小化（低风险 bugfix）](#5-示例-1--最小化低风险-bugfix)
+6. [示例 2 —— 典型（中风险新功能）](#6-示例-2--典型中风险新功能)
+7. [示例 3 —— 高保障（高风险安全修复）](#7-示例-3--高保障高风险安全修复)
+8. [示例参数对比](#8-示例参数对比)
 
 ---
 
-## 1. Design Philosophy & Architecture Layers
+## 1. 设计哲学与架构分层
 
-IntentSpec is a **machine-readable intent contract**. It transforms a natural-language request into a structured, verifiable input that a Scheduler can schedule, gate, and audit. It is not a prompt — it is a contract carrying:
+IntentSpec 是一份**机器可读的意图契约（intent contract）**。它把一段自然语言请求转化为结构化、可验证的输入，供调度器（Scheduler）进行调度、门禁（gate）与审计。它不是一个 prompt——而是一份契约，承载着：
 
-- **Intent** — what to do, what not to do, and what an acceptable outcome looks like
-- **Constraints** — hard boundaries around security, privacy, licensing, and resources
-- **Gates** — the checks that must pass before each pipeline stage advances
-- **Evidence policy** — where to source information and how much to trust each source
-- **Provenance bindings** — how to cryptographically link intent, execution, and final artifacts
+- **Intent** —— 要做什么、不要做什么，以及可接受的结果应该是什么样子
+- **Constraints** —— 围绕安全、隐私、许可与资源的硬性边界
+- **Gates** —— 流水线每个阶段推进前必须通过的检查
+- **Evidence policy** —— 从何处获取信息，以及对每个来源的可信度（trust）有多高
+- **Provenance bindings** —— 如何以密码学方式将意图、执行与最终产物链接起来
 
-Within the Libra system IntentSpec occupies the **control plane**; the Libra AI Object Model occupies the **execution plane**:
+在 Libra 系统内部，IntentSpec 位于**控制平面（control plane）**；Libra AI Object Model 位于**执行平面（execution plane）**：
 
 ```
 IntentSpec  (control plane)
@@ -47,21 +47,19 @@ Libra: Intent → Plan → Task DAG → Run → PatchSet → Evidence → Decisi
 git commit + SBOM + attestation + Rekor proof
 ```
 
-In this document, the preferred runtime term is **Scheduler**. Existing
-schema and compatibility fields such as `orchestratorActorId` remain in
-place as legacy names until an explicit migration is introduced.
+在本文档中，运行时首选术语为**调度器（Scheduler）**。现有的 schema 与兼容性字段（如 `orchestratorActorId`）作为遗留名称保留原位，直至引入明确的迁移方案为止。
 
-### Standard Alignment
+### 标准对齐
 
-| Standard | How IntentSpec uses it |
+| Standard | IntentSpec 如何使用它 |
 |---|---|
-| **NIST SSDF** | `artifacts.required` and `provenance.*` implement PS.3.2 (collect/maintain/share provenance data such as SBOM) |
-| **SLSA v1.0** | `provenance.bindings.embedIntentSpecDigest` places IntentSpec as an `externalParameter`; `transparencyLog.mode=rekor` satisfies the transparency log requirement |
-| **OWASP LLM Top 10 (2025)** | `security.toolAcl` → Excessive Agency; `evidence.domainAllowlistMode` → Prompt Injection; `security.outputHandling` → Improper Output Handling; `constraints.resources` → Unbounded Consumption |
+| **NIST SSDF** | `artifacts.required` 与 `provenance.*` 实现了 PS.3.2（收集/维护/共享溯源（provenance）数据，例如 SBOM） |
+| **SLSA v1.0** | `provenance.bindings.embedIntentSpecDigest` 将 IntentSpec 置为 `externalParameter`；`transparencyLog.mode=rekor` 满足透明日志（transparency log）的要求 |
+| **OWASP LLM Top 10 (2025)** | `security.toolAcl` → Excessive Agency；`evidence.domainAllowlistMode` → Prompt Injection；`security.outputHandling` → Improper Output Handling；`constraints.resources` → Unbounded Consumption |
 
 ---
 
-## 2. Complete JSON Schema (with Libra Extension)
+## 2. 完整 JSON Schema（含 Libra 扩展）
 
 ```json
 {
@@ -859,97 +857,97 @@ place as legacy names until an explicit migration is introduced.
 
 ---
 
-## 3. Field Reference
+## 3. 字段参考
 
 ### 3.1 Metadata
 
-`metadata` is the immutable audit anchor. All fields are set at creation time and must not be mutated — modifications mean creating a new IntentSpec.
+`metadata` 是不可变（immutable）的审计锚点。所有字段在创建时设定，且不得修改——修改即意味着创建一个新的 IntentSpec。
 
-**`metadata.id`** stores the globally unique identifier. The Scheduler writes it to `Libra Intent.external_ids["intentspec_id"]`. When `provenance.bindings.embedIntentSpecDigest=true`, the Scheduler freezes the canonical JSON (sorted keys, no whitespace), computes a SHA-256 digest, and embeds both the `id` and the digest in `Provenance.parameters.externalParameters`. This achieves **intent–artifact strong binding**: consumers can re-derive the digest from the IntentSpec file and compare it to the Provenance to verify nothing was tampered.
+**`metadata.id`** 存放全局唯一标识符。调度器将其写入 `Libra Intent.external_ids["intentspec_id"]`。当 `provenance.bindings.embedIntentSpecDigest=true` 时，调度器会冻结规范化 JSON（键排序、无空白），计算 SHA-256 摘要，并将 `id` 与该摘要一并嵌入 `Provenance.parameters.externalParameters`。这实现了**意图—产物的强绑定**：消费方可以从 IntentSpec 文件重新推导出摘要，并与 Provenance 比对，以验证没有被篡改。
 
-**`metadata.createdBy.type`** governs which Libra `ActorRef` factory is used (`human`, `agent`, `system`). High-risk IntentSpecs should originate from `user` or an `agent` that has received human approval.
+**`metadata.createdBy.type`** 决定使用哪个 Libra `ActorRef` 工厂（`human`、`agent`、`system`）。高风险的 IntentSpec 应当源自 `user`，或源自已获得人工批准的 `agent`。
 
-**`metadata.target.baseRef`** is resolved by the Scheduler to a concrete commit SHA written to `Libra Run.commit`. Using a full SHA (rather than a floating branch name) gives better provenance fidelity for SLSA `resolvedDependencies`.
+**`metadata.target.baseRef`** 由调度器解析为一个具体的 commit SHA，写入 `Libra Run.commit`。使用完整 SHA（而非浮动的分支名）可为 SLSA 的 `resolvedDependencies` 提供更高的溯源（provenance）保真度。
 
 ---
 
 ### 3.2 Intent
 
-`intent` is the most important section: it defines the work boundaries that the Scheduler enforces throughout execution.
+`intent` 是最重要的部分：它定义了调度器在整个执行过程中所强制执行的工作边界。
 
-**`intent.objectives[]`** maps one-to-one to Libra `PlanStep` entries and child `Task` objects. Each objective should express an independently observable success state. The Scheduler detects scope-creep by monitoring `ToolInvocation.io_footprint.paths_written` against `inScope`; any write outside the boundary triggers `scope-creep` replan or outright rejection.
+**`intent.objectives[]`** 与 Libra 的 `PlanStep` 条目及其子 `Task` 对象一一对应。每个 objective 都应表达一个可独立观察的成功状态。调度器通过监控 `ToolInvocation.io_footprint.paths_written` 与 `inScope` 的关系来检测范围蔓延（scope-creep）；任何越界写入都会触发 `scope-creep` 重规划或直接拒绝。
 
-**`intent.touchHints`** provides localisation signals: `files` (glob patterns) become `ContextItem(File)` entries; `symbols` are resolved via ctags/LSP into `ContextItem(Snippet)` frames; `apis` are looked up in OpenAPI specs as `ContextItem(Url)` frames. The Scheduler expands the initial match to a one-hop dependency radius using the import/build graph to avoid missed changes.
+**`intent.touchHints`** 提供定位信号：`files`（glob 模式）会成为 `ContextItem(File)` 条目；`symbols` 通过 ctags/LSP 解析为 `ContextItem(Snippet)` 帧；`apis` 则在 OpenAPI 规范中查找为 `ContextItem(Url)` 帧。调度器利用 import/build 图，将初始匹配扩展到一跳（one-hop）依赖半径，以避免遗漏改动。
 
 ---
 
 ### 3.3 Acceptance
 
-`acceptance` converts "success" into objective, executable criteria.
+`acceptance` 把“成功”转化为客观、可执行的标准。
 
-**`verificationPlan`** has four sequential stages. The Scheduler generates a dedicated gate `Task` for each stage when `libra.planGeneration.gateTaskPerStage=true`. Stage ordering is strict: `fastChecks` failures prevent `integrationChecks` from starting. This keeps feedback loops tight (seconds for unit tests) while ensuring expensive scans only run on already-validated code.
+**`verificationPlan`** 有四个顺序阶段。当 `libra.planGeneration.gateTaskPerStage=true` 时，调度器为每个阶段生成一个专门的门禁（gate）`Task`。阶段顺序是严格的：`fastChecks` 失败会阻止 `integrationChecks` 启动。这既保持了紧凑的反馈循环（单元测试以秒计），又确保昂贵的扫描只在已验证的代码上运行。
 
-**`qualityGates.requireNewTestsWhenBugfix`** is a policy-level constraint the Scheduler enforces by diff-analysing the PatchSet: if no test file has changed, the gate fails. This prevents the anti-pattern of "fix code, skip tests".
+**`qualityGates.requireNewTestsWhenBugfix`** 是一项策略级约束（constraints），调度器通过对 PatchSet 做 diff 分析来强制执行：若没有任何测试文件发生变更，则门禁失败。这可防止“修了代码、跳过测试”的反模式。
 
 ---
 
 ### 3.4 Constraints
 
-`constraints` encodes four hard boundaries: security/privacy/licensing/resources.
+`constraints` 编码了四类硬性边界：安全/隐私/许可/资源。
 
-**`constraints.security.networkPolicy=deny`** is the default and maps directly to ToolInvocation pre-flight ACL: the Scheduler rejects any tool call that would make external network contact unless `security.toolAcl.allow` contains an explicit whitelisted command with a stated reason. This is the "minimal network footprint" baseline (aligned with SLSA isolated-build requirements).
+**`constraints.security.networkPolicy=deny`** 是默认值，并直接映射到 ToolInvocation 的预检 ACL：调度器会拒绝任何会发起对外网络联系的工具调用，除非 `security.toolAcl.allow` 中包含一条已显式列入白名单、并附明确原因的命令。这就是“最小网络足迹”基线（与 SLSA 的隔离构建要求一致）。
 
-**`constraints.security.dependencyPolicy`** drives SCA gate behaviour: `no-new` means the SCA report is scanned for any newly introduced package; any new package is a gate fail. `allow-with-review` permits additions but mandates an `sca-report` artifact for human review and a licence check against `allowedSpdx`.
+**`constraints.security.dependencyPolicy`** 驱动 SCA 门禁行为：`no-new` 意味着扫描 SCA 报告以查找任何新引入的包；任何新包都会导致门禁失败。`allow-with-review` 允许新增，但要求产出一个 `sca-report` 产物供人工审查，并对照 `allowedSpdx` 做许可检查。
 
-**`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps `Provenance.token_usage.cost_usd` accumulation. When the cost cap is approached, the Scheduler reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
+**`constraints.resources`** 字段在运行时被强制执行——而不仅仅是记录。`maxWallClockSeconds` 设置 Run 超时；`maxCostUnits` 为 `Provenance.token_usage.cost_usd` 的累计设上限。当接近成本上限时，调度器会先把 `maxParallelTasks` 降为 1，再决定是继续还是建立检查点。这直接应对 OWASP 的“Unbounded Consumption”风险（risk）。
 
 ---
 
 ### 3.5 Risk
 
-`risk.level` triggers Scheduler-enforced rules:
+`risk.level` 触发调度器强制执行的规则：
 
-| Level | Enforced by Scheduler |
+| Level | 由调度器强制执行 |
 |---|---|
-| `low` | No special constraints beyond schema |
-| `medium` | Warns if `humanInLoop.required=false` and change touches security code |
-| `high` | **Requires** `humanInLoop.required=true` and `minApprovers>=2`; requires `releaseChecks` to include a `require-approvers` policy check; reduces `maxParallelTasks` to 1 if not already set |
+| `low` | 除 schema 外无特殊约束（constraints） |
+| `medium` | 若 `humanInLoop.required=false` 且改动触及安全相关代码，则发出警告 |
+| `high` | **要求** `humanInLoop.required=true` 且 `minApprovers>=2`；要求 `releaseChecks` 包含一项 `require-approvers` 策略检查；若 `maxParallelTasks` 未设置则降为 1 |
 
 ---
 
 ### 3.6 Evidence Policy
 
-`evidence` is the first line of defence against prompt injection.
+`evidence` 是抵御 prompt injection 的第一道防线。
 
-**`strategy=repo-first`** means the Scheduler prioritises information from within the target repository (code, comments, README, existing tests). External network access is minimised. This reduces the attack surface for malicious content embedded in external documentation.
+**`strategy=repo-first`** 意味着调度器优先采用目标仓库内部的信息（代码、注释、README、现有测试）。外部网络访问被降到最低。这缩小了外部文档中嵌入恶意内容的攻击面。
 
-**`domainAllowlistMode=allowlist-only`** with `blockedDomains=["*"]` is the strictest configuration: only domains explicitly listed in `allowedDomains` can be accessed. Evaluation order is: check `allowedDomains` first, then apply `blockedDomains` as a subtractive deny-list for any non-allowlisted domains. Url-type `ContextItem` enqueuing is pre-flight checked; blocked items are rejected without being added to the pipeline.
+**`domainAllowlistMode=allowlist-only`** 配合 `blockedDomains=["*"]` 是最严格的配置：只有显式列于 `allowedDomains` 的域名才能被访问。求值顺序为：先检查 `allowedDomains`，然后对任何不在白名单内的域名应用 `blockedDomains` 作为减法式拒绝列表（deny-list）。Url 类型的 `ContextItem` 入队前会做预检；被阻断的条目会在不被加入流水线的情况下遭拒。
 
-**`minCitationsPerDecision`** forces the Scheduler to log evidence provenance for key decisions. When set to 3, the Scheduler refuses to select an algorithm or library without having at least 3 supporting sources in the ContextPipeline, which creates an auditable evidence chain.
+**`minCitationsPerDecision`** 强制调度器为关键决策（Decision）记录证据（evidence）溯源（provenance）。当设为 3 时，调度器在 ContextPipeline 中没有至少 3 个支撑来源的情况下，拒绝选定某个算法或库，从而形成一条可审计的证据链。
 
 ---
 
 ### 3.7 Security Policy
 
-**`security.toolAcl`** implements the "minimum privilege closure" principle. The `constraints` field on each `ToolRule` carries tool-specific limits: `writeRoots` for filesystem tools, `allowCommands` / `denySubstrings` for command tools, `maxOutputBytes` for any tool. The Scheduler checks these constraints before creating each `ToolInvocation` record.
+**`security.toolAcl`** 实现了“最小权限闭包”原则。每个 `ToolRule` 上的 `constraints` 字段携带工具专属限制：文件系统工具的 `writeRoots`，命令类工具的 `allowCommands` / `denySubstrings`，以及任意工具的 `maxOutputBytes`。调度器在创建每条 `ToolInvocation` 记录之前都会检查这些约束（constraints）。
 
-**`security.secrets.policy=deny-all`** (default) means the Run execution environment receives no injected secrets — consistent with SLSA's requirement that signing material must not be visible to user build steps.
+**`security.secrets.policy=deny-all`**（默认）意味着 Run 执行环境不会被注入任何 secret——这与 SLSA 要求签名材料不得对用户构建步骤可见的规定一致。
 
-**`security.outputHandling.noDirectEval=true`** triggers an AST-level scan of every PatchSet diff before it is transitioned to `Proposed`. The scan uses language-appropriate regex/AST patterns to detect `eval()`, `exec()`, `subprocess(shell=True)`, `os.system()` and equivalent constructs. Detected violations set `PatchSet.apply_status=Rejected` and trigger a Retry.
+**`security.outputHandling.noDirectEval=true`** 会在每个 PatchSet diff 转入 `Proposed` 之前触发 AST 级扫描。该扫描使用与语言匹配的正则/AST 模式来检测 `eval()`、`exec()`、`subprocess(shell=True)`、`os.system()` 及等价构造。检测到的违规会将 `PatchSet.apply_status=Rejected` 并触发一次 Retry。
 
 ---
 
 ### 3.8 Execution Policy
 
-**`execution.retry.maxRetries`** bounds the number of `Decision.Retry` events for a single Task. After exhaustion, `Decision.Abandon` is created. High-risk tasks should use lower values (2) to surface persistent failures to humans quickly.
+**`execution.retry.maxRetries`** 限定单个 Task 的 `Decision.Retry` 事件（Event）次数。耗尽后将创建 `Decision.Abandon`。高风险任务应使用更低的值（2），以便尽快将持续性失败暴露给人。
 
-**`execution.replan.triggers`** specifies the conditions under which the Scheduler calls `Plan.new_revision()`. Before doing so, the Scheduler (when `libra.decisionPolicy.checkpointBeforeReplan=true`) creates `Decision.Checkpoint` to preserve intermediate progress. The old Plan version remains immutable in the revision chain, enabling complete replan history reconstruction.
+**`execution.replan.triggers`** 指定调度器调用 `Plan.new_revision()` 的条件。在此之前，调度器（当 `libra.decisionPolicy.checkpointBeforeReplan=true` 时）会创建 `Decision.Checkpoint` 以保留中间进展。旧的 Plan 版本在修订链中保持不可变（immutable），从而可完整重建重规划历史。
 
 ---
 
 ### 3.9 Artifacts
 
-Every entry in `artifacts.required[]` creates a contract between a `verificationPlan.*Check` (via `artifactsProduced`) and the gate checker. The flow is:
+`artifacts.required[]` 中的每一条都会在某个 `verificationPlan.*Check`（通过 `artifactsProduced`）与门禁（gate）检查器之间建立一份契约。流程如下：
 
 ```
 Check.command executes
@@ -960,158 +958,158 @@ Check.command executes
   → Missing or hash-invalid artifact → gate fail
 ```
 
-`artifacts.retention.days` is written to `ArtifactRef.expires_at` at creation time. The lower of this value and `constraints.privacy.retentionDays` is used. This ensures artifact lifecycle matches data-privacy commitments.
+`artifacts.retention.days` 在创建时写入 `ArtifactRef.expires_at`。取它与 `constraints.privacy.retentionDays` 二者中的较小值。这确保产物生命周期与数据隐私承诺相匹配。
 
 ---
 
 ### 3.10 Provenance Policy
 
-`provenance` connects the IntentSpec to the SLSA supply-chain evidence model.
+`provenance` 将 IntentSpec 与 SLSA 供应链证据（evidence）模型连接起来。
 
-When `requireSlsaProvenance=true`, the Scheduler generates a DSSE-enveloped in-toto attestation after `Decision.Commit`. The attestation contains:
-- `externalParameters.intentspec_id` and `externalParameters.intentspec_digest` (from the frozen canonical JSON)
+当 `requireSlsaProvenance=true` 时，调度器会在 `Decision.Commit` 之后生成一份 DSSE 封装的 in-toto 证明（attestation）。该证明包含：
+- `externalParameters.intentspec_id` 与 `externalParameters.intentspec_digest`（来自冻结的规范化 JSON）
 - `internalParameters.scheduler_version`
-- `resolvedDependencies`: each `ContextSnapshot.item` contributes a `{uri, digest}` entry
-- `byproducts`: digests of all `Evidence.report_artifacts` when `embedEvidenceDigests=true`
+- `resolvedDependencies`：每个 `ContextSnapshot.item` 贡献一条 `{uri, digest}` 条目
+- `byproducts`：当 `embedEvidenceDigests=true` 时，所有 `Evidence.report_artifacts` 的摘要
 
-When `transparencyLog.mode=rekor`, the signed attestation is uploaded to Rekor after commit, and the Rekor inclusion proof is written back as the `transparency-proof` ArtifactRef. If the upload fails and `libra.decisionPolicy.rollbackOnProvenanceFail=true`, the Scheduler issues `Decision.Rollback` to revert the applied PatchSet, ensuring the repository never contains a commit without verifiable provenance.
+当 `transparencyLog.mode=rekor` 时，签名后的证明会在提交后上传至 Rekor，并将 Rekor 的包含证明（inclusion proof）作为 `transparency-proof` ArtifactRef 写回。若上传失败且 `libra.decisionPolicy.rollbackOnProvenanceFail=true`，调度器会发出 `Decision.Rollback` 以回滚已应用的 PatchSet，确保仓库永远不会包含一个没有可验证溯源（provenance）的提交。
 
 ---
 
 ### 3.11 Lifecycle
 
-`lifecycle.changeLog` is an append-only record of all replan events. Each entry captures:
+`lifecycle.changeLog` 是一份关于所有重规划事件（Event）的追加式（append-only）记录。每条记录捕获：
 
-- `at`: when the replan was triggered
-- `by`: the actor (Scheduler ID or human approver)
-- `reason`: the trigger condition
-- `diffSummary`: what changed in the IntentSpec relative to the previous version
+- `at`：重规划被触发的时间
+- `by`：行为者（调度器 ID 或人工审批者）
+- `reason`：触发条件
+- `diffSummary`：相对上一版本，IntentSpec 中发生了什么变化
 
-This log, combined with `Libra Intent.statuses`, provides a complete audit trail from the initial user intent through every planning revision to the final committed result.
+这份日志与 `Libra Intent.statuses` 结合，提供了一条完整的审计链路——从最初的用户意图，经历每一次规划修订，直至最终提交的结果。
 
 ---
 
 ### 3.12 Libra Binding
 
-`libra` is an optional Libra-specific configuration block. All sub-fields default.
+`libra` 是一个可选的 Libra 专属配置块。所有子字段均有默认值。
 
-**`libra.contextPipeline.maxFrames`** is a dual-purpose control: it limits both memory usage and prompt injection accumulation surface. The recommended formula is `min(128, maxWallClockSeconds / 300)` — approximately one frame per 5 minutes of execution. `IntentAnalysis` and `Checkpoint` frames are always protected from eviction.
+**`libra.contextPipeline.maxFrames`** 是一项双重用途的控制项：它同时限制内存占用与 prompt injection 的累积面。推荐公式为 `min(128, maxWallClockSeconds / 300)`——约每 5 分钟执行对应一帧。`IntentAnalysis` 与 `Checkpoint` 帧始终受保护，不会被驱逐。
 
-**`libra.decisionPolicy.rollbackOnProvenanceFail=true`** closes a critical gap: without it, a Rekor submission failure would leave a git commit without a transparency log entry. With it, the PatchSet is reverted and the Scheduler signals the failure for human intervention.
+**`libra.decisionPolicy.rollbackOnProvenanceFail=true`** 弥合了一个关键缺口：若没有它，一次 Rekor 提交失败会留下一个没有透明日志条目的 git commit。有了它，PatchSet 会被回滚，并由调度器发出失败信号以待人工介入。
 
-**`libra.actorMapping`** allows you to use specialised agent IDs for security-sensitive changes. For example, `coderActorId=libra-security-coder` and `reviewerActorId=libra-security-reviewer` enables the platform to route to agents with security-specific training and stricter tool restrictions.
+**`libra.actorMapping`** 允许你为安全敏感的改动使用专门的 agent ID。例如，`coderActorId=libra-security-coder` 与 `reviewerActorId=libra-security-reviewer` 使平台能够路由到经过安全专项训练、且工具限制更严格的 agent。
 
 ---
 
-## 4. Field Quick-Reference Table
+## 4. 字段速查表
 
 | Field Path | Type | Required | Default | Key Role | Related Fields |
 |---|---|---|---|---|---|
-| `apiVersion` | string | ✅ | `intentspec.io/v1alpha1` | Scheduler compatibility routing | `lifecycle.schemaVersion` |
-| `kind` | string(const) | ✅ | `IntentSpec` | Resource type | — |
-| `metadata.id` | string | ✅ | — | Global unique ID → Libra external_ids | `provenance.bindings.embedIntentSpecDigest` |
-| `metadata.createdAt` | date-time | ✅ | — | Provenance time anchor | — |
-| `metadata.createdBy` | object | ✅ | — | Libra ActorRef mapping | `risk.level` |
-| `metadata.target.repo` | object | ✅ | — | git clone target | `execution.*` |
-| `metadata.target.baseRef` | string | ✅ | — | Run.commit baseline | `provenance.*` |
-| `intent.summary` | string | ✅ | — | Task.title + PR title | — |
-| `intent.problemStatement` | string | ✅ | — | Intent.prompt (immutable) | — |
-| `intent.changeType` | enum | ✅ | `unknown` | Task.goal, influences qualityGates | `acceptance.qualityGates` |
-| `intent.objectives[]` | array | ✅ | — | Generates child Tasks and PlanSteps | `libra.planGeneration.decompositionMode` |
-| `intent.inScope[]` | array | ✅ | — | Task.constraints, ACL check | `security.toolAcl` |
-| `intent.outOfScope[]` | array | — | `[]` | Task.constraints, scope-creep detection | `execution.replan.triggers` |
-| `intent.touchHints` | object | — | `{}` | ContextSnapshot.items generation | `evidence.strategy` |
+| `apiVersion` | string | ✅ | `intentspec.io/v1alpha1` | 调度器兼容性路由 | `lifecycle.schemaVersion` |
+| `kind` | string(const) | ✅ | `IntentSpec` | 资源类型 | — |
+| `metadata.id` | string | ✅ | — | 全局唯一 ID → Libra external_ids | `provenance.bindings.embedIntentSpecDigest` |
+| `metadata.createdAt` | date-time | ✅ | — | 溯源（provenance）时间锚点 | — |
+| `metadata.createdBy` | object | ✅ | — | Libra ActorRef 映射 | `risk.level` |
+| `metadata.target.repo` | object | ✅ | — | git clone 目标 | `execution.*` |
+| `metadata.target.baseRef` | string | ✅ | — | Run.commit 基线 | `provenance.*` |
+| `intent.summary` | string | ✅ | — | Task.title + PR 标题 | — |
+| `intent.problemStatement` | string | ✅ | — | Intent.prompt（不可变） | — |
+| `intent.changeType` | enum | ✅ | `unknown` | Task.goal，影响 qualityGates | `acceptance.qualityGates` |
+| `intent.objectives[]` | array | ✅ | — | 生成子 Task 与 PlanStep | `libra.planGeneration.decompositionMode` |
+| `intent.inScope[]` | array | ✅ | — | Task.constraints，ACL 检查 | `security.toolAcl` |
+| `intent.outOfScope[]` | array | — | `[]` | Task.constraints，范围蔓延（scope-creep）检测 | `execution.replan.triggers` |
+| `intent.touchHints` | object | — | `{}` | ContextSnapshot.items 生成 | `evidence.strategy` |
 | `acceptance.successCriteria[]` | array | ✅ | — | Task.acceptance_criteria | — |
-| `acceptance.verificationPlan` | object | ✅ | — | Four-stage gate Tasks | `artifacts.required` |
-| `acceptance.qualityGates` | object | — | `{}` | Meta-policy constraints | `intent.changeType` |
-| `constraints.security.networkPolicy` | enum | ✅ | `deny` | ToolInvocation pre-flight ACL | `security.toolAcl` |
-| `constraints.security.dependencyPolicy` | enum | ✅ | `allow-with-review` | SCA gate trigger | `artifacts.required` |
-| `constraints.privacy.dataClassesAllowed[]` | array | ✅ | `[public]` | ContextItem filtering | — |
-| `constraints.licensing.allowedSpdx[]` | array | ✅ | `[]` | SCA licence check | `artifacts.required` |
-| `constraints.resources.maxWallClockSeconds` | integer | — | `14400` | Run timeout + max_frames derivation | `libra.contextPipeline.maxFrames` |
-| `risk.level` | enum | ✅ | `medium` | Forces gate configuration | `risk.humanInLoop` |
+| `acceptance.verificationPlan` | object | ✅ | — | 四阶段门禁（gate）Task | `artifacts.required` |
+| `acceptance.qualityGates` | object | — | `{}` | 元策略约束（constraints） | `intent.changeType` |
+| `constraints.security.networkPolicy` | enum | ✅ | `deny` | ToolInvocation 预检 ACL | `security.toolAcl` |
+| `constraints.security.dependencyPolicy` | enum | ✅ | `allow-with-review` | SCA 门禁触发 | `artifacts.required` |
+| `constraints.privacy.dataClassesAllowed[]` | array | ✅ | `[public]` | ContextItem 过滤 | — |
+| `constraints.licensing.allowedSpdx[]` | array | ✅ | `[]` | SCA 许可检查 | `artifacts.required` |
+| `constraints.resources.maxWallClockSeconds` | integer | — | `14400` | Run 超时 + max_frames 推导 | `libra.contextPipeline.maxFrames` |
+| `risk.level` | enum | ✅ | `medium` | 强制门禁（gate）配置 | `risk.humanInLoop` |
 | `risk.humanInLoop.required` | boolean | ✅ | `false` | releaseChecks require-approvers | `risk.level` |
 | `evidence.strategy` | enum | ✅ | `repo-first` | ContextSnapshot.selection_strategy | `evidence.domainAllowlistMode` |
-| `evidence.domainAllowlistMode` | enum | ✅ | `allowlist-only` | URL ContextItem domain check | `evidence.allowedDomains` |
-| `security.toolAcl.allow[]` | array | ✅ | — | ToolInvocation pre-flight intercept | `constraints.security.networkPolicy` |
-| `security.secrets.policy` | enum | ✅ | `deny-all` | Run environment secret injection control | — |
-| `security.promptInjection.*` | object | ✅ | — | ContextFrame trust tagging | `evidence.strategy` |
-| `security.outputHandling.noDirectEval` | boolean | ✅ | `true` | PatchSet AST scan | — |
-| `execution.retry.maxRetries` | integer | ✅ | `3` | Decision.Retry count limit | `execution.replan.triggers` |
-| `execution.replan.triggers[]` | array | — | `[...]` | Plan.new_revision() trigger | `libra.decisionPolicy` |
-| `execution.concurrency.maxParallelTasks` | integer | — | `4` | Parallel Task count limit | `constraints.resources` |
-| `artifacts.required[]` | array | ✅ | — | Evidence ArtifactRef check | `acceptance.verificationPlan` |
+| `evidence.domainAllowlistMode` | enum | ✅ | `allowlist-only` | URL ContextItem 域名检查 | `evidence.allowedDomains` |
+| `security.toolAcl.allow[]` | array | ✅ | — | ToolInvocation 预检拦截 | `constraints.security.networkPolicy` |
+| `security.secrets.policy` | enum | ✅ | `deny-all` | Run 环境 secret 注入控制 | — |
+| `security.promptInjection.*` | object | ✅ | — | ContextFrame 可信度（trust）标记 | `evidence.strategy` |
+| `security.outputHandling.noDirectEval` | boolean | ✅ | `true` | PatchSet AST 扫描 | — |
+| `execution.retry.maxRetries` | integer | ✅ | `3` | Decision.Retry 次数上限 | `execution.replan.triggers` |
+| `execution.replan.triggers[]` | array | — | `[...]` | Plan.new_revision() 触发 | `libra.decisionPolicy` |
+| `execution.concurrency.maxParallelTasks` | integer | — | `4` | 并行 Task 数量上限 | `constraints.resources` |
+| `artifacts.required[]` | array | ✅ | — | Evidence ArtifactRef 检查 | `acceptance.verificationPlan` |
 | `artifacts.retention.days` | integer | — | `90` | ArtifactRef.expires_at | `constraints.privacy.retentionDays` |
-| `provenance.requireSlsaProvenance` | boolean | ✅ | `true` | Provenance object creation | `provenance.bindings` |
-| `provenance.requireSbom` | boolean | ✅ | `true` | securityChecks sbom check | `artifacts.required` |
-| `provenance.transparencyLog.mode` | enum | ✅ | `rekor` | Rekor submission + transparency-proof | `libra.decisionPolicy.rollbackOnProvenanceFail` |
+| `provenance.requireSlsaProvenance` | boolean | ✅ | `true` | Provenance 对象创建 | `provenance.bindings` |
+| `provenance.requireSbom` | boolean | ✅ | `true` | securityChecks sbom 检查 | `artifacts.required` |
+| `provenance.transparencyLog.mode` | enum | ✅ | `rekor` | Rekor 提交 + transparency-proof | `libra.decisionPolicy.rollbackOnProvenanceFail` |
 | `provenance.bindings.embedIntentSpecDigest` | boolean | ✅ | `true` | Provenance.externalParameters | — |
-| `lifecycle.status` | enum | ✅ | `active` | Intent.status mapping | — |
-| `lifecycle.changeLog[]` | array | ✅ | `[]` | Replan audit log | `execution.replan.triggers` |
-| `libra.objectStore` | object | — | defaults | git object storage config | — |
-| `libra.contextPipeline` | object | — | defaults | ContextPipeline frame management | `constraints.resources.maxWallClockSeconds` |
-| `libra.planGeneration` | object | — | defaults | Task DAG generation strategy | `intent.objectives` |
-| `libra.runPolicy` | object | — | defaults | Run execution detail | — |
-| `libra.actorMapping` | object | — | defaults | Libra ActorRef mapping | `metadata.createdBy` |
-| `libra.decisionPolicy` | object | — | defaults | Decision type policy | `risk.level` |
+| `lifecycle.status` | enum | ✅ | `active` | Intent.status 映射 | — |
+| `lifecycle.changeLog[]` | array | ✅ | `[]` | 重规划审计日志 | `execution.replan.triggers` |
+| `libra.objectStore` | object | — | defaults | git object 存储配置 | — |
+| `libra.contextPipeline` | object | — | defaults | ContextPipeline 帧管理 | `constraints.resources.maxWallClockSeconds` |
+| `libra.planGeneration` | object | — | defaults | Task DAG 生成策略 | `intent.objectives` |
+| `libra.runPolicy` | object | — | defaults | Run 执行细节 | — |
+| `libra.actorMapping` | object | — | defaults | Libra ActorRef 映射 | `metadata.createdBy` |
+| `libra.decisionPolicy` | object | — | defaults | Decision 类型策略 | `risk.level` |
 
 ---
 
-## 5. Example 1 — Minimal (low-risk bugfix)
+## 5. 示例 1 —— 最小化（低风险 bugfix）
 
-**Scenario:** A null pointer dereference in a TypeScript service causes HTTP 500 errors. Only a single file's input-validation logic is affected; no new dependencies, no API structure changes.
+**场景：** 某 TypeScript 服务中的空指针解引用导致 HTTP 500 错误。仅影响单个文件的输入校验逻辑；无新增依赖，无 API 结构变更。
 
-**Key parameter choices:**
-- `risk.level = low` — no human approval required
-- `constraints.security.dependencyPolicy = no-new` — no dependency introduction
-- `provenance.requireSbom = false` — SBOM not required at this risk level
-- `provenance.transparencyLog.mode = none` — no transparency log
-- `execution.concurrency.maxParallelTasks = 2` — two objectives, can run in parallel
-- `libra.contextPipeline.maxFrames = 32` — small context window for a small task
+**关键参数选择：**
+- `risk.level = low` —— 无需人工批准
+- `constraints.security.dependencyPolicy = no-new` —— 不引入依赖
+- `provenance.requireSbom = false` —— 该风险级别不要求 SBOM
+- `provenance.transparencyLog.mode = none` —— 无透明日志
+- `execution.concurrency.maxParallelTasks = 2` —— 两个 objective，可并行运行
+- `libra.contextPipeline.maxFrames = 32` —— 小任务用小上下文窗口
 
-See files:
-- [`intentspec_minimal.json`](intentspec_minimal.json) — machine-readable, for testing and validation
-- [`intentspec_minimal.yaml`](intentspec_minimal.yaml) — human-readable YAML representation
+参见文件：
+- [`intentspec_minimal.json`](intentspec_minimal.json) —— 机器可读，用于测试与校验
+- [`intentspec_minimal.yaml`](intentspec_minimal.yaml) —— 人类可读的 YAML 表示
 
 ---
 
-## 6. Example 2 — Typical (medium-risk new feature)
+## 6. 示例 2 —— 典型（中风险新功能）
 
-**Scenario:** A Python API service adds an optional `fields` query parameter to `GET /v2/report` for field-allowlist filtering. Multiple files are involved; contract tests and security scanning are required.
+**场景：** 某 Python API 服务为 `GET /v2/report` 新增一个可选的 `fields` 查询参数，用于字段白名单过滤。涉及多个文件；需要契约测试与安全扫描。
 
-**Key parameter choices:**
-- `risk.level = medium` — 1 approver required
-- `constraints.security.dependencyPolicy = allow-with-review` — new deps allowed but need SCA
-- `provenance.requireSbom = true` — SBOM required
-- `provenance.transparencyLog.mode = rekor` — connected to Rekor
-- `evidence.strategy = pinned-official` — white-listed official documentation allowed
-- `libra.contextPipeline.maxFrames = 64` — medium complexity
+**关键参数选择：**
+- `risk.level = medium` —— 需要 1 名审批者
+- `constraints.security.dependencyPolicy = allow-with-review` —— 允许新增依赖但需要 SCA
+- `provenance.requireSbom = true` —— 需要 SBOM
+- `provenance.transparencyLog.mode = rekor` —— 接入 Rekor
+- `evidence.strategy = pinned-official` —— 允许白名单内的官方文档
+- `libra.contextPipeline.maxFrames = 64` —— 中等复杂度
 
-See files:
+参见文件：
 - [`intentspec_typical.json`](intentspec_typical.json)
 - [`intentspec_typical.yaml`](intentspec_typical.yaml)
 
 ---
 
-## 7. Example 3 — High-assurance (high-risk security fix)
+## 7. 示例 3 —— 高保障（高风险安全修复）
 
-**Scenario:** An auth middleware has a conditional JWT bypass vulnerability (CVE). The fix requires full auditability: SBOM + SLSA provenance + Rekor inclusion proof, and four-eyes approval by the security team.
+**场景：** 某鉴权中间件存在条件性 JWT 绕过漏洞（CVE）。修复需要完整可审计性：SBOM + SLSA 溯源（provenance） + Rekor 包含证明（inclusion proof），并由安全团队执行四眼（four-eyes）批准。
 
-**Key parameter choices:**
-- `risk.level = high` — forces `humanInLoop.minApprovers = 2`
-- `constraints.security.dependencyPolicy = no-new` — no new dependencies for security fixes
-- `execution.concurrency.maxParallelTasks = 1` — serial execution for easier auditing
-- `libra.contextPipeline.maxFrames = 64` — controls information exposure surface
-- `libra.decisionPolicy.rollbackOnProvenanceFail = true` — rollback on provenance failure
-- `evidence.blockedDomains = ["*"]` — combined with `allowedDomains` for a strict whitelist
+**关键参数选择：**
+- `risk.level = high` —— 强制 `humanInLoop.minApprovers = 2`
+- `constraints.security.dependencyPolicy = no-new` —— 安全修复不引入新依赖
+- `execution.concurrency.maxParallelTasks = 1` —— 串行执行，便于审计
+- `libra.contextPipeline.maxFrames = 64` —— 控制信息暴露面
+- `libra.decisionPolicy.rollbackOnProvenanceFail = true` —— 溯源（provenance）失败时回滚
+- `evidence.blockedDomains = ["*"]` —— 与 `allowedDomains` 结合形成严格白名单
 
-See files:
+参见文件：
 - [`intentspec_high_assurance.json`](intentspec_high_assurance.json)
 - [`intentspec_high_assurance.yaml`](intentspec_high_assurance.yaml)
 
 ---
 
-## 8. Example Parameter Comparison
+## 8. 示例参数对比
 
 | Parameter | Minimal (low-risk) | Typical (medium-risk) | High-assurance (high-risk) |
 |---|---|---|---|
@@ -1131,6 +1129,6 @@ See files:
 | `checkpointOnReplan` | `false` | `true` | `true` |
 | `rollbackOnProvenanceFail` | `false` | `true` | `true` |
 | `blockedDomains` | `[]` | `[]` | `["*"]` |
-| Number of securityChecks | `0` | `2` | `4` |
-| Number of releaseChecks | `0` | `3` | `4` |
-| Number of required artifacts | `2` | `7` | `8` |
+| securityChecks 数量 | `0` | `2` | `4` |
+| releaseChecks 数量 | `0` | `3` | `4` |
+| 必需产物数量 | `2` | `7` | `8` |

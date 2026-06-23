@@ -39,7 +39,7 @@ pub enum AiObjectModelIndexBucket {
     Context,
 }
 
-/// One object type from `docs/agent/ai-object-model-reference.md`.
+/// One object type from `docs/ai/object-model-reference.md`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AiObjectModelTypeSpec {
     pub object_type: &'static str,

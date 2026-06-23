@@ -74,7 +74,7 @@ pub const AI_SESSION_SCHEMA: &str = "libra.ai_session.v2";
 /// - [`HookTarget::AiIntent`] — the canonical `refs/libra/intent` writer used
 ///   by `libra code` and the existing Claude/Gemini hook configs.
 /// - [`HookTarget::AgentTraces`] — the new external-Agent capture writer
-///   that lives on `refs/libra/agent-traces`. **Phase 1 stub**: the variant
+///   that lives on `refs/libra/traces`. **Phase 1 stub**: the variant
 ///   exists for API surface stability, but the runtime currently rejects it
 ///   with a clear "not yet wired" message; Phase 2 lands the actual writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +171,7 @@ pub async fn process_hook_event_from_stdin(
 /// runs a Phase 1 minimal ingest — stdin parse, validate, redact, and
 /// upsert into `agent_session` — and returns. Phase 2 will extend the
 /// AgentTraces branch to additionally generate checkpoint commits on
-/// `refs/libra/agent-traces`.
+/// `refs/libra/traces`.
 pub async fn process_hook_event_with_target(
     command: super::provider::ProviderHookCommand,
     expected_kind: LifecycleEventKind,
@@ -411,7 +411,7 @@ pub async fn process_hook_event_with_target(
 /// Reads the hook envelope from stdin, validates, parses to a
 /// [`LifecycleEvent`], redacts free-form fields, and upserts into
 /// `agent_session`. Does NOT yet generate checkpoint commits on
-/// `refs/libra/agent-traces` — that is Phase 2 work.
+/// `refs/libra/traces` — that is Phase 2 work.
 ///
 /// Boundary conditions:
 /// - Idempotent on repeated `SessionStart` for the same provider session
@@ -624,7 +624,7 @@ pub(crate) async fn ingest_agent_traces_payload(
 
     // entire.md §6.3 state machine: both `TurnEnd` (Stop — end of a turn,
     // session stays `active`) and `SessionEnd` (final) materialise a
-    // `committed` checkpoint commit on `refs/libra/agent-traces`, indexed in
+    // `committed` checkpoint commit on `refs/libra/traces`, indexed in
     // `agent_checkpoint`. The checkpoint's tree carries metadata.json + the
     // redacted transcript blob (now the agent's full on-disk transcript, see
     // the writer); events-blob inclusion remains a follow-up. Per-turn
@@ -689,7 +689,7 @@ fn build_agent_session_metadata_json(
 /// Detect whether a `TurnStart` is starting alongside another active agent
 /// session in the same `working_dir`.
 ///
-/// Per the agent-traces state machine (`docs/development/commands/_general.md` §6.3),
+/// Per the traces state machine (`docs/development/commands/_general.md` §6.3),
 /// a `TurnStart` (UserPromptSubmit) checks for other `active` sessions in
 /// the same `working_dir`; finding any records `concurrent_active=true`
 /// without blocking. Only `TurnStart` events newly raise the flag; the
@@ -728,7 +728,7 @@ async fn session_concurrent_active(
 
 /// Write a `committed` checkpoint (for a `TurnEnd` or `SessionEnd` event):
 /// materialise the redacted transcript + metadata blobs, append a commit on
-/// `refs/libra/agent-traces`, and insert the corresponding `agent_checkpoint`
+/// `refs/libra/traces`, and insert the corresponding `agent_checkpoint`
 /// row. Errors are surfaced verbatim — a failure here means the ingest cannot
 /// acknowledge the checkpoint to the caller.
 #[allow(clippy::too_many_arguments)]
@@ -779,7 +779,7 @@ async fn write_committed_checkpoint(
             // from the untrusted hook envelope. Only read + persist it when it
             // resolves inside the provider's own home-relative transcript root
             // (e.g. `~/.claude`); a forged path pointing at an arbitrary file
-            // must never be copied into the syncable agent-traces blob.
+            // must never be copied into the syncable traces blob.
             let trusted = ctx
                 .transcript_path
                 .as_deref()
@@ -845,7 +845,7 @@ async fn write_committed_checkpoint(
         storage,
         repo_path.to_path_buf(),
         std::sync::Arc::new(conn.clone()),
-        crate::internal::branch::AGENT_TRACES_BRANCH,
+        crate::internal::branch::TRACES_BRANCH,
     );
 
     // Resolve the user-branch HEAD via the typed helper so we can
@@ -861,7 +861,7 @@ async fn write_committed_checkpoint(
     //   — the schema is wired but the HEAD row was never seeded. This
     //   shows up in test fixtures that bootstrap the migrations without
     //   running `initialize_refs`. Functionally equivalent to "unborn" for
-    //   the agent-traces writer, so we coerce to `None` rather than
+    //   the traces writer, so we coerce to `None` rather than
     //   failing the whole ingest.
     let parent_commit: Option<String> =
         match crate::internal::head::Head::current_commit_result_with_conn(conn).await {
@@ -892,7 +892,7 @@ async fn write_committed_checkpoint(
             events_jsonl: None,
         })
         .await
-        .context("failed to append checkpoint commit on agent-traces")?;
+        .context("failed to append checkpoint commit on traces")?;
 
     let parent_commit_value: sea_orm::Value = parent_commit.clone().into();
     conn.execute(Statement::from_sql_and_values(
@@ -931,7 +931,7 @@ async fn write_committed_checkpoint(
 ///
 /// The transcript path originates from the (untrusted) hook envelope, so a
 /// forged payload could otherwise point it at any file the Libra process can
-/// read and have the contents copied into the syncable `agent-traces` blob
+/// read and have the contents copied into the syncable `traces` blob
 /// (entire.md §8.1 / §13 P0). Constrain it: after symlink canonicalization,
 /// `path` must live under one of the adapter's home-relative roots (e.g.
 /// `~/.claude` for Claude Code, `~/.gemini` for Gemini). Non-existent paths,
@@ -2064,12 +2064,12 @@ mod tests {
             !row.try_get_by::<String, _>("traces_commit")
                 .unwrap()
                 .is_empty(),
-            "checkpoint must reference a non-empty agent-traces commit"
+            "checkpoint must reference a non-empty traces commit"
         );
     }
 
     /// Phase 2.1: when a `repo_path` is supplied and SessionEnd fires, the
-    /// runtime must (a) write a checkpoint commit on `refs/libra/agent-traces`
+    /// runtime must (a) write a checkpoint commit on `refs/libra/traces`
     /// and (b) insert a row into `agent_checkpoint`. The checkpoint blob /
     /// commit objects live under `<repo>/objects/`, so we point the test at a
     /// fresh tempdir for that side too.
@@ -2138,17 +2138,17 @@ mod tests {
             "metadata blob missing at {metadata_path:?}"
         );
 
-        // The agent-traces ref row must point at the checkpoint commit hash.
+        // The traces ref row must point at the checkpoint commit hash.
         let backend = conn.get_database_backend();
         let ref_row = conn
             .query_one(Statement::from_sql_and_values(
                 backend,
                 "SELECT `commit` FROM reference WHERE name = ? AND kind = 'Branch' LIMIT 1",
-                [crate::internal::branch::AGENT_TRACES_BRANCH.into()],
+                [crate::internal::branch::TRACES_BRANCH.into()],
             ))
             .await
-            .expect("query agent-traces ref")
-            .expect("agent-traces ref row exists");
+            .expect("query traces ref")
+            .expect("traces ref row exists");
         let head: String = ref_row.try_get_by("commit").unwrap();
         assert_eq!(head, traces_commit);
 
@@ -2206,7 +2206,7 @@ mod tests {
     }
 
     /// entire.md §8.1 / §13 (P0) end-to-end: a SessionEnd prompt carrying
-    /// a known secret must land in the `agent-traces` transcript blob
+    /// a known secret must land in the `traces` transcript blob
     /// REDACTED — the raw secret never reaches durable storage. Guards the
     /// `RedactedBytes` write-path contract: the transcript blob is produced
     /// only via `RedactedBytes`, and the upstream redactor scrubbed the

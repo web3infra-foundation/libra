@@ -5,7 +5,7 @@
 //! [`HookTarget::AgentTraces`]; the runtime there does a minimal ingest
 //! (parse → redact → upsert into `agent_session`). Phase 2 will extend the
 //! AgentTraces branch to additionally write checkpoint commits on
-//! `refs/libra/agent-traces`.
+//! `refs/libra/traces`.
 
 use clap::Subcommand;
 

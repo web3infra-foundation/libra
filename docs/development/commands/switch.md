@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-01-21 `27f2ae2f`（`feat(switch): add --track flag to switch command (#157)`）：基础实现节点：add --track flag to switch command (#157)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-06 `7e94b815`（`feat(switch): add -C/--force-create (create or reset branch then switch)`）：当前 HEAD 已保留 `SwitchArgs::force_create`，`libra switch -C <name> [<start-point>]` 会删除并重建非当前目标分支后切换；对应行为已有 `tests/command/switch_test.rs` 覆盖。
-- 2026-05-23 `28bb0785`（`test(reset+switch): pin agent-traces locked-branch coverage (v0.17.746)`）：测试契约：pin agent-traces locked-branch coverage (v0.17.746)；相关行为已有回归守卫，后续变更需要继续满足。
+- 2026-05-23 `28bb0785`（`test(reset+switch): pin traces locked-branch coverage (v0.17.746)`）：测试契约：pin traces locked-branch coverage (v0.17.746)；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
 ## 当前状态

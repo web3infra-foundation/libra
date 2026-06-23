@@ -946,9 +946,7 @@ async fn initialize_refs(conn: &DbConn, initial_branch_name: &str) -> Result<(),
     // first checkpoint commit will fill in its `commit` column via the same
     // `HistoryManager::create_append_commit` machinery used by `intent`.
     reference::ActiveModel {
-        name: Set(Some(
-            crate::internal::branch::AGENT_TRACES_BRANCH.to_string(),
-        )),
+        name: Set(Some(crate::internal::branch::TRACES_BRANCH.to_string())),
         kind: Set(reference::ConfigKind::Branch),
         commit: Set(None),
         remote: Set(None),

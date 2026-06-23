@@ -240,4 +240,4 @@ libra publish --json sync --dry-run
 - `libra clone` — 通过 `libra+cloud://<clone-domain>/<slug>` 源 scheme 恢复 Cloudflare D1 / R2 发布快照。
 - `libra cloud` — `publish` 构建于其上的私有 Cloudflare 备份。
 - `docs/development/commands/publish.md` — 内部设计 + 分阶段 rollout。
-- `docs/agent/ai-object-model-reference.md` — `publish` 导出的 AI 对象模型契约。
+- `docs/ai/object-model-reference.md` — `publish` 导出的 AI 对象模型契约。

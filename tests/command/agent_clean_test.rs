@@ -15,7 +15,7 @@ use libra::{
             history::{CheckpointCommitParams, CheckpointScope, HistoryManager},
             observed_agents::Redactor,
         },
-        branch::AGENT_TRACES_BRANCH,
+        branch::TRACES_BRANCH,
     },
     utils::{client_storage::ClientStorage, object::read_git_object},
 };
@@ -108,7 +108,7 @@ async fn seed_checkpoint_commit(
         storage,
         repo_path.clone(),
         Arc::new(conn.clone()),
-        AGENT_TRACES_BRANCH,
+        TRACES_BRANCH,
     );
     let redactor = Redactor::new_default();
     let (redacted, _) = redactor.redact(format!("transcript for {checkpoint_id}").as_bytes());
@@ -187,10 +187,10 @@ async fn agent_traces_head(conn: &DatabaseConnection) -> Option<String> {
     conn.query_one(Statement::from_sql_and_values(
         conn.get_database_backend(),
         "SELECT `commit` FROM reference WHERE name = ? AND kind = 'Branch' LIMIT 1",
-        [Value::from(AGENT_TRACES_BRANCH)],
+        [Value::from(TRACES_BRANCH)],
     ))
     .await
-    .expect("query agent-traces ref")
+    .expect("query traces ref")
     .and_then(|row| row.try_get_by("commit").ok().flatten())
 }
 
@@ -329,13 +329,13 @@ async fn agent_clean_rewrites_agent_traces_when_temporary_commit_is_ancestor() {
     );
     let head = agent_traces_head(&conn)
         .await
-        .expect("agent-traces should still point at the retained committed checkpoint");
+        .expect("traces should still point at the retained committed checkpoint");
     assert_eq!(head, rewritten_committed_commit);
 
     let reachable = reachable_agent_trace_commits(repo.path(), &head);
     assert!(
         !reachable.contains(&temporary_commit),
-        "temporary checkpoint commit must become unreachable from agent-traces"
+        "temporary checkpoint commit must become unreachable from traces"
     );
     assert!(
         reachable.contains(&rewritten_committed_commit),

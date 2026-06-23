@@ -253,7 +253,7 @@ libra --json=pretty automation list                   # Structured JSON output f
 
 ### `libra agent` — External-Agent Capture
 
-Capture sessions and checkpoints from external coding agents (Claude Code, Gemini, ...) into `refs/libra/agent-traces`. Useful for replaying agent transcripts and pushing traces to a shared remote so the team can audit what an external agent actually did.
+Capture sessions and checkpoints from external coding agents (Claude Code, Gemini, ...) into `refs/libra/traces`. Useful for replaying agent transcripts and pushing traces to a shared remote so the team can audit what an external agent actually did.
 
 ```bash
 libra agent status                                    # Captured-session counts and recent checkpoints
@@ -266,7 +266,7 @@ libra agent checkpoint show <id>
 libra agent checkpoint rewind <id>                    # Replay as a JSONL transcript
 libra agent clean [--all]                             # Drop temporary checkpoints from stopped sessions
 libra agent doctor                                    # Diagnose hook installation and capture state
-libra agent push [--remote origin]                    # Push refs/libra/agent-traces
+libra agent push [--remote origin]                    # Push refs/libra/traces
 libra agent rpc list                                  # Discover libra-agent-<name> RPC binaries on PATH
 libra agent rpc invoke <slug> <method> --params '{}'
 ```

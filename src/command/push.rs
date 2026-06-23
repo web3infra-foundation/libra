@@ -3425,15 +3425,15 @@ old1 new1 refs/heads/main\n"
     #[test]
     fn test_normalize_destination_ref_accepts_private_refs_namespace() {
         let remote_ref =
-            normalize_destination_ref("refs/libra/agent-traces", LocalRefKind::Branch).unwrap();
-        assert_eq!(remote_ref, "refs/libra/agent-traces");
+            normalize_destination_ref("refs/libra/traces", LocalRefKind::Branch).unwrap();
+        assert_eq!(remote_ref, "refs/libra/traces");
     }
 
     #[test]
     fn test_normalize_branch_ref_still_rejects_private_refs_source() {
         assert!(matches!(
-            normalize_branch_ref("refs/libra/agent-traces"),
-            Err(PushError::InvalidRefspec(refspec)) if refspec == "refs/libra/agent-traces"
+            normalize_branch_ref("refs/libra/traces"),
+            Err(PushError::InvalidRefspec(refspec)) if refspec == "refs/libra/traces"
         ));
     }
 

@@ -3,7 +3,7 @@
 //! This module owns the runtime that observes lifecycle events from
 //! externally-hosted AI agents (Claude Code, Gemini CLI, Cursor, …) and
 //! materialises them into Libra's catalog (`agent_session`, `agent_checkpoint`)
-//! plus the `refs/libra/agent-traces` orphan ref. See
+//! plus the `refs/libra/traces` orphan ref. See
 //! `docs/development/commands/_general.md` (sections 5–8) for the design.
 //!
 //! Sub-modules:

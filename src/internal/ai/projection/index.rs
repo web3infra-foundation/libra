@@ -3,7 +3,7 @@
 //! These rows are rebuildable query accelerators over immutable snapshot and
 //! event history. They make common traversals such as `intent -> plan`,
 //! `task -> run`, and `run -> patchset` cheap without changing the underlying
-//! object graph defined in `docs/agent/agent.md`.
+//! object graph defined in `docs/ai/object-model.md`.
 //!
 //! SeaORM materialization coverage for the corresponding `ai_index_*` tables
 //! lives with `ProjectionRebuilder`, where immutable formal objects are rebuilt

@@ -55,8 +55,8 @@ EXAMPLES:
     libra agent clean                               Drop temporary checkpoints from the most recent stopped session
     libra agent clean --all                         Drop temporary checkpoints from every stopped session
     libra agent doctor                              Diagnose hook installation and capture state
-    libra agent push                                Push refs/libra/agent-traces to the default remote
-    libra agent push --remote origin                Push refs/libra/agent-traces to a named remote
+    libra agent push                                Push refs/libra/traces to the default remote
+    libra agent push --remote origin                Push refs/libra/traces to a named remote
     libra agent rpc list                            Discover libra-agent-<name> RPC binaries on PATH
     libra agent rpc invoke <slug> <method>          Invoke a single JSON-RPC method (use --params '<json>' for arguments)
     libra agent --json status                       Structured JSON output for agents";
@@ -98,8 +98,8 @@ pub enum AgentSubcommand {
     #[command(about = "Diagnose hook installation and capture state")]
     Doctor(DoctorArgs),
 
-    /// Push `refs/libra/agent-traces` to a remote.
-    #[command(about = "Push refs/libra/agent-traces to a remote")]
+    /// Push `refs/libra/traces` to a remote.
+    #[command(about = "Push refs/libra/traces to a remote")]
     Push(PushArgs),
 
     /// Internal hook entry point (called by hook configs installed by `enable`).
@@ -139,7 +139,7 @@ pub struct DoctorArgs {}
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
-    /// Remote name to push refs/libra/agent-traces to (default: origin)
+    /// Remote name to push refs/libra/traces to (default: origin)
     #[arg(long, value_name = "NAME")]
     pub remote: Option<String>,
 }

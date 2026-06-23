@@ -3,7 +3,7 @@
 //!
 //! The CEX-S2 sub-agent runtime (Step 2) and the CEX-EntireIO observed-agent
 //! capture runtime (`agent_session` / `agent_checkpoint` / `refs/libra/
-//! agent-traces`) are two *separate* subsystems. The documented gate requires
+//! traces`) are two *separate* subsystems. The documented gate requires
 //! that running a sub-agent must NOT write the EntireIO observed-agent stores:
 //!
 //! > fake sub-agent E2E 只产生 `AgentRunEvent` / code session JSONL / usage row,

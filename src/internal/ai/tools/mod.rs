@@ -3,8 +3,8 @@
 //! AI user story: this module gives an agent a bounded, auditable interface for
 //! reading project context, proposing plans, editing files, running checks, and
 //! recording workflow provenance without bypassing Libra's sandbox and approval
-//! policy. Tool contracts should stay aligned with `docs/agent/agent-workflow.md`
-//! and the IntentSpec examples in `docs/agent/intentspec_*.yaml`.
+//! policy. Tool contracts should stay aligned with `docs/ai/workflow.md`
+//! and the IntentSpec examples in `docs/ai/intentspec_*.yaml`.
 
 use std::{error::Error, sync::Arc};
 

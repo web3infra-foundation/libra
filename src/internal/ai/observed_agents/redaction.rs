@@ -3,7 +3,7 @@
 //! # Why a newtype?
 //!
 //! `agent_capture` writes transcript bytes into Git blobs that become part of
-//! `refs/libra/agent-traces` and (eventually) sync to R2/D1. If a future
+//! `refs/libra/traces` and (eventually) sync to R2/D1. If a future
 //! refactor accidentally hands raw `&[u8]` to one of those persistence paths,
 //! every still-unscanned secret in the bytes leaks into the durable store.
 //! The Phase 1 risk table calls this out as P0.

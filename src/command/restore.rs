@@ -69,7 +69,7 @@ pub enum RestoreError {
     #[error("failed to download LFS content")]
     LfsDownload,
     /// Refused to restore from a Libra-managed locked branch (`intent`,
-    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// `traces`, …). These refs hold AI-agent state that the user
     /// should not be able to overwrite with `restore --source`.
     #[error("refusing to restore from locked branch '{0}'")]
     LockedSource(String),
@@ -125,7 +125,7 @@ impl From<RestoreError> for CliError {
                 .with_stable_code(stable_code)
                 .with_exit_code(128)
                 .with_hint(
-                    "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
+                    "Libra-managed branches like 'intent' and 'traces' cannot be used as restore sources",
                 ),
             RestoreError::LockedCurrentBranch(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
@@ -253,9 +253,9 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
         source = Some(HEAD.to_string());
     }
 
-    // Refuse to use Libra-managed locked branches (`intent`, `agent-traces`)
+    // Refuse to use Libra-managed locked branches (`intent`, `traces`)
     // as a restore source. `is_locked_revision` also strips revision suffixes
-    // (`~1`, `^`, `@{0}`) so users can't end-run the guard with `agent-traces~1`.
+    // (`~1`, `^`, `@{0}`) so users can't end-run the guard with `traces~1`.
     if let Some(src) = source.as_deref()
         && branch::is_locked_revision(src)
     {
@@ -1114,8 +1114,8 @@ mod tests {
             "refusing to restore from locked branch 'intent'",
         );
         assert_eq!(
-            RestoreError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
-            "refusing to restore worktree while on locked branch 'agent-traces'",
+            RestoreError::LockedCurrentBranch("traces".to_string()).to_string(),
+            "refusing to restore worktree while on locked branch 'traces'",
         );
     }
 

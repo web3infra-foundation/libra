@@ -1,23 +1,18 @@
-# AI Object Model Reference
+# AI 对象模型设计（权威来源）
 
-This document describes the AI object model in `git-internal` after the
-snapshot / event / Libra split.
+本文档描述了在快照（Snapshot）/ 事件（Event）/ Libra 拆分之后，`git-internal` 中的 AI 对象模型。
 
-For developers who prefer Chinese, a synchronized overview is available in
-[`agent-overview-zh.md`](./agent-overview-zh.md).
+## 设计原则
 
-## Design Principle
+`git-internal` 存储不可变的历史事实。
 
-`git-internal` stores immutable historical facts.
+- **Snapshot objects** 回答：“在这一修订版本存储了什么？”
+- **Event objects** 回答：“之后发生了什么？”
+- **Libra projections** 回答：“系统当前的视图是什么？”
 
-- **Snapshot objects** answer: "what was stored at this revision?"
-- **Event objects** answer: "what happened later?"
-- **Libra projections** answer: "what is the system's current view?"
+高频的运行时状态不得通过在 `git-internal` 中改写父对象的方式累积。
 
-High-frequency runtime state must not be accumulated by rewriting parent
-objects in `git-internal`.
-
-## Three-Layer ASCII Diagram
+## 三层 ASCII 图示
 
 ```text
 +--------------------------------------------------------------------------------------+
@@ -55,51 +50,44 @@ objects in `git-internal`.
 +--------------------------------------------------------------------------------------+
 ```
 
-## Libra Layer Terms
+## Libra 层术语
 
-The Libra layer is not part of `git-internal` object storage. It holds
-the current operational view reconstructed from immutable snapshots and
-events.
+Libra 层不属于 `git-internal` 的对象存储。它持有由不可变快照与事件重建而来的当前运行视图。
 
 ### Thread
 
-Conversation-level projection over related `Intent` snapshots.
+针对相关 `Intent` 快照的会话级投影（Projection）。
 
-- groups the `Intent` DAG for one ongoing discussion or task stream
-- stores the current resume target, branch heads, and thread-local
-  metadata
-- can always be rebuilt from immutable history plus Libra-side
-  projection records
+- 将某个进行中的讨论或任务流的 `Intent` DAG 聚合在一起
+- 存储当前的恢复目标、分支头（branch heads）以及线程局部（thread-local）元数据
+- 始终可以从不可变历史加上 Libra 侧的投影记录重建
 
 ### Scheduler
 
-Runtime scheduler that turns immutable history into executable work.
+将不可变历史转化为可执行工作的运行时调度器（Scheduler）。
 
-- selects the active `Plan` head and computes current ready work
-- tracks active `Task` / `Run`, retry routing, and replanning decisions
-- manages the live execution order without rewriting snapshot objects
+- 选定活跃的 `Plan` 头并计算当前就绪的工作
+- 跟踪活跃的 `Task` / `Run`、重试路由以及重新规划（replanning）决策
+- 在不改写快照对象的前提下管理实时执行顺序
 
 ### UI
 
-User-facing presentation layer over the current system view.
+面向用户、覆盖在当前系统视图之上的呈现层。
 
-- shows the active thread, selected plan, task / run progress, and audit
-  evidence
-- reads from Libra projections and immutable history
-- does not define historical truth; it only renders the current view
+- 展示活跃的 thread、所选的 plan、task / run 进度以及审计证据（evidence）
+- 从 Libra 投影与不可变历史中读取数据
+- 不定义历史真相；它只渲染当前视图
 
 ### Query Index
 
-Rebuildable lookup and denormalized access structures used for fast
-queries.
+可重建的查找结构与反规范化（denormalized）访问结构，用于快速查询。
 
-- examples: `intent -> plans`, `intent -> analysis_context_frames`,
-  `task -> runs`, `run -> events`, `run -> patchsets`
-- optimized for retrieval, filtering, and dashboard queries
-- not part of the immutable object graph and can be recomputed
-  if needed
+- 例如：`intent -> plans`、`intent -> analysis_context_frames`、
+  `task -> runs`、`run -> events`、`run -> patchsets`
+- 针对检索、过滤与仪表盘查询进行优化
+- 不属于不可变对象图，必要时可以重新计算
 
-## Main Object Relationships
+## 主要对象关系
 
 ```text
 Snapshot layer
@@ -157,9 +145,9 @@ QueryIndex[L] ----run_latest_patchset_id--> PatchSet[S]
 QueryIndex[L] ----reverse indexes---------> all [S] / [E]
 ```
 
-## Placement Rules
+## 放置规则
 
-### Snapshot objects in `git-internal`
+### `git-internal` 中的快照（Snapshot）对象
 
 - `Intent`
 - `Plan`
@@ -169,7 +157,7 @@ QueryIndex[L] ----reverse indexes---------> all [S] / [E]
 - `ContextSnapshot`
 - `Provenance`
 
-### Event objects in `git-internal`
+### `git-internal` 中的事件（Event）对象
 
 - `IntentEvent`
 - `TaskEvent`
@@ -181,81 +169,77 @@ QueryIndex[L] ----reverse indexes---------> all [S] / [E]
 - `Decision`
 - `ContextFrame`
 
-`IntentEvent.next_intent_id` is a recommendation edge for "what
-Intent should be handled next after this one completed". It does not
-replace `Intent.parents`, which remains the semantic revision lineage.
+`IntentEvent.next_intent_id` 是一条用于表示“在当前 Intent 完成之后接下来应该处理哪个 Intent”的推荐边（recommendation edge）。它并不取代 `Intent.parents`，后者仍然是语义上的修订血缘（revision lineage）。
 
-### Runtime / projection state in Libra
+### Libra 中的运行时 / 投影（Projection）状态
 
-- current selected plan head
-- active task / active run
-- thread heads / latest intent
-- live context window
-- reverse indexes and query acceleration
+- 当前选定的 plan 头
+- 活跃的 task / 活跃的 run
+- thread 头 / 最新的 intent
+- 实时上下文窗口（live context window）
+- 反向索引与查询加速结构
 
-## Object Notes
+## 对象说明
 
 ### Intent
 
-Snapshot of the user request and optional analyzed spec.
+用户请求以及可选的已分析 spec 的快照。
 
-- keep: `parents`, `prompt`, `spec`, `analysis_context_frames`
-- do not keep in snapshot: mutable status log, selected plan pointer, final commit pointer
-- lifecycle belongs to `IntentEvent`
-- `analysis_context_frames` freezes the context used to derive this
-  `IntentSpec` revision
+- 保留：`parents`、`prompt`、`spec`、`analysis_context_frames`
+- 不在快照中保留：可变的状态日志、所选 plan 指针、最终 commit 指针
+- 生命周期属于 `IntentEvent`
+- `analysis_context_frames` 冻结了用于推导该 `IntentSpec` 修订版本的上下文
 
 ### Plan
 
-Snapshot of the strategy and step structure.
+策略与步骤结构的快照。
 
-- keep: `intent`, `parents`, `context_frames`, `steps`
-- `context_frames` is planning-time context used to derive the plan
-  from the `IntentSpec`, not prompt-analysis context
-- `PlanStep.step_id` is the stable logical step identity across Plan revisions
-- execution-time step state belongs to `PlanStepEvent`
+- 保留：`intent`、`parents`、`context_frames`、`steps`
+- `context_frames` 是从 `IntentSpec` 推导出该 plan 时所用的规划期上下文，而非 prompt 分析上下文
+- `PlanStep.step_id` 是跨 Plan 修订版本保持稳定的逻辑步骤标识
+- 执行期的步骤状态属于 `PlanStepEvent`
 
 ### Task
 
-Stable work definition.
+稳定的工作定义。
 
-- keep: title, description, goal, constraints, acceptance criteria, requester
-- keep canonical provenance links: `intent`, `parent`, `origin_step_id`, `dependencies`
-- runtime progress belongs to `TaskEvent`
+- 保留：title、description、goal、约束（constraints）、验收标准（acceptance criteria）、requester
+- 保留规范的溯源（provenance）链接：`intent`、`parent`、`origin_step_id`、`dependencies`
+- 运行时进度属于 `TaskEvent`
 
 ### Run
 
-Execution-attempt envelope.
+执行尝试的封装体。
 
-- keep: `task`, `plan`, `commit`, `snapshot`, `environment`
-- phase changes, failure details, and metrics belong to `RunEvent`
-- usage/cost belongs to `RunUsage`
+- 保留：`task`、`plan`、`commit`、`snapshot`、`environment`
+- 阶段变更、失败详情以及指标属于 `RunEvent`
+- 用量 / 成本属于 `RunUsage`
 
 ### PatchSet
 
-Candidate diff snapshot.
+候选 diff 快照。
 
-- keep: `run`, `sequence`, `commit`, `format`, `artifact`, `touched`, `rationale`
-- acceptance/rejection belongs to `Decision` or Libra projection
+- 保留：`run`、`sequence`、`commit`、`format`、`artifact`、`touched`、`rationale`
+- 验收（acceptance）/ 拒绝属于 `Decision` 或 Libra 投影
 
 ### Provenance
 
-Immutable model/provider configuration for one run.
+某一次 run 的不可变模型 / provider 配置。
 
-- keep: provider/model/parameters/temperature/max_tokens
-- usage belongs to `RunUsage`
+- 保留：provider / model / parameters / temperature / max_tokens
+- 用量属于 `RunUsage`
 
 ### ContextFrame
 
-Immutable incremental context record.
+不可变的增量上下文记录。
 
-- replaces the old mutable `ContextPipeline` runtime container
-- referenced by `Intent.analysis_context_frames`,
-  `Plan.context_frames`, and `PlanStepEvent.consumed_frames` /
-  `produced_frames`
-- `intent_id` can attach a frame directly to the intent-analysis phase
+- 替代了旧的可变 `ContextPipeline` 运行时容器
+- 被 `Intent.analysis_context_frames`、
+  `Plan.context_frames` 以及 `PlanStepEvent.consumed_frames` /
+  `produced_frames` 引用
+- `intent_id` 可以将某个 frame 直接挂接到 intent 分析阶段
 
-## Summary Rule
+## 总结规则
 
 ```text
 1. Snapshot stores "what it is"

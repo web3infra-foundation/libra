@@ -16,7 +16,7 @@ use libra::{
         status::{changes_to_be_committed, changes_to_be_staged},
     },
     internal::{
-        branch::{AGENT_TRACES_BRANCH, Branch as InternalBranch},
+        branch::{TRACES_BRANCH, Branch as InternalBranch},
         config::ConfigKv,
     },
     utils::test::setup_with_new_libra_in,
@@ -207,7 +207,7 @@ fn test_reset_soft_with_pathspec_returns_usage_error() {
 #[test]
 fn test_reset_onto_locked_branch_rejects_intent() {
     // Libra refuses to `reset` onto its managed locked branches
-    // (`main`, `intent`, `agent-traces`) — see
+    // (`main`, `intent`, `traces`) — see
     // src/internal/branch.rs::is_locked_branch and the early guard in
     // src/command/reset.rs::run_reset. Locked-target rejection maps to
     // CliInvalidTarget (LBR-CLI-003, exit 129); no integration test
@@ -227,36 +227,36 @@ fn test_reset_onto_locked_branch_rejects_intent() {
 }
 
 /// opencode.md OC-Phase 3 acceptance criterion 5 requires that
-/// `reset` refuse to land user work on `agent-traces`, the same way
+/// `reset` refuse to land user work on `traces`, the same way
 /// the existing `intent` guard does. Functionally
 /// `is_locked_revision` already covers both branches, but missing
 /// integration coverage means a regression that pulled
-/// `AGENT_TRACES_BRANCH` out of `is_locked_branch` would ship
+/// `TRACES_BRANCH` out of `is_locked_branch` would ship
 /// silently. This test pins the contract end-to-end.
 #[test]
-fn test_reset_onto_locked_branch_rejects_agent_traces() {
+fn test_reset_onto_locked_branch_rejects_traces() {
     let repo = create_committed_repo_via_cli();
 
-    let output = run_libra_command(&["reset", "agent-traces"], repo.path());
+    let output = run_libra_command(&["reset", "traces"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
-        stderr.contains("agent-traces"),
-        "expected the agent-traces branch name in the message, got: {stderr}"
+        stderr.contains("traces"),
+        "expected the traces branch name in the message, got: {stderr}"
     );
 }
 
-/// Revision suffixes (`agent-traces~1`, `agent-traces^`) must also
+/// Revision suffixes (`traces~1`, `traces^`) must also
 /// be refused. `is_locked_revision` strips revision modifiers
 /// before checking the locked list; without this regression a
-/// user-typed `reset agent-traces~2` would escape the guard.
+/// user-typed `reset traces~2` would escape the guard.
 #[test]
-fn test_reset_onto_locked_branch_rejects_agent_traces_suffix() {
+fn test_reset_onto_locked_branch_rejects_traces_suffix() {
     let repo = create_committed_repo_via_cli();
 
-    let output = run_libra_command(&["reset", "agent-traces~1"], repo.path());
+    let output = run_libra_command(&["reset", "traces~1"], repo.path());
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
@@ -269,9 +269,9 @@ async fn test_reset_refuses_ai_managed_current_branch() {
     let repo = create_committed_repo_via_cli();
     {
         let _guard = ChangeDirGuard::new(repo.path());
-        Head::update_result(Head::Branch(AGENT_TRACES_BRANCH.to_string()), None)
+        Head::update_result(Head::Branch(TRACES_BRANCH.to_string()), None)
             .await
-            .expect("point HEAD at agent-traces");
+            .expect("point HEAD at traces");
     }
 
     let output = run_libra_command(&["reset", "--hard", "HEAD"], repo.path());
@@ -280,7 +280,7 @@ async fn test_reset_refuses_ai_managed_current_branch() {
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
-        stderr.contains("refusing to reset locked current branch 'agent-traces'"),
+        stderr.contains("refusing to reset locked current branch 'traces'"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -398,7 +398,7 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
 #[serial]
 async fn test_reset_corrupt_target_branch_returns_repo_corrupt() {
     // Use a non-locked branch as the target. Libra now refuses to `reset`
-    // onto locked branches (`main`, `intent`, `agent-traces`) — see
+    // onto locked branches (`main`, `intent`, `traces`) — see
     // `src/internal/branch.rs::is_locked_branch` and the early check in
     // `src/command/reset.rs::run_reset` — so corrupting `main` and then
     // calling `reset main` short-circuits at the locked-target guard with

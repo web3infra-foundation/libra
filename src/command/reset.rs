@@ -230,7 +230,7 @@ enum ResetError {
     },
 
     /// Refused to reset onto a Libra-managed locked branch (`intent`,
-    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// `traces`, …). These refs hold AI-agent state that the user
     /// should not be able to overwrite by `reset`.
     #[error("refusing to reset to locked branch '{0}'")]
     LockedTarget(String),
@@ -307,7 +307,7 @@ impl ResetError {
                 Some("check that the pathspec file exists and is readable.")
             }
             Self::LockedTarget(_) => Some(
-                "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as reset targets",
+                "Libra-managed branches like 'intent' and 'traces' cannot be used as reset targets",
             ),
             Self::LockedCurrentBranch(_) => Some("switch to a user branch before running reset"),
             Self::RevisionRead(_) => {
@@ -395,7 +395,7 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     util::require_repo().map_err(|_| ResetError::NotInRepo)?;
 
     // Refuse to reset onto a Libra-managed locked branch. `is_locked_revision`
-    // strips `~` / `^` / `@` suffixes so attempts like `agent-traces~1` or
+    // strips `~` / `^` / `@` suffixes so attempts like `traces~1` or
     // `intent^` are still rejected.
     if branch::is_locked_revision(&args.target) {
         return Err(ResetError::LockedTarget(args.target.clone()));
@@ -1287,8 +1287,8 @@ mod tests {
             "pathspec '../escape.txt' is outside the repository working directory",
         );
         assert_eq!(
-            ResetError::LockedCurrentBranch("agent-traces".to_string()).to_string(),
-            "refusing to reset locked current branch 'agent-traces'",
+            ResetError::LockedCurrentBranch("traces".to_string()).to_string(),
+            "refusing to reset locked current branch 'traces'",
         );
         // ObjectLoad — three structured fields.
         assert_eq!(

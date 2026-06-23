@@ -36,20 +36,32 @@ pub const DEFAULT_BRANCH: &str = "main";
 /// "intent" graph) before merging back to a working branch.
 pub const INTENT_BRANCH: &str = "intent";
 /// Reserved branch used by the external-agent capture subsystem (CEX-EntireIO)
-/// to record session and checkpoint trailers on `refs/libra/agent-traces`.
+/// to record session and checkpoint trailers on `refs/libra/traces`.
 /// Treated as locked in the same sense as [`INTENT_BRANCH`]: the CLI must not
 /// let `restore` / `reset` / `switch` / `checkout` move user work onto it.
-pub const AGENT_TRACES_BRANCH: &str = "agent-traces";
+pub const TRACES_BRANCH: &str = "traces";
+
+/// Legacy name for [`TRACES_BRANCH`] (`refs/libra/agent-traces`). Repositories
+/// created before the rename store the capture catalogue under this name; the
+/// `2026062301_rename_agent_traces_branch` schema migration renames the row to
+/// `traces`. The name is kept locked and AI-managed so any not-yet-migrated ref
+/// (e.g. a repo that has not run `libra db upgrade`) keeps its destructive-op
+/// protection.
+pub const LEGACY_TRACES_BRANCH: &str = "agent-traces";
 
 /// Return `true` for branches that the CLI refuses to delete, rename, or
 /// otherwise route user-facing destructive ops at.
 ///
-/// Functional scope: covers [`DEFAULT_BRANCH`], [`INTENT_BRANCH`], and
-/// [`AGENT_TRACES_BRANCH`]. The check is purely syntactic — it does not
-/// consult the storage layer. Callers that need a richer policy (e.g. branch
-/// protection rules) must layer additional checks on top.
+/// Functional scope: covers [`DEFAULT_BRANCH`], [`INTENT_BRANCH`],
+/// [`TRACES_BRANCH`], and its legacy alias [`LEGACY_TRACES_BRANCH`]. The check
+/// is purely syntactic — it does not consult the storage layer. Callers that
+/// need a richer policy (e.g. branch protection rules) must layer additional
+/// checks on top.
 pub fn is_locked_branch(name: &str) -> bool {
-    name == DEFAULT_BRANCH || name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
+    name == DEFAULT_BRANCH
+        || name == INTENT_BRANCH
+        || name == TRACES_BRANCH
+        || name == LEGACY_TRACES_BRANCH
 }
 
 /// Return `true` for Libra-owned AI branches whose checked-out worktree must
@@ -59,12 +71,12 @@ pub fn is_locked_branch(name: &str) -> bool {
 /// branch-management operations such as delete/rename, but it remains the
 /// normal user worktree branch.
 pub fn is_ai_managed_branch(name: &str) -> bool {
-    name == INTENT_BRANCH || name == AGENT_TRACES_BRANCH
+    name == INTENT_BRANCH || name == TRACES_BRANCH || name == LEGACY_TRACES_BRANCH
 }
 
 /// Return `true` if the user-supplied revision string targets a locked
-/// branch — including via revision suffixes (`agent-traces~1`,
-/// `intent^`, `agent-traces@{0}`).
+/// branch — including via revision suffixes (`traces~1`,
+/// `intent^`, `traces@{0}`).
 ///
 /// Boundary condition: this strips the first occurrence of any of `~`, `^`,
 /// or `@` from `rev`, then re-runs [`is_locked_branch`] on the prefix. We
@@ -620,14 +632,16 @@ mod tests {
         );
     }
 
-    /// CEX-EntireIO: regression — `is_locked_branch` must include
-    /// `agent-traces` so `restore`, `reset`, `switch`, and `checkout` reject
-    /// it as a target.
+    /// CEX-EntireIO: regression — `is_locked_branch` must include the capture
+    /// ref `traces` (and its legacy `agent-traces` alias) so `restore`,
+    /// `reset`, `switch`, and `checkout` reject it as a target.
     #[test]
-    fn is_locked_branch_covers_agent_traces() {
+    fn is_locked_branch_covers_traces() {
         assert!(is_locked_branch(DEFAULT_BRANCH));
         assert!(is_locked_branch(INTENT_BRANCH));
-        assert!(is_locked_branch(AGENT_TRACES_BRANCH));
+        assert!(is_locked_branch(TRACES_BRANCH));
+        assert!(is_locked_branch(LEGACY_TRACES_BRANCH));
+        assert!(!is_locked_branch("traces-feature"));
         assert!(!is_locked_branch("agent-traces-feature"));
         assert!(!is_locked_branch("not-locked"));
         assert!(!is_locked_branch(""));
@@ -637,45 +651,50 @@ mod tests {
     fn is_ai_managed_branch_excludes_main() {
         assert!(!is_ai_managed_branch(DEFAULT_BRANCH));
         assert!(is_ai_managed_branch(INTENT_BRANCH));
-        assert!(is_ai_managed_branch(AGENT_TRACES_BRANCH));
+        assert!(is_ai_managed_branch(TRACES_BRANCH));
+        assert!(is_ai_managed_branch(LEGACY_TRACES_BRANCH));
+        assert!(!is_ai_managed_branch("traces-feature"));
         assert!(!is_ai_managed_branch("agent-traces-feature"));
         assert!(!is_ai_managed_branch(""));
     }
 
     /// CEX-EntireIO: `is_locked_revision` must strip `~` / `^` / `@`
-    /// suffixes before lockup so a bypass like `agent-traces~1` is still
+    /// suffixes before lockup so a bypass like `traces~1` is still
     /// rejected. Codex review P1 #1, plus round-2 expansions for
     /// double suffixes, upstream shortcuts, and reflog selectors.
     #[test]
     fn is_locked_revision_strips_suffixes() {
-        // Bare locked names.
+        // Bare locked names (canonical + legacy alias).
+        assert!(is_locked_revision("traces"));
         assert!(is_locked_revision("agent-traces"));
         assert!(is_locked_revision("intent"));
         assert!(is_locked_revision(DEFAULT_BRANCH));
 
         // Single-suffix variants.
+        assert!(is_locked_revision("traces~1"));
+        assert!(is_locked_revision("traces^"));
+        assert!(is_locked_revision("traces^^"));
         assert!(is_locked_revision("agent-traces~1"));
-        assert!(is_locked_revision("agent-traces^"));
-        assert!(is_locked_revision("agent-traces^^"));
         assert!(is_locked_revision("intent~1"));
         assert!(is_locked_revision("intent^2"));
 
         // Double-suffix and reordered combinations (round-2 BLOCK #1).
-        assert!(is_locked_revision("agent-traces~1^2"));
-        assert!(is_locked_revision("agent-traces^1~3"));
+        assert!(is_locked_revision("traces~1^2"));
+        assert!(is_locked_revision("traces^1~3"));
         assert!(is_locked_revision("intent~10^"));
 
         // Reflog / upstream / negative selectors.
-        assert!(is_locked_revision("agent-traces@{0}"));
-        assert!(is_locked_revision("agent-traces@{upstream}"));
-        assert!(is_locked_revision("agent-traces@{push}"));
-        assert!(is_locked_revision("agent-traces@{-1}"));
+        assert!(is_locked_revision("traces@{0}"));
+        assert!(is_locked_revision("traces@{upstream}"));
+        assert!(is_locked_revision("traces@{push}"));
+        assert!(is_locked_revision("traces@{-1}"));
         assert!(is_locked_revision("intent@{1.day.ago}"));
 
         // Negative controls — nothing to do with locked branches.
         assert!(!is_locked_revision("HEAD~1"));
         assert!(!is_locked_revision("HEAD@{0}"));
         assert!(!is_locked_revision("feature/x~1"));
+        assert!(!is_locked_revision("traces-feature"));
         assert!(!is_locked_revision("agent-traces-feature"));
         assert!(!is_locked_revision("agent-traces-feature^"));
         assert!(!is_locked_revision("not-locked@{0}"));

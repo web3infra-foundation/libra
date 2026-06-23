@@ -7,7 +7,7 @@
 //! external-agent turn.
 //!
 //! When checkpoint commits are present, cleanup rewrites
-//! `refs/libra/agent-traces` so pruned temporary checkpoints stop being
+//! `refs/libra/traces` so pruned temporary checkpoints stop being
 //! reachable. Older DB-only fixtures with an empty ref still get the catalog
 //! cleanup without a rewrite.
 
@@ -19,7 +19,7 @@ use serde::Serialize;
 use super::CleanArgs;
 use crate::{
     internal::{
-        ai::history::HistoryManager, branch::AGENT_TRACES_BRANCH, db::get_db_conn_instance,
+        ai::history::HistoryManager, branch::TRACES_BRANCH, db::get_db_conn_instance,
     },
     utils::{
         client_storage::ClientStorage,
@@ -34,7 +34,7 @@ struct CleanReport {
     sessions_inspected: i64,
     temporary_checkpoints_dropped: u64,
     retained_checkpoints_rewritten: usize,
-    agent_traces_ref_rewritten: bool,
+    traces_ref_rewritten: bool,
     note: &'static str,
 }
 
@@ -48,7 +48,7 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
                 sessions_inspected: 0,
                 temporary_checkpoints_dropped: 0,
                 retained_checkpoints_rewritten: 0,
-                agent_traces_ref_rewritten: false,
+                traces_ref_rewritten: false,
                 note: "agent_checkpoint table not present (run `libra init`?)",
             },
             output,
@@ -72,20 +72,20 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
         storage,
         repo_path,
         Arc::new(conn.clone()),
-        AGENT_TRACES_BRANCH,
+        TRACES_BRANCH,
     );
     let prune = history
         .prune_checkpoint_commits(&checkpoint_ids)
         .await
-        .map_err(|e| CliError::fatal(format!("failed to prune agent-traces checkpoints: {e}")))?;
+        .map_err(|e| CliError::fatal(format!("failed to prune traces checkpoints: {e}")))?;
 
     emit_report(
         &CleanReport {
             sessions_inspected,
             temporary_checkpoints_dropped: prune.removed_checkpoints,
             retained_checkpoints_rewritten: prune.rewritten_checkpoints,
-            agent_traces_ref_rewritten: prune.ref_rewritten,
-            note: "temporary checkpoint rows were dropped; reachable agent-traces history was \
+            traces_ref_rewritten: prune.ref_rewritten,
+            note: "temporary checkpoint rows were dropped; reachable traces history was \
                    rewritten when checkpoint commits existed",
         },
         output,

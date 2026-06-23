@@ -590,7 +590,7 @@ impl HistoryManager {
 
     /// Write a tree object and stamp it into `object_index` with the
     /// given `o_type`. Used by the agent capture path so cloud sync
-    /// uploads the trees that compose `refs/libra/agent-traces`.
+    /// uploads the trees that compose `refs/libra/traces`.
     fn write_tree_indexed(&self, tree_items: &[TreeItem], o_type: &str) -> Result<ObjectHash> {
         let (hash, size) = self.write_tree_with_size(tree_items)?;
         crate::utils::client_storage::enqueue_agent_blob_object_index_update(
@@ -898,7 +898,7 @@ impl HistoryManager {
 
         // CEX-EntireIO §14.3 phase-3 item 3: tag the just-written agent
         // blobs in `object_index` so `libra cloud sync` uploads them to
-        // R2. Before this hook the orphan `refs/libra/agent-traces`
+        // R2. Before this hook the orphan `refs/libra/traces`
         // history was "Git-side present, cloud-side invisible" — D1
         // carried the catalogue (`agent_session` / `agent_checkpoint`)
         // but R2 never saw the actual blob bytes, so a fresh
@@ -992,19 +992,19 @@ impl HistoryManager {
 
             let trailer = format_libra_trailers(&params);
             let message = format!(
-                "agent-traces: {} checkpoint {}\n\n{trailer}",
+                "traces: {} checkpoint {}\n\n{trailer}",
                 params.scope.as_str(),
                 params.checkpoint_id,
             );
             let author = Signature::new(
                 SignatureType::Author,
                 "Libra".to_string(),
-                "agent-traces@libra".to_string(),
+                "traces@libra".to_string(),
             );
             let committer = Signature::new(
                 SignatureType::Committer,
                 "Libra".to_string(),
-                "agent-traces@libra".to_string(),
+                "traces@libra".to_string(),
             );
             let parents = parent.into_iter().collect::<Vec<_>>();
             let commit = Commit::new(author, committer, new_root, parents, &message);
@@ -1054,13 +1054,13 @@ impl HistoryManager {
     ///
     /// This is the `libra agent clean` counterpart to
     /// [`Self::append_checkpoint_commit`]. It rewrites the orphan
-    /// `refs/libra/agent-traces` chain from the checkpoint catalog, omitting
+    /// `refs/libra/traces` chain from the checkpoint catalog, omitting
     /// the supplied checkpoint IDs. Rewriting is necessary because later
     /// committed checkpoints may descend from temporary checkpoints; simply
     /// moving the ref to an ancestor would either keep those temporary commits
     /// reachable or discard later retained checkpoints.
     ///
-    /// Repositories that only have catalog rows and an empty agent-traces ref
+    /// Repositories that only have catalog rows and an empty traces ref
     /// (older fixtures, partial migrations, or pre-Phase-2 data) still get the
     /// catalog deletion without a ref rewrite.
     pub async fn prune_checkpoint_commits(
@@ -1124,7 +1124,7 @@ impl HistoryManager {
                 }
                 (RefUpdateOutcome::HeadChanged, _) => {
                     return Err(anyhow!(
-                        "agent-traces head changed repeatedly while pruning checkpoints"
+                        "traces head changed repeatedly while pruning checkpoints"
                     ));
                 }
             }
@@ -1147,7 +1147,7 @@ impl HistoryManager {
                     .to_string(),
             ))
             .await
-            .context("failed to load agent_checkpoint rows for agent-traces rewrite")?;
+            .context("failed to load agent_checkpoint rows for traces rewrite")?;
 
         rows.into_iter()
             .map(CheckpointHistoryRow::from_query_result)
@@ -1172,7 +1172,7 @@ impl HistoryManager {
                 .checkpoint_inner_tree_from_root(&current_root, &row.checkpoint_id)?
                 .ok_or_else(|| {
                     anyhow!(
-                        "agent-traces tree is missing retained checkpoint {}",
+                        "traces tree is missing retained checkpoint {}",
                         row.checkpoint_id
                     )
                 })?;
@@ -1202,7 +1202,7 @@ impl HistoryManager {
         };
         if checkpoint_entry.mode != TreeItemMode::Tree {
             return Err(anyhow!(
-                "agent-traces tree corruption: 'checkpoint' entry expected to be a tree, got mode {:?}",
+                "traces tree corruption: 'checkpoint' entry expected to be a tree, got mode {:?}",
                 checkpoint_entry.mode
             ));
         }
@@ -1213,7 +1213,7 @@ impl HistoryManager {
         };
         if prefix_entry.mode != TreeItemMode::Tree {
             return Err(anyhow!(
-                "agent-traces tree corruption: 'checkpoint/{prefix}' entry expected to be a tree, got mode {:?}",
+                "traces tree corruption: 'checkpoint/{prefix}' entry expected to be a tree, got mode {:?}",
                 prefix_entry.mode
             ));
         }
@@ -1224,7 +1224,7 @@ impl HistoryManager {
         };
         if rest_entry.mode != TreeItemMode::Tree {
             return Err(anyhow!(
-                "agent-traces tree corruption: 'checkpoint/{prefix}/{rest}' entry expected to be a tree, got mode {:?}",
+                "traces tree corruption: 'checkpoint/{prefix}/{rest}' entry expected to be a tree, got mode {:?}",
                 rest_entry.mode
             ));
         }
@@ -1238,7 +1238,7 @@ impl HistoryManager {
         row: &CheckpointHistoryRow,
     ) -> Result<ObjectHash> {
         let message = format!(
-            "agent-traces: {} checkpoint {}\n\n{}",
+            "traces: {} checkpoint {}\n\n{}",
             row.scope,
             row.checkpoint_id,
             format_rewritten_checkpoint_trailers(row)
@@ -1246,12 +1246,12 @@ impl HistoryManager {
         let author = Signature::new(
             SignatureType::Author,
             "Libra".to_string(),
-            "agent-traces@libra".to_string(),
+            "traces@libra".to_string(),
         );
         let committer = Signature::new(
             SignatureType::Committer,
             "Libra".to_string(),
-            "agent-traces@libra".to_string(),
+            "traces@libra".to_string(),
         );
         let parents = parent.into_iter().collect::<Vec<_>>();
         let commit = Commit::new(author, committer, root_tree, parents, &message);
@@ -1438,7 +1438,7 @@ impl HistoryManager {
             Some(entry) if entry.mode == TreeItemMode::Tree => self.load_tree(&entry.id)?,
             Some(entry) => {
                 return Err(anyhow!(
-                    "agent-traces tree corruption: 'checkpoint' entry expected to be a tree, \
+                    "traces tree corruption: 'checkpoint' entry expected to be a tree, \
                      got mode {:?} (oid {})",
                     entry.mode,
                     entry.id
@@ -1455,7 +1455,7 @@ impl HistoryManager {
             Some(entry) if entry.mode == TreeItemMode::Tree => self.load_tree(&entry.id)?,
             Some(entry) => {
                 return Err(anyhow!(
-                    "agent-traces tree corruption: 'checkpoint/{prefix}' entry expected to be a \
+                    "traces tree corruption: 'checkpoint/{prefix}' entry expected to be a \
                      tree, got mode {:?} (oid {})",
                     entry.mode,
                     entry.id
@@ -1522,9 +1522,9 @@ pub struct CheckpointCommitParams<'a> {
     /// Pre-serialised metadata JSON to land at `metadata.json`.
     pub metadata_json: &'a [u8],
     /// Already-redacted transcript bytes. Typed as [`RedactedBytes`]
-    /// (not `&[u8]`) so the agent-traces write path can only ever receive
+    /// (not `&[u8]`) so the traces write path can only ever receive
     /// bytes that passed through the redaction type — entire.md §8.1 /
-    /// §13 P0: every transcript blob written to `agent-traces` must go
+    /// §13 P0: every transcript blob written to `traces` must go
     /// through `RedactedBytes`.
     pub transcript_redacted: &'a RedactedBytes,
     /// File-name component used inside `transcript/<name>` and
@@ -1563,7 +1563,7 @@ pub struct CheckpointCommit {
     pub metadata_blob_oid: ObjectHash,
 }
 
-/// Result of pruning checkpoint commits from `refs/libra/agent-traces`.
+/// Result of pruning checkpoint commits from `refs/libra/traces`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointPruneOutcome {
     pub removed_checkpoints: u64,

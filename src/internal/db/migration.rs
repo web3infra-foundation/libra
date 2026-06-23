@@ -642,6 +642,19 @@ pub fn builtin_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026061401_notes.sql"),
             include_str!("../../../sql/migrations/2026061401_notes_down.sql"),
         ),
+        // 2026-06-23: rename the external-agent capture ref from the legacy
+        // `agent-traces` branch to the single-word `traces` (refs/libra/traces).
+        // Renames the existing `reference` row (and any reflog history) so repos
+        // created before the rename keep their captured checkpoint history under
+        // the new name. Conflict-safe + idempotent — see
+        // `src/internal/branch.rs` (`TRACES_BRANCH` / `LEGACY_TRACES_BRANCH`)
+        // and docs/development/commands/agent.md.
+        sql_migration(
+            2026062301,
+            "rename_agent_traces_branch",
+            include_str!("../../../sql/migrations/2026062301_rename_agent_traces_branch.sql"),
+            include_str!("../../../sql/migrations/2026062301_rename_agent_traces_branch_down.sql"),
+        ),
     ]
 }
 
@@ -770,9 +783,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 12);
+        assert_eq!(runner.len(), 13);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026061401));
+        assert_eq!(runner.max_registered_version(), Some(2026062301));
     }
 
     #[test]
