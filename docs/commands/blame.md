@@ -26,6 +26,7 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Show email | `-e` | `--show-email` | Show the author email (as `<email>`) instead of the author name in the default output. |
 | Long hash | `-l` | | Show the full commit hash instead of the abbreviated one. |
 | Suppress | `-s` | | Suppress the author name and timestamp columns (show only hash + line). |
+| Show name | `-f` | `--show-name` | Show the filename after the hash column on each line. Libra does not follow renames/copies, so it is the blamed file on every line. Human output only (porcelain already prints `filename`). |
 | Raw time | `-t` | | Show the raw author timestamp (epoch seconds) instead of a formatted date. |
 | Abbrev | | `--abbrev <N>` | Use N hex digits for the abbreviated commit hash (ignored with `-l`). |
 | Root | | `--root` | Do not treat root commits as boundaries. Accepted no-op: Libra's blame never prefixes boundary/root commits with `^`, so root commits already appear as normal commits. |
@@ -151,6 +152,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Show email | `-e` / `--show-email` (default human output) | `-e` / `--show-email` | N/A |
 | Long hash | `-l` | `-l` | N/A |
 | Suppress author/date | `-s` | `-s` | N/A |
+| Show filename | `-f` / `--show-name` | `-f` / `--show-name` | N/A |
 | Show timestamp | `-t` (raw epoch; formatted by default) | `-t` (raw timestamp) | N/A |
 | Abbrev length | `--abbrev <N>` | `--abbrev=<N>` | N/A |
 | Don't treat root as boundary | `--root` (no-op; root already shown as normal) | `--root` | N/A |

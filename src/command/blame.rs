@@ -93,6 +93,11 @@ pub struct BlameArgs {
     /// commit is already shown as a normal commit.
     #[clap(long)]
     pub root: bool,
+
+    /// Show the filename in the original commit (after the hash column). Libra
+    /// does not follow renames/copies, so every line shows the blamed file.
+    #[clap(short = 'f', long = "show-name")]
+    pub show_name: bool,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -239,11 +244,19 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
             blame.short_hash.clone()
         };
 
+        // `-f`/`--show-name` inserts the filename right after the hash column.
+        // Libra does not follow renames, so it is the blamed file on every line.
+        let name_col = if args.show_name {
+            format!(" {}", result.file)
+        } else {
+            String::new()
+        };
+
         // `-s` suppresses the author/timestamp columns entirely.
         if args.suppress {
             output.push_str(&format!(
-                "{} {}) {}\n",
-                hash_col, blame.line_number, blame.content
+                "{}{} {}) {}\n",
+                hash_col, name_col, blame.line_number, blame.content
             ));
             continue;
         }
@@ -276,8 +289,8 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         };
 
         output.push_str(&format!(
-            "{} ({:19} {} {}) {}\n",
-            hash_col, author_short, date_col, blame.line_number, blame.content
+            "{}{} ({:19} {} {}) {}\n",
+            hash_col, name_col, author_short, date_col, blame.line_number, blame.content
         ));
     }
 

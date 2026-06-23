@@ -591,6 +591,7 @@ async fn blame_runs_with_sha1() {
         raw_timestamp: false,
         abbrev: None,
         root: false,
+        show_name: false,
     })
     .await;
 }
@@ -618,6 +619,7 @@ async fn blame_runs_with_sha256() {
         raw_timestamp: false,
         abbrev: None,
         root: false,
+        show_name: false,
     })
     .await;
 }
@@ -727,6 +729,74 @@ async fn blame_root_flag_is_accepted_noop() {
         raw_timestamp: false,
         abbrev: None,
         root: true,
+        show_name: false,
     })
     .await;
+}
+
+#[test]
+fn test_blame_show_name_flag_prints_filename() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("named.txt"), "alpha\nbeta\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "named.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "add named", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    // `-f`/`--show-name` inserts the filename after the hash on each line.
+    for flag in ["-f", "--show-name"] {
+        let out = run_libra_command(&["blame", flag, "named.txt"], repo.path());
+        assert_cli_success(&out, &format!("blame {flag}"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout
+                .lines()
+                .all(|l| l.is_empty() || l.contains("named.txt")),
+            "every blame line shows the filename with {flag}: {stdout}"
+        );
+    }
+
+    // Without the flag, the filename is not in the per-line output.
+    let plain = run_libra_command(&["blame", "named.txt"], repo.path());
+    assert_cli_success(&plain, "blame (no -f)");
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("named.txt"),
+        "plain blame omits the filename column"
+    );
+
+    // `-f -s`: the suppress path also shows the filename (after the hash) but
+    // drops the author/date columns.
+    let suppressed = run_libra_command(&["blame", "-f", "-s", "named.txt"], repo.path());
+    assert_cli_success(&suppressed, "blame -f -s");
+    let sup_out = String::from_utf8_lossy(&suppressed.stdout);
+    assert!(
+        sup_out.contains("named.txt"),
+        "-f -s still shows the filename: {sup_out}"
+    );
+    assert!(
+        !sup_out.contains("alpha") || !sup_out.contains(") alpha)"),
+        "sanity: content present"
+    );
+    // `-s` drops the localized date/time, so no "(<author>" paren group remains.
+    assert!(
+        sup_out.lines().all(|l| l.is_empty() || !l.contains(" (")),
+        "-s suppresses the author/date paren group: {sup_out}"
+    );
+
+    // Porcelain is unaffected by `-f` — it already emits a `filename` line, and
+    // the per-line header format does not change.
+    let porc_plain = run_libra_command(&["blame", "--porcelain", "named.txt"], repo.path());
+    let porc_f = run_libra_command(&["blame", "--porcelain", "-f", "named.txt"], repo.path());
+    assert_cli_success(&porc_f, "blame --porcelain -f");
+    assert_eq!(
+        String::from_utf8_lossy(&porc_plain.stdout),
+        String::from_utf8_lossy(&porc_f.stdout),
+        "-f does not change porcelain output"
+    );
 }

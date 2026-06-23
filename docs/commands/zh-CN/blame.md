@@ -26,6 +26,7 @@ libra blame <file> [<commit>] [-L <range>]
 | 显示 email | `-e` | `--show-email` | 默认输出中以 `<email>` 显示作者邮箱代替作者名。 |
 | 完整 hash | `-l` | | 显示完整提交 hash 取代缩写。 |
 | 隐藏作者/日期 | `-s` | | 隐藏作者名与时间戳列（仅保留 hash + 行号）。 |
+| 显示文件名 | `-f` | `--show-name` | 在每行 hash 列后显示文件名。Libra 不跟踪 rename/copy，故每行都是被 blame 的文件。仅人类格式（porcelain 已打印 `filename`）。 |
 | 原始时间戳 | `-t` | | 在日期列显示原始 author 时间戳（epoch 秒）取代格式化日期。 |
 | 缩写位数 | | `--abbrev <N>` | 缩写 hash 使用 N 位 hex（与 `-l` 同时给出时忽略）。 |
 | Root | | `--root` | 不把 root 提交当作边界。接受式 no-op：Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 root 提交已按普通提交显示。 |
@@ -151,6 +152,7 @@ Git 的 blame 默认使用 HEAD，并要求 `git blame --contents <file>` 才能
 | 显示 email | `-e` / `--show-email` | `-e` / `--show-email` | N/A |
 | 完整 hash | `-l` | `-l` | N/A |
 | 隐藏作者/日期 | `-s` | `-s` | N/A |
+| 显示文件名 | `-f` / `--show-name` | `-f` / `--show-name` | N/A |
 | 显示时间戳 | `-t`（原始 epoch；默认格式化） | `-t`（原始时间戳） | N/A |
 | 缩写位数 | `--abbrev <N>` | `--abbrev=<N>` | N/A |
 | 不把 root 当边界 | `--root`（no-op；root 已按普通提交显示） | `--root` | N/A |
