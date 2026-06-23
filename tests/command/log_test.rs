@@ -545,6 +545,24 @@ async fn test_log_quiet_stat_respects_selected_history_range() {
         stderr.contains("failed to load blob object"),
         "expected repo corruption error, got: {stderr}"
     );
+
+    // `--shortstat` reads the same per-commit stats, so quiet mode must validate
+    // (and fail on) the missing blob just like `--stat`.
+    let short_top = run_libra_command(&["--quiet", "log", "-n", "1", "--shortstat"], repo.path());
+    assert!(
+        short_top.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&short_top.stderr)
+    );
+    let short_output =
+        run_libra_command(&["--quiet", "log", "-n", "2", "--shortstat"], repo.path());
+    let (short_stderr, short_report) = parse_cli_error_stderr(&short_output.stderr);
+    assert_eq!(short_output.status.code(), Some(128));
+    assert_eq!(short_report.error_code, "LBR-REPO-002");
+    assert!(
+        short_stderr.contains("failed to load blob object"),
+        "expected --shortstat to fail like --stat, got: {short_stderr}"
+    );
 }
 
 #[test]
@@ -2291,5 +2309,41 @@ async fn test_log_line_range_flag_accepted() {
     assert!(
         out.contains("add a") || out.is_empty(),
         "-L should not produce unexpected output: {out}"
+    );
+}
+
+#[test]
+fn log_shortstat_shows_summary_line_without_per_file_bars() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Modify the tracked file and add a new one, then commit.
+    std::fs::write(p.join("tracked.txt"), "a\nb\nc\n").unwrap();
+    std::fs::write(p.join("new.txt"), "x\ny\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt", "new.txt"], p),
+        "add changes",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "changes", "--no-verify"], p),
+        "commit changes",
+    );
+
+    let out = run_libra_command(&["log", "--shortstat", "-1"], p);
+    assert_cli_success(&out, "log --shortstat -1");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // The diffstat summary line is present...
+    assert!(
+        s.contains("files changed") || s.contains("file changed"),
+        "shortstat summary line present: {s:?}"
+    );
+    assert!(s.contains("insertion"), "insertions reported: {s:?}");
+    // ...but the per-file bar lines (` <path> | N +++`) are NOT.
+    assert!(
+        !s.contains(" | "),
+        "shortstat must omit per-file bars: {s:?}"
     );
 }

@@ -48,6 +48,7 @@ EXAMPLES:
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
     libra log --grep 'fix(' -n 20          Filter commits by message substring
     libra log --name-status src/           Show changed files under src/
+    libra log --shortstat -n 5             Show just the diffstat summary line
     libra --json log -n 1                  Structured JSON output for agents";
 
 fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
@@ -172,7 +173,13 @@ pub struct LogArgs {
     #[clap(long)]
     pub stat: bool,
 
-    /// Files to limit diff output (used with -p, --name-only, or --stat)
+    /// Show only the summary line of the diffstat (files changed, insertions,
+    /// deletions) for each commit
+    #[clap(long)]
+    pub shortstat: bool,
+
+    /// Files to limit diff output (used with -p, --name-only, --name-status,
+    /// --stat, or --shortstat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 
@@ -1050,7 +1057,9 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
             name_only,
             name_status,
             patch,
-            args.stat,
+            // `--shortstat` reads the same per-commit stats as `--stat`, so it
+            // must trigger the same quiet-mode validation of blob data.
+            args.stat || args.shortstat,
         )
         .await;
     }
@@ -1207,6 +1216,15 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                     message.push('\n');
                 }
                 message.push_str(&stat_output);
+            }
+        } else if args.shortstat {
+            let stats = compute_commit_stat(&commit, path_filters.clone()).await?;
+            let shortstat_output = format_shortstat_output(&stats);
+            if !shortstat_output.is_empty() {
+                if !message.ends_with('\n') {
+                    message.push('\n');
+                }
+                message.push_str(&shortstat_output);
             }
         }
 
@@ -1849,6 +1867,42 @@ pub fn format_stat_output(stats: &[FileStat]) -> String {
     ));
 
     output
+}
+
+/// Render the `--shortstat` summary line for a commit's file statistics:
+/// ` N file(s) changed[, M insertion(s)(+)][, K deletion(s)(-)]`, matching
+/// `git log --shortstat` (the insertion/deletion clauses are omitted when
+/// zero). Returns an empty string when there are no changes.
+pub fn format_shortstat_output(stats: &[FileStat]) -> String {
+    if stats.is_empty() {
+        return String::new();
+    }
+
+    let total_files = stats.len();
+    let total_insertions: usize = stats.iter().map(|s| s.insertions).sum();
+    let total_deletions: usize = stats.iter().map(|s| s.deletions).sum();
+
+    let mut summary = format!(
+        " {} file{} changed",
+        total_files,
+        if total_files == 1 { "" } else { "s" }
+    );
+    if total_insertions > 0 {
+        summary.push_str(&format!(
+            ", {} insertion{}(+)",
+            total_insertions,
+            if total_insertions == 1 { "" } else { "s" }
+        ));
+    }
+    if total_deletions > 0 {
+        summary.push_str(&format!(
+            ", {} deletion{}(-)",
+            total_deletions,
+            if total_deletions == 1 { "" } else { "s" }
+        ));
+    }
+    summary.push('\n');
+    summary
 }
 
 /// Maintains state for rendering an ASCII commit graph visualization.

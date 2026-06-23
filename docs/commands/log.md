@@ -15,7 +15,7 @@ libra log [OPTIONS] [-- PATHS...]
 `libra log` displays the commit history starting from the current HEAD. It supports multiple
 output formats including oneline, custom pretty-print, graph visualization, and structured
 JSON. Commits can be filtered by author, date range, and file paths. Diff output (`--patch`,
-`--stat`, `--name-only`, `--name-status`) can be limited to specific paths.
+`--stat`, `--shortstat`, `--name-only`, `--name-status`) can be limited to specific paths.
 
 Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and
 related output styles. `--quiet` suppresses human output but still validates the requested
@@ -97,8 +97,15 @@ libra log --name-status -- src/
 Show diffstat (file change statistics) for each commit, showing insertions and deletions
 per file.
 
+### `--shortstat`
+
+Show only the last line of the `--stat` output: ` N files changed, M insertions(+), K
+deletions(-)` for each commit (the insertion/deletion clauses are omitted when zero),
+without the per-file breakdown.
+
 ```bash
 libra log --stat
+libra log --shortstat
 libra log --range main..feature
 libra log --all --oneline
 libra log --reverse --oneline
@@ -219,7 +226,7 @@ libra log -L1,10:src/main.rs
 ### `[PATHS...]`
 
 Limit diff output to the specified paths. Used with `-p`, `--name-only`, `--name-status`,
-or `--stat`.
+`--stat`, or `--shortstat`.
 
 ```bash
 libra log -- src/
@@ -373,6 +380,7 @@ flag only affects the human rendering layer.
 | Name only | `git log --name-only` | N/A | `libra log --name-only` |
 | Name and status | `git log --name-status` | N/A | `libra log --name-status` |
 | Diffstat | `git log --stat` | `jj diff --stat -r <rev>` | `libra log --stat` |
+| Short diffstat | `git log --shortstat` | N/A | `libra log --shortstat` |
 | Filter by author | `git log --author=<pat>` | `jj log --author <pat>` (revset) | `libra log --author <pat>` |
 | Since date | `git log --since=<date>` | Revset expression | `libra log --since <date>` |
 | Until date | `git log --until=<date>` | Revset expression | `libra log --until <date>` |

@@ -12,7 +12,7 @@ libra log [OPTIONS] [-- PATHS...]
 
 ## 说明
 
-`libra log` 从当前 HEAD 开始显示提交历史。它支持多种输出格式，包括 oneline、自定义 pretty-print、图形可视化和结构化 JSON。提交可按作者、日期范围和文件路径过滤。Diff 输出（`--patch`、`--stat`、`--name-only`、`--name-status`）可以限制到特定路径。
+`libra log` 从当前 HEAD 开始显示提交历史。它支持多种输出格式，包括 oneline、自定义 pretty-print、图形可视化和结构化 JSON。提交可按作者、日期范围和文件路径过滤。Diff 输出（`--patch`、`--stat`、`--shortstat`、`--name-only`、`--name-status`）可以限制到特定路径。
 
 人类模式保留当前 `--oneline`、`--graph`、`--pretty`、`--stat`、`--patch` 和相关输出样式。`--quiet` 抑制人类输出，但仍验证请求的历史范围。
 
@@ -89,8 +89,13 @@ libra log --name-status -- src/
 
 显示每个提交的 diffstat（文件变更统计），展示每个文件的插入和删除。
 
+### `--shortstat`
+
+只显示 `--stat` 输出的最后一行：每个提交的 ` N files changed, M insertions(+), K deletions(-)`（插入/删除为零时省略对应子句），不含逐文件明细。
+
 ```bash
 libra log --stat
+libra log --shortstat
 libra log --range main..feature
 libra log --all --oneline
 libra log --reverse --oneline
@@ -206,7 +211,7 @@ libra log -L1,10:src/main.rs
 
 ### `[PATHS...]`
 
-将 diff 输出限制到指定路径。与 `-p`、`--name-only`、`--name-status` 或 `--stat` 一起使用。
+将 diff 输出限制到指定路径。与 `-p`、`--name-only`、`--name-status`、`--stat` 或 `--shortstat` 一起使用。
 
 ```bash
 libra log -- src/
@@ -341,6 +346,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 仅名称 | `git log --name-only` | N/A | `libra log --name-only` |
 | 名称和状态 | `git log --name-status` | N/A | `libra log --name-status` |
 | Diffstat | `git log --stat` | `jj diff --stat -r <rev>` | `libra log --stat` |
+| 简短 diffstat | `git log --shortstat` | 无 | `libra log --shortstat` |
 | 按作者过滤 | `git log --author=<pat>` | `jj log --author <pat>`（revset） | `libra log --author <pat>` |
 | Since 日期 | `git log --since=<date>` | Revset 表达式 | `libra log --since <date>` |
 | Until 日期 | `git log --until=<date>` | Revset 表达式 | `libra log --until <date>` |
