@@ -2182,6 +2182,7 @@ async fn test_log_all_includes_branches() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;

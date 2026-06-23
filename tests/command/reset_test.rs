@@ -656,6 +656,7 @@ async fn setup_standard_repo(
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -708,6 +709,7 @@ async fn setup_standard_repo(
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -760,6 +762,7 @@ async fn setup_standard_repo(
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -812,6 +815,7 @@ async fn setup_standard_repo(
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;

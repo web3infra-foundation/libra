@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。创建、列出、删除、重命名、上游设置/清除、contains/no-contains、points-at、merged/no-merged 和 ignore-case 排序已支持；复制、描述编辑、sort/format 尚未公开。
+- 兼容级别：`partial`。创建、列出、删除、重命名、上游设置/清除、contains/no-contains、points-at、merged/no-merged、`--sort`（`refname`/`version:refname`，可加 `-` 反转）和 ignore-case 已支持；复制、描述编辑、自定义 `--format`、其余 sort key（如 creatordate）尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/branch.md`。
-- Synopsis：`libra branch [-l] [-r] [-a] [--contains [<commit>]] [--no-contains [<commit>]] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--ignore-case]` / `libra branch [<new_branch>] [<commit_hash>]` / `libra branch (-d | -D) <branch>` / `libra branch -m [<old_branch>] <new_branch>` / `libra branch -u <upstream>` / `libra branch --unset-upstream [<branch>]` / `libra branch --show-current`。
-- 公开参数/子命令包括：`[<new_branch>] [<commit_hash>]`、`-l, --list`、`-d, --delete <DELETE_SAFE>`、`-D, --delete-force <DELETE>`、`-u, --set-upstream-to <UPSTREAM>`、`--unset-upstream [<BRANCH>]`、`--show-current`、`-m, --move <OLD_BRANCH> <NEW_BRANCH>`、`-r, --remotes`、`-a, --all`、`--contains [<commit>]`、`--no-contains [<commit>]`、`--points-at <object>`、`--merged [<commit>]`、`--no-merged [<commit>]`、`--ignore-case`。`--merged`/`--no-merged`（缺省 HEAD）复用 `log::get_reachable_commits` 计算目标可达集合，保留（或排除）tip 在该集合内（即已合并入目标）的分支，是 `--contains` 的反方向。
+- Synopsis：`libra branch [-l] [-r] [-a] [--contains [<commit>]] [--no-contains [<commit>]] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case]` / `libra branch [<new_branch>] [<commit_hash>]` / `libra branch (-d | -D) <branch>` / `libra branch -m [<old_branch>] <new_branch>` / `libra branch -u <upstream>` / `libra branch --unset-upstream [<branch>]` / `libra branch --show-current`。
+- 公开参数/子命令包括：`[<new_branch>] [<commit_hash>]`、`-l, --list`、`-d, --delete <DELETE_SAFE>`、`-D, --delete-force <DELETE>`、`-u, --set-upstream-to <UPSTREAM>`、`--unset-upstream [<BRANCH>]`、`--show-current`、`-m, --move <OLD_BRANCH> <NEW_BRANCH>`、`-r, --remotes`、`-a, --all`、`--contains [<commit>]`、`--no-contains [<commit>]`、`--points-at <object>`、`--merged [<commit>]`、`--no-merged [<commit>]`、`--sort <key>`、`--ignore-case`。`--merged`/`--no-merged`（缺省 HEAD）复用 `log::get_reachable_commits` 计算目标可达集合，保留（或排除）tip 在该集合内（即已合并入目标）的分支，是 `--contains` 的反方向。`--sort <key>`（`refname`/`version:refname`/`v:refname`，前导 `-` 反转）在 `collect_branch_output` 内由 `sort_branch_entries` 排序条目（人类与 JSON 输出一致，且不再按 current-first 排），未知 key 报 `LBR-CLI-002`；dash-leading 值需用 `--sort=-refname`。
 
 
 ## 还未实现的功能
@@ -57,7 +57,7 @@ flowchart TD
 |---|---|---|
 | 复制分支 | `-c` / `-C` / `--copy` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现复制分支；新增时补兼容矩阵和测试证据。 |
 | 描述编辑 | `--edit-description` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现。 |
-| 排序与格式 | `--sort <key>` / `--format <format>` 在当前 `BranchArgs` 中无对应定义（`f54123ea` 仅作 stub 标注，未提供实际参数）。 | 暂未实现。 |
+| 自定义格式与其余 sort key | 自定义 `--format <format>` 仍无对应定义；`--sort` 仅支持 `refname`/`version:refname`，creatordate 等其余 key 未实现。 | 部分实现：`--sort=refname`/`version:refname` 已支持（见上）；`--format` 与其余 sort key 暂未实现。 |
 | 跟踪设置 | `--track` / `--no-track` 已在 `f54123ea` 明确 decline，当前 `BranchArgs` 无对应定义。 | 已声明拒绝；不提供该参数。 |
 
 ## 维护要求

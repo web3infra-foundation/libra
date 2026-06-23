@@ -552,6 +552,7 @@ async fn test_branch() {
             points_at: None,
             merged: None,
             no_merged: None,
+            sort: None,
             ignore_case: false,
         };
         execute(args).await;
@@ -592,6 +593,7 @@ async fn test_branch() {
             points_at: None,
             merged: None,
             no_merged: None,
+            sort: None,
             ignore_case: false,
         };
         execute(args).await;
@@ -622,6 +624,7 @@ async fn test_branch() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -680,6 +683,7 @@ async fn test_create_branch_from_remote() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -739,6 +743,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -954,6 +959,7 @@ async fn test_branch_rename() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -983,6 +989,7 @@ async fn test_branch_rename() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1080,6 +1087,7 @@ async fn test_rename_current_branch() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1153,6 +1161,7 @@ async fn test_rename_to_existing_branch() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1174,6 +1183,7 @@ async fn test_rename_to_existing_branch() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1196,6 +1206,7 @@ async fn test_rename_to_existing_branch() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1262,6 +1273,7 @@ async fn test_list_all_branches() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1294,6 +1306,7 @@ async fn test_list_all_branches() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
@@ -1365,6 +1378,7 @@ async fn test_branch_delete_safe() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -1431,6 +1445,7 @@ async fn test_branch_delete_safe() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -1498,6 +1513,7 @@ async fn test_branch_delete_safe() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -1588,6 +1604,7 @@ async fn test_branch_contains_commit_filter() {
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     })
     .await;
@@ -1920,4 +1937,58 @@ fn branch_merged_and_no_merged_filters() {
     let n = String::from_utf8_lossy(&no_merged.stdout).into_owned();
     assert!(n.contains("side"), "side is not merged into main: {n:?}");
     assert!(!n.contains("old"), "old IS merged into main: {n:?}");
+}
+
+#[test]
+fn branch_sort_orders_list_by_key() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for b in ["zeta", "alpha", "v1.9", "v1.10"] {
+        assert_cli_success(&run_libra_command(&["branch", b], p), b);
+    }
+    let names = |out: &std::process::Output| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim_start_matches("* ").trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    // refname: lexicographic ascending.
+    let asc = run_libra_command(&["branch", "--sort", "refname"], p);
+    assert_cli_success(&asc, "branch --sort refname");
+    let a = names(&asc);
+    let mut sorted_a = a.clone();
+    sorted_a.sort();
+    assert_eq!(a, sorted_a, "ascending refname order: {a:?}");
+
+    // -refname reverses.
+    let desc = run_libra_command(&["branch", "--sort=-refname"], p);
+    assert_cli_success(&desc, "branch --sort=-refname");
+    let d = names(&desc);
+    let mut rd = d.clone();
+    rd.sort();
+    rd.reverse();
+    assert_eq!(d, rd, "descending refname order: {d:?}");
+
+    // version:refname is numeric-aware: v1.9 sorts before v1.10.
+    let ver = run_libra_command(&["branch", "--sort", "version:refname"], p);
+    assert_cli_success(&ver, "branch --sort version:refname");
+    let v = names(&ver);
+    let p9 = v.iter().position(|x| x == "v1.9");
+    let p10 = v.iter().position(|x| x == "v1.10");
+    assert!(
+        p9 < p10,
+        "v1.9 must sort before v1.10 (numeric-aware): {v:?}"
+    );
+
+    // Unknown key is a usage error.
+    assert!(
+        !run_libra_command(&["branch", "--sort", "bogus"], p)
+            .status
+            .success(),
+        "unknown sort key must be rejected"
+    );
 }

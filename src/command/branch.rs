@@ -66,6 +66,7 @@ EXAMPLES:
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
     libra branch --merged main            List branches already merged into main
+    libra branch --sort version:refname   List branches sorted by version-aware name
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -91,6 +92,10 @@ pub enum BranchOutput {
         show_unborn_head: bool,
         #[serde(skip_serializing)]
         ignore_case: bool,
+        /// When set, `branches` is already ordered by `--sort` (the renderer
+        /// must not re-sort with the default current-first ordering).
+        #[serde(skip_serializing)]
+        sorted: bool,
     },
     /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
@@ -228,6 +233,12 @@ pub struct BranchArgs {
     #[clap(long = "no-merged", group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
     pub no_merged: Option<String>,
 
+    /// Sort the listed branches by key: `refname` / `-refname` (default
+    /// reversible) or `version:refname` / `v:refname` (numeric-aware), with a
+    /// leading `-` reversing. Implies --list.
+    #[clap(long, group = "query", value_name = "key")]
+    pub sort: Option<String>,
+
     /// Sorting and name comparisons ignore case where applicable.
     #[clap(long = "ignore-case", group = "query")]
     pub ignore_case: bool,
@@ -290,6 +301,9 @@ enum BranchError {
 
     #[error("not a valid object name: '{0}'")]
     InvalidCommit(String),
+
+    #[error("unsupported sort key '{0}'")]
+    InvalidSortKey(String),
 
     #[error("invalid upstream '{0}'")]
     InvalidUpstream(String),
@@ -377,6 +391,13 @@ impl From<BranchError> for CliError {
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("use 'libra log --oneline' to see available commits.")
             }
+            BranchError::InvalidSortKey(key) => CliError::command_usage(format!(
+                "unsupported sort key '{key}'"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(
+                "supported keys: refname, -refname, version:refname (v:refname), -version:refname",
+            ),
             BranchError::InvalidUpstream(upstream) => {
                 CliError::fatal(format!("invalid upstream '{upstream}'"))
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -957,7 +978,8 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         || !args.no_contains.is_empty()
         || args.points_at.is_some()
         || args.merged.is_some()
-        || args.no_merged.is_some();
+        || args.no_merged.is_some()
+        || args.sort.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -1031,12 +1053,24 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         && matches!(list_mode, BranchListMode::Local | BranchListMode::All)
         && head_name.is_some();
 
+    // `--sort` orders the entries here (reflected in both human and JSON
+    // output); the renderer then preserves this order instead of applying its
+    // default current-first ordering.
+    let sorted = match args.sort.as_deref() {
+        Some(key) => {
+            sort_branch_entries(&mut entries, key, args.ignore_case)?;
+            true
+        }
+        None => false,
+    };
+
     Ok(BranchOutput::List {
         branches: entries,
         head_name,
         detached_head,
         show_unborn_head,
         ignore_case: args.ignore_case,
+        sorted,
     })
 }
 
@@ -1127,6 +1161,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             detached_head,
             show_unborn_head,
             ignore_case,
+            sorted: presorted,
         } => {
             if let Some(detached_head) = detached_head {
                 println!(
@@ -1141,18 +1176,22 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                 return Ok(());
             }
 
+            // `--sort` already ordered the entries; otherwise apply the default
+            // current-first, then name (case-aware) ordering.
             let mut sorted = branches.clone();
-            sorted.sort_by(|a, b| {
-                if a.current {
-                    std::cmp::Ordering::Less
-                } else if b.current {
-                    std::cmp::Ordering::Greater
-                } else if *ignore_case {
-                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                } else {
-                    a.name.cmp(&b.name)
-                }
-            });
+            if !*presorted {
+                sorted.sort_by(|a, b| {
+                    if a.current {
+                        std::cmp::Ordering::Less
+                    } else if b.current {
+                        std::cmp::Ordering::Greater
+                    } else if *ignore_case {
+                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                    } else {
+                        a.name.cmp(&b.name)
+                    }
+                });
+            }
 
             for branch in sorted {
                 if branch.current {
@@ -1308,6 +1347,7 @@ pub async fn list_branches(
         points_at: None,
         merged: None,
         no_merged: None,
+        sort: None,
         ignore_case: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
@@ -1373,6 +1413,43 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
         set.insert(target_commit);
     }
     Ok(set)
+}
+
+/// Sort branch list entries in place by `--sort` key. Supports `refname` /
+/// `-refname` and `version:refname` / `v:refname` (numeric-aware), with a
+/// leading `-` reversing. Unknown keys are a usage error.
+fn sort_branch_entries(
+    entries: &mut [BranchListEntry],
+    key: &str,
+    ignore_case: bool,
+) -> Result<(), BranchError> {
+    let (base, reverse) = match key.strip_prefix('-') {
+        Some(rest) => (rest, true),
+        None => (key, false),
+    };
+    let ordering = |a: &BranchListEntry, b: &BranchListEntry| -> std::cmp::Ordering {
+        match base {
+            "refname" => {
+                if ignore_case {
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                } else {
+                    a.name.cmp(&b.name)
+                }
+            }
+            "version:refname" | "v:refname" => {
+                crate::utils::util::version_refname_cmp(&a.name, &b.name)
+            }
+            _ => std::cmp::Ordering::Equal,
+        }
+    };
+    if !matches!(base, "refname" | "version:refname" | "v:refname") {
+        return Err(BranchError::InvalidSortKey(base.to_string()));
+    }
+    entries.sort_by(|a, b| {
+        let ord = ordering(a, b);
+        if reverse { ord.reverse() } else { ord }
+    });
+    Ok(())
 }
 
 /// For `--merged`/`--no-merged`: resolve the target spec and return the set of
