@@ -2347,3 +2347,31 @@ fn log_shortstat_shows_summary_line_without_per_file_bars() {
         "shortstat must omit per-file bars: {s:?}"
     );
 }
+
+#[test]
+fn log_format_is_alias_for_pretty() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `--format=<x>` renders identically to `--pretty=<x>`.
+    let fmt = run_libra_command(&["log", "--format=%s", "-1"], p);
+    assert_cli_success(&fmt, "log --format=%s");
+    let pretty = run_libra_command(&["log", "--pretty=%s", "-1"], p);
+    assert_cli_success(&pretty, "log --pretty=%s");
+    assert_eq!(
+        String::from_utf8_lossy(&fmt.stdout),
+        String::from_utf8_lossy(&pretty.stdout),
+        "--format must alias --pretty"
+    );
+    assert!(
+        String::from_utf8_lossy(&fmt.stdout).contains("base"),
+        "subject placeholder rendered: {}",
+        String::from_utf8_lossy(&fmt.stdout)
+    );
+
+    // `--format` and `--pretty` are mutually exclusive.
+    let both = run_libra_command(&["log", "--format=%s", "--pretty=%s", "-1"], p);
+    assert!(!both.status.success(), "--format conflicts with --pretty");
+}

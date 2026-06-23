@@ -148,6 +148,16 @@ libra log --pretty="%h - %s (%an)"
 libra log --pretty="format:%H %s"
 ```
 
+### `--format <FORMAT>`
+
+Alias for `--pretty=<FORMAT>` (Git's `--format`). Accepts the same preset names and
+`%`-placeholder templates as `--pretty`. Mutually exclusive with `--pretty`.
+
+```bash
+libra log --format="%h %s"
+libra log --format=oneline
+```
+
 ### `--decorate[=<style>]`
 
 Print ref names (branches, tags) next to commits. Styles: `short` (default), `full`, `no`.
@@ -384,7 +394,7 @@ flag only affects the human rendering layer.
 | Filter by author | `git log --author=<pat>` | `jj log --author <pat>` (revset) | `libra log --author <pat>` |
 | Since date | `git log --since=<date>` | Revset expression | `libra log --since <date>` |
 | Until date | `git log --until=<date>` | Revset expression | `libra log --until <date>` |
-| Custom format | `git log --pretty=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` |
+| Custom format | `git log --pretty=<fmt>` / `--format=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` / `--format <fmt>` |
 | Decorate refs | `git log --decorate` | Always shown | `libra log --decorate` |
 | No decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
 | Graph view | `git log --graph` | `jj log` (default has graph) | `libra log --graph` |

@@ -137,6 +137,15 @@ libra log --pretty="%h - %s (%an)"
 libra log --pretty="format:%H %s"
 ```
 
+### `--format <FORMAT>`
+
+`--pretty=<FORMAT>` 的别名（Git 的 `--format`）。接受与 `--pretty` 相同的预设名和 `%` 占位符模板。与 `--pretty` 互斥。
+
+```bash
+libra log --format="%h %s"
+libra log --format=oneline
+```
+
 ### `--decorate[=<style>]`
 
 在提交旁打印 ref 名称（分支、标签）。样式：`short`（默认）、`full`、`no`。
@@ -350,7 +359,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 按作者过滤 | `git log --author=<pat>` | `jj log --author <pat>`（revset） | `libra log --author <pat>` |
 | Since 日期 | `git log --since=<date>` | Revset 表达式 | `libra log --since <date>` |
 | Until 日期 | `git log --until=<date>` | Revset 表达式 | `libra log --until <date>` |
-| 自定义格式 | `git log --pretty=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` |
+| 自定义格式 | `git log --pretty=<fmt>` / `--format=<fmt>` | `jj log -T <template>` | `libra log --pretty <fmt>` / `--format <fmt>` |
 | Decorate refs | `git log --decorate` | 始终显示 | `libra log --decorate` |
 | 不 decorate | `git log --no-decorate` | N/A | `libra log --no-decorate` |
 | Graph 视图 | `git log --graph` | `jj log`（默认有 graph） | `libra log --graph` |

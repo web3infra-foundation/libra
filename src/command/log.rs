@@ -151,6 +151,10 @@ pub struct LogArgs {
     /// Custom pretty format string (e.g. `%h - %s`)
     #[clap(long, value_name = "FORMAT")]
     pub pretty: Option<String>,
+    /// Alias for `--pretty=<format>` (Git's `--format`). Accepts the same preset
+    /// names and `%`-placeholder templates as `--pretty`.
+    #[clap(long, value_name = "FORMAT", conflicts_with = "pretty")]
+    pub format: Option<String>,
     /// Date rendering mode for author/committer dates: short / iso / iso-strict /
     /// rfc / unix / raw (others fall back to the default form).
     #[clap(long, value_name = "FORMAT")]
@@ -1077,6 +1081,9 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         FormatType::Oneline
     } else if let Some(pretty) = args.pretty.clone() {
         parse_pretty_format(pretty)
+    } else if let Some(format) = args.format.clone() {
+        // `--format` is Git's alias for `--pretty=<format>`.
+        parse_pretty_format(format)
     } else {
         FormatType::Full
     };
@@ -1093,7 +1100,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         full_hash_len
     } else if let Some(n) = args.abbrev {
         if n == 0 { default_abbrev } else { n }
-    } else if args.abbrev_commit || args.oneline || args.pretty.is_some() {
+    } else if args.abbrev_commit || args.oneline || args.pretty.is_some() || args.format.is_some() {
         default_abbrev
     } else {
         full_hash_len
