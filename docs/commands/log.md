@@ -242,6 +242,17 @@ libra log --author-date-order
 libra log --author-date-order --oneline
 ```
 
+### `--date-order`
+
+Order commits by committer date (newest first). This is Libra's default, so the
+flag is accepted for Git parity and explicitly selects the default ordering; it
+conflicts with `--author-date-order`.
+
+```bash
+libra log --date-order
+libra log --date-order --oneline
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved
@@ -396,6 +407,13 @@ Libra does not impose Git's topological constraint — so it diverges from the
 default only when a commit's author and committer dates differ (e.g. after a
 rebase or cherry-pick). `--reverse` still flips the final ordering.
 
+### `--date-order`
+
+`--date-order` selects the default committer-timestamp order explicitly. It is an
+accepted no-op (Libra already sorts by committer date) and conflicts with
+`--author-date-order`. Like Libra's other ordering flags, the sort is purely by
+timestamp (no topological constraint).
+
 ### `--follow`
 
 `--follow` performs best-effort rename detection by walking history and matching
@@ -457,6 +475,7 @@ flag only affects the human rendering layer.
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
 | Author-date order | `git log --author-date-order` | N/A | `libra log --author-date-order` (timestamp-only) |
+| Date order | `git log --date-order` | N/A | `libra log --date-order` (accepted no-op; default) |
 | Follow renames | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -484,5 +503,6 @@ flag only affects the human rendering layer.
 - `-L` is accepted but does not yet provide blame-level line precision
 - `--reverse` is supported
 - `--author-date-order` is supported (timestamp-only; no topological constraint)
+- `--date-order` is supported (accepted no-op; selects the default committer-date order)
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
 - In JSON mode, `files` contains structured change summaries; patch text is never included in JSON output

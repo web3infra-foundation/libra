@@ -259,6 +259,13 @@ pub struct LogArgs {
     #[clap(long = "author-date-order")]
     pub author_date_order: bool,
 
+    /// Order commits by committer date (newest first). This is Libra's default,
+    /// so the flag is accepted for Git parity and selects the default ordering;
+    /// it conflicts with `--author-date-order`. Libra sorts purely by timestamp
+    /// (no topological constraint).
+    #[clap(long = "date-order", conflicts_with = "author_date_order")]
+    pub date_order: bool,
+
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
     pub all: bool,

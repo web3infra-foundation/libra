@@ -223,6 +223,15 @@ libra log --author-date-order
 libra log --author-date-order --oneline
 ```
 
+### `--date-order`
+
+按提交者日期排序（最新在前）。这是 Libra 的默认顺序，故该标志为对齐 Git 而接受、显式选择默认顺序；与 `--author-date-order` 互斥。
+
+```bash
+libra log --date-order
+libra log --date-order --oneline
+```
+
 ### `--follow <FILE>`
 
 Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。
@@ -359,6 +368,10 @@ Git 接受 `git log A..B` 这种位置修订表达式。Libra 通过 `--range A.
 
 `--author-date-order` 按作者时间戳（最新在前）排序结果集，而非默认的提交者时间戳。排序仅按时间戳——Libra 不施加 Git 的拓扑约束——故仅当某提交的作者日期与提交者日期不同（如 rebase 或 cherry-pick 后）时才与默认不同。`--reverse` 仍会翻转最终顺序。
 
+### `--date-order`
+
+`--date-order` 显式选择默认的提交者时间戳顺序。它是接受式 no-op（Libra 本就按提交者日期排序），与 `--author-date-order` 互斥。与 Libra 其它排序标志一样，排序仅按时间戳（无拓扑约束）。
+
 ### `--follow`
 
 `--follow` 通过遍历历史并匹配被移除/新增 blob 哈希来进行 best-effort 重命名检测。它不能处理复杂目录重命名或内容相似重命名。
@@ -407,6 +420,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 路径过滤 | `git log -- <paths>` | N/A（使用 revset） | `libra log -- <paths>` |
 | 反向顺序 | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
 | 作者日期顺序 | `git log --author-date-order` | N/A | `libra log --author-date-order`（仅时间戳） |
+| 日期顺序 | `git log --date-order` | N/A | `libra log --date-order`（接受式 no-op；默认） |
 | 追踪重命名 | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | 仅 merge commits | `git log --merges` | N/A | N/A |
 | 仅 first parent | `git log --first-parent` | N/A | `libra log --first-parent` |
@@ -434,5 +448,6 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 - `-L` 已被接受，但尚未提供 blame 级行精度
 - `--reverse` 已支持
 - `--author-date-order` 已支持（仅时间戳；无拓扑约束）
+- `--date-order` 已支持（接受式 no-op；显式选择默认的提交者日期顺序）
 - jj 的 log 使用模板语言（`-T`）进行格式化；Libra 使用 Git 兼容的 `--pretty` 格式字符串
 - 在 JSON 模式中，`files` 包含结构化变更摘要；JSON 输出永远不包含 patch 文本

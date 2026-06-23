@@ -2539,3 +2539,34 @@ fn test_log_author_date_order_lists_all_commits() {
         "lists the newest commit"
     );
 }
+
+#[test]
+fn test_log_date_order_selects_default_and_conflicts() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for i in 1..=3 {
+        std::fs::write(p.join(format!("g{i}.txt")), format!("{i}\n")).unwrap();
+        assert_cli_success(&run_libra_command(&["add", &format!("g{i}.txt")], p), "add");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", &format!("d{i}"), "--no-verify"], p),
+            "commit",
+        );
+    }
+
+    // `--date-order` selects Libra's default committer-date order (parity no-op).
+    let date_order = run_libra_command(&["log", "--date-order", "--oneline"], p);
+    assert_cli_success(&date_order, "log --date-order");
+    let default = run_libra_command(&["log", "--oneline"], p);
+    assert_cli_success(&default, "log --oneline");
+    assert_eq!(
+        date_order.stdout, default.stdout,
+        "--date-order matches the default committer-date order"
+    );
+
+    // `--date-order` conflicts with `--author-date-order`.
+    let conflict = run_libra_command(&["log", "--date-order", "--author-date-order"], p);
+    assert!(
+        !conflict.status.success(),
+        "--date-order and --author-date-order conflict"
+    );
+}
