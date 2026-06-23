@@ -39,6 +39,7 @@ EXAMPLES:
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
     libra checkout --detach main           Detach HEAD at a branch's commit instead of switching
+    libra checkout -t origin/main          --track accepted; remote checkout tracks via DWIM
     libra checkout -- file.txt             Restore a path from the index (prefer: libra restore file.txt)
     libra checkout HEAD -- file.txt        Restore a path from HEAD into index + worktree
     libra --json checkout main             Structured compatibility output
@@ -67,6 +68,14 @@ pub struct CheckoutArgs {
     /// switching to the branch).
     #[clap(short = 'd', long = "detach")]
     detach: bool,
+
+    /// Set up upstream tracking when checking out a remote-tracking branch.
+    /// Libra always configures tracking for a remote-tracking checkout (DWIM),
+    /// so `--track` is accepted for Git parity and requests behavior Libra
+    /// already performs; it has no effect for a non-remote target. For
+    /// explicit, standalone tracking setup use `libra switch --track`.
+    #[clap(short = 't', long = "track")]
+    track: bool,
 
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]

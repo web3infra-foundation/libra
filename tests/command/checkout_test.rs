@@ -1052,3 +1052,31 @@ fn test_checkout_detach_at_branch_commit() {
         "HEAD should be detached, got: {cur_out:?}"
     );
 }
+
+#[test]
+fn checkout_track_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "create feature",
+    );
+
+    // `-t`/`--track` is accepted; for a local branch it is a no-op (Libra always
+    // configures tracking for remote-tracking checkouts via DWIM).
+    let short = run_libra_command(&["checkout", "-t", "feature"], p);
+    assert_cli_success(&short, "checkout -t feature");
+    let cur = run_libra_command(&["branch", "--show-current"], p);
+    assert!(
+        String::from_utf8_lossy(&cur.stdout).contains("feature"),
+        "checkout -t switched to feature"
+    );
+
+    let long = run_libra_command(&["checkout", "--track", "main"], p);
+    assert_cli_success(&long, "checkout --track main");
+    let cur = run_libra_command(&["branch", "--show-current"], p);
+    assert!(
+        String::from_utf8_lossy(&cur.stdout).contains("main"),
+        "checkout --track switched to main"
+    );
+}

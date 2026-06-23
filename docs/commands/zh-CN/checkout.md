@@ -28,6 +28,7 @@ libra checkout [<tree-ish>] -- <pathspec>...
 | | `<branch>` | 位置参数（可选） | 要切换到的目标分支。省略时显示当前分支。 |
 | `-b` | | `<name>` | 从当前 HEAD 创建新分支并切换到它 |
 | `-d` | `--detach` | | 即使目标是分支也在其提交处 detach HEAD（而非切换到分支） |
+| `-t` | `--track` | | checkout 远程跟踪分支时配置 upstream。接受式 no-op：Libra 在 checkout 远程跟踪分支时本就通过 DWIM 配置跟踪，故该标志请求的正是已有行为；对非远程目标无效果。独立显式跟踪请用 `libra switch --track`。 |
 | | `[<tree-ish>] -- <pathspec>...` | 位置参数 | 恢复路径。没有 `<tree-ish>` 时，从索引恢复工作树。带 `<tree-ish>` 时，从该来源同时恢复索引和工作树。 |
 
 ### 标志示例
@@ -215,6 +216,7 @@ Git 肌肉记忆根深蒂固。使用 `git checkout` 多年的开发者会本能
 | 恢复文件 | `git checkout -- file` | `libra checkout -- file`（优先 `libra restore file`） | `jj restore` |
 | 从修订恢复文件 | `git checkout HEAD -- file` | `libra checkout HEAD -- file`（优先 `libra restore --source HEAD -S -W file`） | `jj restore --from <revision>` |
 | Detach HEAD | `git checkout <commit>` / `git checkout --detach <branch>` | `libra checkout <commit>` / `libra checkout -d`/`--detach <branch>` | `jj edit <rev>` |
+| 跟踪远程分支 | `git checkout -t`/`--track <remote>/<branch>` | `libra checkout -t`/`--track`（接受式 no-op；DWIM 本就跟踪） | N/A |
 | 结构化输出 | 无 | 分支兼容动作支持 `--json` / `--machine` | `--template` |
 
 ## 错误处理
