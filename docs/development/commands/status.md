@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/status.md`。
 - Synopsis：`libra status [OPTIONS]`。
-- 公开参数/子命令包括：`-s, --short`、`--porcelain [VERSION]`、`--branch`、`--ahead-behind`、`--no-ahead-behind`、`--show-stash`、`--ignored`、`--untracked-files <MODE>`、`--column`、`-z`、`--find-renames [PERCENT]`、`--renames`、`--no-renames`、`--exit-code`。`--renames`/`--no-renames`（`overrides_with` 互斥）切换重命名检测：`--no-renames` 关闭（优先于 `--renames`/`--find-renames`），`--renames` 以默认（或 `--find-renames`）阈值开启。
+- 公开参数/子命令包括：`-s, --short`、`--porcelain [VERSION]`、`-b, --branch`、`--ahead-behind`、`--no-ahead-behind`、`--show-stash`、`--ignored`、`--untracked-files <MODE>`、`--column`、`-z`、`--find-renames [PERCENT]`、`--renames`、`--no-renames`、`--exit-code`。`--renames`/`--no-renames`（`overrides_with` 互斥）切换重命名检测：`--no-renames` 关闭（优先于 `--renames`/`--find-renames`），`--renames` 以默认（或 `--find-renames`）阈值开启。
 
 
 ## 还未实现的功能

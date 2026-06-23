@@ -2497,3 +2497,35 @@ fn test_status_renames_and_no_renames_toggle_detection() {
         "--no-renames must override --find-renames: {b}"
     );
 }
+
+#[test]
+fn test_status_short_b_alias_shows_branch_header() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `-b` is the short alias for `--branch`; in short mode it adds the `## <branch>` header.
+    let with_b = run_libra_command(&["status", "-s", "-b"], p);
+    assert_cli_success(&with_b, "status -s -b");
+    let out_b = String::from_utf8_lossy(&with_b.stdout);
+    assert!(
+        out_b.contains("## "),
+        "`-b` adds the branch header: {out_b:?}"
+    );
+
+    // `-b` matches the long `--branch` form byte-for-byte on the header line.
+    let with_long = run_libra_command(&["status", "-s", "--branch"], p);
+    let out_long = String::from_utf8_lossy(&with_long.stdout);
+    assert_eq!(
+        out_b.lines().next(),
+        out_long.lines().next(),
+        "-b and --branch produce the same header"
+    );
+
+    // Without `-b`, the short output carries no branch header.
+    let without = run_libra_command(&["status", "-s"], p);
+    let out_without = String::from_utf8_lossy(&without.stdout);
+    assert!(
+        !out_without.contains("## "),
+        "no branch header without -b: {out_without:?}"
+    );
+}

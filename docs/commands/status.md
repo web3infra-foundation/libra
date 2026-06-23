@@ -47,13 +47,15 @@ libra status --porcelain v1
 libra status --porcelain v2
 ```
 
-### `--branch`
+### `--branch` (`-b`)
 
 Include branch information in short or porcelain output. Shows the current branch and its
-tracking relationship on the first line.
+tracking relationship on the first line. `-b` is the short alias, so `libra status -sb`
+matches `git status -sb`.
 
 ```bash
 libra status --short --branch
+libra status -sb
 libra status --porcelain --branch
 ```
 
@@ -375,7 +377,7 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Short format | `git status -s` / `--short` | N/A (always short) | `libra status -s` / `--short` |
 | Porcelain v1 | `git status --porcelain` | N/A | `libra status --porcelain` |
 | Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2` (v1 semantics) |
-| Branch info in short | `git status -sb` | Always shown | `libra status --short --branch` |
+| Branch info in short | `git status -sb` | Always shown | `libra status -sb` (`--short --branch`) |
 | Show stash count | `git status --show-stash` | N/A | `libra status --show-stash` (standard mode) |
 | Show ignored files | `git status --ignored` | N/A | `libra status --ignored` |
 | Untracked files control | `git status -u<mode>` | N/A (always shows) | `libra status --untracked-files=<mode>` |

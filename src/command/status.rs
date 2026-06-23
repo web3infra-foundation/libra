@@ -49,7 +49,7 @@ EXAMPLES:
     libra status -s                    Short format output
     libra status --porcelain           Machine-readable output (v1)
     libra status --porcelain v2        Extended machine-readable output
-    libra status --branch              Include branch info in short/porcelain
+    libra status -sb                   Include branch info in short output (-b = --branch)
     libra status --show-stash          Show stash count
     libra status --ignored             Include ignored files
     libra status --untracked-files=no  Hide untracked files
@@ -81,7 +81,7 @@ pub struct StatusArgs {
     pub short: bool,
 
     /// Output with branch info (short or porcelain mode)
-    #[clap(long = "branch")]
+    #[clap(short = 'b', long = "branch")]
     pub branch: bool,
 
     /// Show ahead/behind counts in branch info (default: true).

@@ -37,12 +37,13 @@ libra status --porcelain v1
 libra status --porcelain v2
 ```
 
-### `--branch`
+### `--branch`（`-b`）
 
-在 short 或 porcelain 输出中包含分支信息。第一行显示当前分支及其 tracking 关系。
+在 short 或 porcelain 输出中包含分支信息。第一行显示当前分支及其 tracking 关系。`-b` 是短别名，故 `libra status -sb` 与 `git status -sb` 一致。
 
 ```bash
 libra status --short --branch
+libra status -sb
 libra status --porcelain --branch
 ```
 
@@ -274,7 +275,7 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 | 短格式 | `git status -s` / `--short` | N/A（始终短） | `libra status -s` / `--short` |
 | Porcelain v1 | `git status --porcelain` | N/A | `libra status --porcelain` |
 | Porcelain v2 | `git status --porcelain=v2` | N/A | `libra status --porcelain v2`（v1 语义） |
-| 短格式中的分支信息 | `git status -sb` | 始终显示 | `libra status --short --branch` |
+| 短格式中的分支信息 | `git status -sb` | 始终显示 | `libra status -sb`（`--short --branch`） |
 | 显示 stash 数量 | `git status --show-stash` | N/A | `libra status --show-stash`（标准模式） |
 | 显示被忽略文件 | `git status --ignored` | N/A | `libra status --ignored` |
 | 未跟踪文件控制 | `git status -u<mode>` | N/A（始终显示） | `libra status --untracked-files=<mode>` |
