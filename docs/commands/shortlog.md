@@ -9,7 +9,7 @@ Summarize reachable commits by author.
 ```
 libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges]
                [--top <N>] [--min-count <N>] [--reverse]
-               [--since <date>] [--until <date>]
+               [--since <date>] [--until <date>] [-w[<W>[,<I1>[,<I2>]]]]
 ```
 
 ## Description
@@ -35,6 +35,7 @@ Date filtering via `--since` and `--until` restricts which commits are included 
 | Reverse | | `--reverse` | Reverse the output order. |
 | Since | | `--since <date>` | Only include commits more recent than the specified date. |
 | Until | | `--until <date>` | Only include commits older than the specified date. |
+| Wrap | `-w` | `--wrap [<W>[,<I1>[,<I2>]]]` | Linewrap subjects at width `W` (default 76), first-line indent `I1` (6), continuation indent `I2` (9). `-w0` indents without wrapping. |
 | Revision | | positional (optional) | The revision to summarize from. Defaults to `HEAD`. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress human-readable output. |
@@ -212,8 +213,8 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Piped input | Not supported | Reads from stdin when piped | N/A |
 | No merges | `--no-merges` | `--no-merges` | N/A |
 | Author filter | `--author=<pattern>` | `--author=<pattern>` | N/A |
+| Output wrapping | `-w[<width>[,<i1>[,<i2>]]]` | `-w[<width>[,<i1>[,<i2>]]]` | N/A |
 | Grep filter | Not supported | `--grep=<pattern>` | N/A |
-| Width limit | Not supported | `-w[<width>[,<indent1>[,<indent2>]]]` | N/A |
 | JSON output | `--json` | Not supported | N/A |
 | Quiet mode | `--quiet` | Not supported | N/A |
 

@@ -852,3 +852,62 @@ fn group_trailer_groups_by_trailer_value() {
         String::from_utf8_lossy(&bad.stderr)
     );
 }
+
+#[test]
+#[serial]
+fn shortlog_wrap_wraps_long_subjects() {
+    use std::fs;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("wraptest.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "wraptest.txt"], p), "add");
+    let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", long, "--no-verify"], p),
+        "commit long subject",
+    );
+
+    // -w30: the long subject wraps, so its first and last words land on
+    // different physical lines and every line fits within 30 columns.
+    let wrapped = run_libra_command(&["shortlog", "-w30"], p);
+    assert_cli_success(&wrapped, "shortlog -w30");
+    let w = String::from_utf8_lossy(&wrapped.stdout);
+    let alpha_line = w.lines().position(|l| l.contains("alpha"));
+    let juliet_line = w.lines().position(|l| l.contains("juliet"));
+    assert!(
+        alpha_line.is_some() && juliet_line.is_some() && alpha_line != juliet_line,
+        "long subject must wrap onto multiple lines: {w:?}"
+    );
+    for line in w.lines() {
+        assert!(
+            line.chars().count() <= 30,
+            "each wrapped line must fit width 30: {line:?}"
+        );
+    }
+    // A continuation line is indented by 9 spaces (indent2 default).
+    assert!(
+        w.lines().any(|l| l.starts_with("         ")
+            && l.trim_start()
+                .starts_with(|c: char| c.is_ascii_alphabetic())),
+        "continuation lines must use the 9-space indent: {w:?}"
+    );
+
+    // Without -w the whole subject stays on one line (first and last word
+    // together).
+    let plain = run_libra_command(&["shortlog"], p);
+    assert_cli_success(&plain, "shortlog");
+    let s = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        s.lines()
+            .any(|l| l.contains("alpha") && l.contains("juliet")),
+        "without -w the subject stays on one line: {s:?}"
+    );
+
+    // More than three comma-separated -w components is a usage error.
+    let bad = run_libra_command(&["shortlog", "-w30,2,4,8"], p);
+    assert!(
+        !bad.status.success(),
+        "a -w spec with more than three components must be rejected"
+    );
+}

@@ -78,6 +78,7 @@ EXAMPLES:
     libra shortlog --no-merges      Exclude merge commits from the summary
     libra shortlog --top 5          Show only the top 5 authors
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
+    libra shortlog -w50             Wrap commit subjects at 50 columns
     libra shortlog --json           Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -94,6 +95,12 @@ pub struct ShortlogArgs {
     /// Show the email address of each author
     #[clap(short = 'e', long = "email")]
     pub email: bool,
+
+    /// Linewrap the subject output: `-w[<width>[,<indent1>[,<indent2>]]]`.
+    /// Defaults to width 76, first-line indent 6, continuation indent 9.
+    /// A width of 0 indents without wrapping. Bare `-w` uses the defaults.
+    #[clap(short = 'w', long = "wrap", value_name = "W[,I1[,I2]]", num_args = 0..=1, default_missing_value = "76,6,9")]
+    pub wrap: Option<String>,
 
     /// Show commits more recent than DATE (RFC3339, `YYYY-MM-DD`, or relative like `24h` / `7d`)
     #[clap(long = "since", value_name = "DATE")]
@@ -252,6 +259,10 @@ struct ShortlogOutput {
     total_authors: usize,
     total_commits: usize,
     authors: Vec<ShortlogAuthor>,
+    /// Parsed `-w` wrap configuration `(width, indent1, indent2)`; a render-only
+    /// hint (omitted from JSON, which carries the unwrapped subjects).
+    #[serde(skip)]
+    wrap: Option<(usize, usize, usize)>,
 }
 
 /// Runs shortlog and writes **human-readable** output to the given writer.
@@ -283,6 +294,68 @@ fn write_shortlog_line(writer: &mut impl Write, args: fmt::Arguments<'_>) -> Cli
 fn shortlog_output_error(err: io::Error) -> CliError {
     CliError::fatal(format!("shortlog output error: {err}"))
         .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
+/// Parse a `-w[<width>[,<indent1>[,<indent2>]]]` spec into
+/// `(width, indent1, indent2)`. Missing components default to Git's 76 / 6 / 9.
+/// `None` input means no wrapping was requested.
+fn parse_wrap_spec(spec: Option<&str>) -> CliResult<Option<(usize, usize, usize)>> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = spec.split(',').collect();
+    if parts.len() > 3 {
+        return Err(CliError::command_usage(format!(
+            "invalid --wrap value '{spec}' (expected <width>[,<indent1>[,<indent2>]])"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+    let parse_component = |raw: &str, default: usize| -> CliResult<usize> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(default);
+        }
+        trimmed.parse::<usize>().map_err(|_| {
+            CliError::command_usage(format!("invalid --wrap value '{spec}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })
+    };
+    let width = parse_component(parts.first().copied().unwrap_or(""), 76)?;
+    let indent1 = parse_component(parts.get(1).copied().unwrap_or(""), 6)?;
+    let indent2 = parse_component(parts.get(2).copied().unwrap_or(""), 9)?;
+    Ok(Some((width, indent1, indent2)))
+}
+
+/// Wrap one subject for `-w`, returning fully-indented output lines: the first
+/// line is indented by `indent1`, continuations by `indent2`, and each line
+/// (including its indent) is kept within `width` columns by word-wrapping. A
+/// `width` of 0 indents the single line without wrapping.
+fn wrap_subject_lines(subject: &str, width: usize, indent1: usize, indent2: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![format!("{}{}", " ".repeat(indent1), subject)];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut indent = indent1;
+    for word in subject.split_whitespace() {
+        if current.is_empty() {
+            current = format!("{}{}", " ".repeat(indent), word);
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            indent = indent2;
+            current = format!("{}{}", " ".repeat(indent), word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(" ".repeat(indent1));
+    }
+    lines
 }
 
 pub async fn execute(args: ShortlogArgs) {
@@ -331,7 +404,14 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
     }
 
     let group_mode = resolve_group_mode(args)?;
-    Ok(aggregate_shortlog(args, &group_mode, &revision, commits))
+    let wrap = parse_wrap_spec(args.wrap.as_deref())?;
+    Ok(aggregate_shortlog(
+        args,
+        &group_mode,
+        &revision,
+        commits,
+        wrap,
+    ))
 }
 
 fn aggregate_shortlog(
@@ -339,6 +419,7 @@ fn aggregate_shortlog(
     group_mode: &GroupMode,
     revision: &str,
     commits: Vec<Commit>,
+    wrap: Option<(usize, usize, usize)>,
 ) -> ShortlogOutput {
     let total_commits = commits.len();
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
@@ -413,6 +494,7 @@ fn aggregate_shortlog(
         total_authors: authors.len(),
         total_commits,
         authors,
+        wrap,
     }
 }
 
@@ -448,8 +530,19 @@ fn render_shortlog_output(output: &ShortlogOutput, writer: &mut impl Write) -> C
 
         if !output.summary {
             for subject in &stats.subjects {
-                if !write_shortlog_line(writer, format_args!("      {}", subject))? {
-                    return Ok(());
+                match output.wrap {
+                    Some((width, indent1, indent2)) => {
+                        for line in wrap_subject_lines(subject, width, indent1, indent2) {
+                            if !write_shortlog_line(writer, format_args!("{line}"))? {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    None => {
+                        if !write_shortlog_line(writer, format_args!("      {}", subject))? {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
