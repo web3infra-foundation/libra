@@ -49,10 +49,16 @@ libra worktree add /tmp/libra-test
 
 ### Subcommand: `list`
 
-List all registered worktrees and their state.
+List all registered worktrees and their state. `--porcelain` emits a stable,
+machine-readable format: for each worktree a `worktree <path>` line, the shared
+`HEAD <sha>` line (when the repository has any commit), and a `locked [<reason>]`
+line when locked, with a blank line between worktrees. Because Libra worktrees
+share one HEAD/index/refs, Git's per-worktree `branch`/`detached` lines are
+intentionally omitted (Libra has no per-worktree HEAD).
 
 ```bash
 libra worktree list
+libra worktree list --porcelain
 libra --json worktree list
 libra --machine worktree list
 ```

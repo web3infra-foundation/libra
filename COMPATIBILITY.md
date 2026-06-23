@@ -74,7 +74,7 @@ batch document.
 | config | partial | vault-backed local/global config is supported; system scope, editor round-trip, typed conversion, NUL output, section rename/remove, and includeIf are incomplete |
 | op | intentionally-different | Libra command-level operation history inspection/restore extension, not a Git command |
 | reflog | supported | `show`/`delete`/`exists`/`expire` subcommands. `expire` prunes by time + reachability + `--stale-fix` (`--all`/`--expire`/`--expire-unreachable`/`--rewrite`/`--updateref`/`-n`/`-v`), reads `gc.reflogExpire`/`gc.reflogExpireUnreachable` (90/30-day defaults, never written). Intentional differences: no-ref expire is an explicit error (exit 128) vs Git's silent no-op; `--stale-fix` checks only that the new value loads as a commit (no transitive object walk); `--updateref` skips symbolic `HEAD` / remote-tracking refs |
-| worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree |
+| worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree. `worktree list --porcelain` emits a Git-style machine-readable list (`worktree <path>` + the shared `HEAD <sha>` + `locked [<reason>]`); Libra worktrees share one HEAD/index/refs, so Git's per-worktree `branch`/`detached` lines are intentionally omitted |
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
 | agent | intentionally-different | Libra external-agent capture extension, not a Git command |

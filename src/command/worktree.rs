@@ -30,6 +30,7 @@ pub const WORKTREE_EXAMPLES: &str = "\
 EXAMPLES:
     libra worktree add ../feature-x                Create a linked worktree
     libra worktree list                            List every registered worktree
+    libra worktree list --porcelain                Machine-readable worktree list
     libra worktree lock ../feature-x --reason wip  Lock a worktree to prevent prune/remove
     libra worktree unlock ../feature-x             Release the lock
     libra worktree move ../old ../new              Rename a worktree
@@ -66,7 +67,12 @@ pub enum WorktreeSubcommand {
         path: String,
     },
     /// List all known worktrees and their state.
-    List,
+    List {
+        /// Emit a stable, machine-readable porcelain format (one attribute per
+        /// line, blank line between worktrees).
+        #[clap(long)]
+        porcelain: bool,
+    },
     /// Mark a worktree as locked to prevent it from being pruned or removed.
     Lock {
         /// Filesystem path of the worktree to lock.
@@ -365,7 +371,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                 .map_err(WorktreeError::into_cli_error)?;
             render_add_worktree(&result, output)
         }
-        WorktreeSubcommand::List => list_worktrees(output),
+        WorktreeSubcommand::List { porcelain } => list_worktrees(output, porcelain).await,
         WorktreeSubcommand::Lock { path, reason } => {
             let result = lock_worktree(path, reason).map_err(WorktreeError::into_cli_error)?;
             render_lock_worktree(&result, output)
@@ -879,12 +885,42 @@ pub(crate) fn run_list_worktrees() -> WorktreeResult<WorktreeListOutput> {
     Ok(WorktreeListOutput { worktrees })
 }
 
-fn list_worktrees(output: &OutputConfig) -> CliResult<()> {
+/// Render the worktree list as Git-style `--porcelain` output: one attribute
+/// per line, with a blank line between worktrees. Libra worktrees share the
+/// repository HEAD/index/refs, so the shared `HEAD` commit is reported once per
+/// entry (when the repository has any commit). Git's per-worktree `branch` /
+/// `detached` lines are intentionally omitted — Libra has no per-worktree HEAD.
+pub(crate) async fn format_worktree_porcelain(worktrees: &[WorktreeListEntry]) -> String {
+    let head_sha = Head::current_commit_result().await.ok().flatten();
+    let mut out = String::new();
+    for w in worktrees {
+        out.push_str("worktree ");
+        out.push_str(&w.path);
+        out.push('\n');
+        if let Some(sha) = &head_sha {
+            out.push_str(&format!("HEAD {sha}\n"));
+        }
+        if w.locked {
+            match w.lock_reason.as_deref() {
+                Some(reason) if !reason.is_empty() => out.push_str(&format!("locked {reason}\n")),
+                _ => out.push_str("locked\n"),
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+async fn list_worktrees(output: &OutputConfig, porcelain: bool) -> CliResult<()> {
     let result = run_list_worktrees().map_err(WorktreeError::into_cli_error)?;
     if output.is_json() {
         return emit_json_data("worktree.list", &result, output);
     }
     if output.quiet {
+        return Ok(());
+    }
+    if porcelain {
+        print!("{}", format_worktree_porcelain(&result.worktrees).await);
         return Ok(());
     }
     for w in result.worktrees {

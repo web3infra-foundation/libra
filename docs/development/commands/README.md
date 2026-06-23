@@ -84,7 +84,7 @@
 | [`tag`](tag.md) | `partial` | lightweight/message/annotated tags, `-F`/`--file` (message from file or stdin), force/delete/list/`-n`, points-at, contains/no-contains, merged/no-merged, sort, `--column` (always/auto/never), and vault-PGP sign/verify supported; editor (`-e`) and Git GPG interop not exposed |
 | [`usage`](usage.md) | `intentionally-different` | Libra AI provider/model usage reporting extension, not a Git command |
 | [`verify-pack`](verify-pack.md) | `partial` | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
-| [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refus... |
+| [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree. `list --porcelain` emits Git-style machine-readable output |
 
 ## 未公开或未纳入用户承诺的命令资料
 

@@ -49,10 +49,11 @@ libra worktree add /tmp/libra-test
 
 ### 子命令：`list`
 
-列出所有已注册 worktrees 及其状态。
+列出所有已注册 worktrees 及其状态。`--porcelain` 输出稳定的机器可读格式：每个 worktree 输出 `worktree <path>`、共享 `HEAD <sha>`（仓库有提交时）行，被锁定时再加 `locked [<reason>]` 行，条目间空行分隔。由于 Libra worktree 共享同一 HEAD/index/refs，**有意省略** Git 的 per-worktree `branch`/`detached` 行（Libra 无 per-worktree HEAD）。
 
 ```bash
 libra worktree list
+libra worktree list --porcelain
 libra --json worktree list
 libra --machine worktree list
 ```

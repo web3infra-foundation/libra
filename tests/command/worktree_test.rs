@@ -2013,3 +2013,37 @@ async fn test_worktree_remove_with_delete_dir_dirty_path_is_rejected() {
         "dirty rejected --delete-dir must keep registry entry, paths: {paths:?}"
     );
 }
+
+#[test]
+fn worktree_list_porcelain_emits_attribute_lines() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    let out = run_libra_command(&["worktree", "list", "--porcelain"], p);
+    assert_cli_success(&out, "worktree list --porcelain");
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // Git-style porcelain: a `worktree <path>` line and the shared `HEAD <sha>`
+    // line, with a trailing blank line. Libra intentionally omits Git's
+    // per-worktree `branch`/`detached` lines (worktrees share one HEAD).
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("");
+    assert!(
+        first.starts_with("worktree "),
+        "first line is `worktree <path>`: {text:?}"
+    );
+    assert!(
+        text.lines().any(|l| l.starts_with("HEAD ")),
+        "the shared HEAD line is present: {text:?}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with("branch ") || l == "detached"),
+        "Libra omits per-worktree branch/detached lines: {text:?}"
+    );
+    assert!(
+        text.ends_with("\n\n"),
+        "entry is terminated by a blank line: {text:?}"
+    );
+}

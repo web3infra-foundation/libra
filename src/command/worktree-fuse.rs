@@ -77,7 +77,12 @@ pub enum WorktreeSubcommand {
         #[clap(long, help = "Allow other users to access the mounted worktree")]
         allow_other: bool,
     },
-    List,
+    List {
+        /// Emit a stable, machine-readable porcelain format (one attribute per
+        /// line, blank line between worktrees).
+        #[clap(long)]
+        porcelain: bool,
+    },
     Lock {
         path: String,
         #[clap(long)]
@@ -255,7 +260,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
                     .map_err(|e| CliError::fatal(e.to_string()))
             }
         }
-        WorktreeSubcommand::List => list_all_worktrees(output).await,
+        WorktreeSubcommand::List { porcelain } => list_all_worktrees(output, porcelain).await,
         WorktreeSubcommand::Lock { path, reason } => {
             if lock_fuse_worktree(&path, reason.clone())
                 .map_err(|e| CliError::fatal(e.to_string()))?
@@ -594,7 +599,7 @@ async fn add_fuse_worktree(
     Ok(())
 }
 
-async fn list_all_worktrees(output: &OutputConfig) -> CliResult<()> {
+async fn list_all_worktrees(output: &OutputConfig, porcelain: bool) -> CliResult<()> {
     let mut result = legacy::run_list_worktrees().map_err(legacy::WorktreeError::into_cli_error)?;
     let state = load_fuse_state().map_err(fuse_state_read_error)?;
     if output.is_json() {
@@ -611,6 +616,24 @@ async fn list_all_worktrees(output: &OutputConfig) -> CliResult<()> {
         return emit_json_data("worktree.list", &result, output);
     }
     if output.quiet {
+        return Ok(());
+    }
+
+    if porcelain {
+        // Combine the registry worktrees with the FUSE-mounted ones, then emit
+        // the shared porcelain format.
+        let mut all = result.worktrees;
+        for entry in &state.worktrees {
+            all.push(legacy::WorktreeListEntry {
+                kind: "worktree",
+                path: entry.path.clone(),
+                is_main: false,
+                locked: entry.locked,
+                lock_reason: entry.lock_reason.clone(),
+                exists: Path::new(&entry.path).exists(),
+            });
+        }
+        print!("{}", legacy::format_worktree_porcelain(&all).await);
         return Ok(());
     }
 
