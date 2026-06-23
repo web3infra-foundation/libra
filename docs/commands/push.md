@@ -44,6 +44,7 @@ separate `lfs push` step.
 | `<refspec>...` | Local ref, `<src>:<dst>` mapping, or `:<dst>` deletion. Multiple values are sent as one update set. | `libra push origin main feature:release` |
 | `-u`, `--set-upstream` | Set the upstream tracking branch after a successful single branch push. | `libra push -u origin feature-x` |
 | `-f`, `--force` | Allow non-fast-forward updates that overwrite remote history. | `libra push --force origin main` |
+| `-d`, `--delete` | Delete the named remote refs (each `<refspec>` is rewritten to a `:<ref>` deletion). Requires at least one ref; conflicts with `--set-upstream`/`--tags`/`--mirror`. | `libra push -d origin feature-x` |
 | `--force-with-lease[=<ref>[:<expect>]]` | Allow a non-fast-forward update only if the remote ref still matches the expected OID (the tracking-ref OID by default, or an explicit `<expect>`). Conflicts with `--force`. | `libra push --force-with-lease origin main` |
 | `--force-if-includes` | Accepted for `git push` compatibility; **no-op** (the lease check uses the tracking-ref OID only). | `libra push --force-with-lease --force-if-includes origin main` |
 | `--thin` / `--no-thin` | Accepted for compatibility; **no-op** (the pack encoder always produces a self-contained pack). | `libra push --thin origin main` |
@@ -352,6 +353,7 @@ The following forms are supported:
 | `libra push origin local:release` | Push local `refs/heads/local` to remote `refs/heads/release` |
 | `libra push origin main feature:release` | Validate and send multiple ref updates together |
 | `libra push origin :feature` | Delete remote `refs/heads/feature` |
+| `libra push -d origin feature` | Delete remote `refs/heads/feature` (short form) |
 | `libra push origin refs/tags/v1.0:refs/tags/v1.0` | Push a tag ref |
 | `libra push --tags origin` | Push all local tag refs |
 | `libra push --mirror --dry-run origin` | Preview mirroring branch/tag refs and deleting remote-only refs |
@@ -405,7 +407,7 @@ or configure a separate LFS tool.
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |
 | Multiple refspecs | `libra push origin main feature:release` | `git push origin main feature:release` | N/A |
-| Delete remote branch | `libra push origin :branch` | `git push origin :branch` | `jj git push --delete branch` |
+| Delete remote branch | `libra push -d origin branch` or `libra push origin :branch` | `git push -d origin branch` / `git push origin :branch` | `jj git push --delete branch` |
 | Push tags | `libra push --tags origin` | `git push --tags origin` | N/A |
 | Mirror preview | `libra push --mirror --dry-run origin` | `git push --mirror --dry-run origin` | N/A |
 | Structured output | `--json` / `--machine` | No | No |

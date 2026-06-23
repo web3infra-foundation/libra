@@ -78,6 +78,7 @@ EXAMPLES:
     libra push origin main feature:release
                                         Push multiple refspecs in one request
     libra push origin :feature          Delete the remote feature branch
+    libra push -d origin feature        Delete the remote feature branch (short form)
     libra push --tags origin            Push local tags
     libra push --mirror --dry-run origin
                                         Preview a mirror sync without writing
@@ -105,6 +106,11 @@ pub struct PushArgs {
     /// force push to remote repository
     #[clap(long, short = 'f')]
     pub force: bool,
+
+    /// Delete the named remote refs (each REFSPEC is rewritten to a `:<ref>`
+    /// deletion request).
+    #[clap(long, short = 'd')]
+    pub delete: bool,
 
     /// Force the update only if the remote ref still matches the expected (lease) OID.
     /// Forms: bare `--force-with-lease`, `=<refname>`, or `=<refname>:<expect>`
@@ -171,6 +177,7 @@ impl PushArgs {
             refspecs,
             set_upstream: false,
             force: false,
+            delete: false,
             force_with_lease: None,
             force_if_includes: false,
             thin: false,
@@ -633,6 +640,18 @@ pub async fn execute(args: PushArgs) {
 /// configuration is missing, authentication/network negotiation fails, pack data
 /// cannot be read, or upstream config cannot be written.
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
+    let mut args = args;
+    // `-d`/`--delete`: rewrite each positional REFSPEC into a `:<ref>` deletion
+    // request, reusing the existing deletion path.
+    args.refspecs = apply_delete_flag(
+        std::mem::take(&mut args.refspecs),
+        args.delete,
+        args.set_upstream,
+        args.tags,
+        args.mirror,
+    )
+    .map_err(CliError::from)?;
+
     validate_push_args(&args).map_err(CliError::from)?;
 
     // `--porcelain` is mutually exclusive with any JSON mode. The global
@@ -654,6 +673,43 @@ pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_PUSH).await;
     }
     Ok(())
+}
+
+/// Apply `-d`/`--delete`: turn each plain ref name into a `:<ref>` deletion
+/// refspec. `--delete` requires at least one ref, rejects refspecs that already
+/// carry a `:`, and cannot be combined with `--set-upstream`/`--tags`/`--mirror`.
+fn apply_delete_flag(
+    refspecs: Vec<String>,
+    delete: bool,
+    set_upstream: bool,
+    tags: bool,
+    mirror: bool,
+) -> Result<Vec<String>, PushError> {
+    if !delete {
+        return Ok(refspecs);
+    }
+    if set_upstream || tags || mirror {
+        return Err(PushError::InvalidArguments(
+            "--delete cannot be combined with --set-upstream, --tags, or --mirror".to_string(),
+        ));
+    }
+    if refspecs.is_empty() {
+        return Err(PushError::InvalidArguments(
+            "--delete requires at least one ref to delete".to_string(),
+        ));
+    }
+    refspecs
+        .into_iter()
+        .map(|refspec| {
+            if refspec.contains(':') {
+                Err(PushError::InvalidArguments(format!(
+                    "--delete does not accept a ':' refspec: '{refspec}'"
+                )))
+            } else {
+                Ok(format!(":{refspec}"))
+            }
+        })
+        .collect()
 }
 
 fn validate_push_args(args: &PushArgs) -> Result<(), PushError> {
@@ -3147,6 +3203,35 @@ mod test {
     }
 
     #[test]
+    fn apply_delete_flag_rewrites_and_validates() {
+        // Without --delete, the refspecs pass through unchanged.
+        assert_eq!(
+            apply_delete_flag(vec!["main".to_string()], false, false, false, false).unwrap(),
+            vec!["main".to_string()]
+        );
+        // --delete rewrites each plain ref name to a `:<ref>` deletion request.
+        assert_eq!(
+            apply_delete_flag(
+                vec!["main".to_string(), "feature".to_string()],
+                true,
+                false,
+                false,
+                false
+            )
+            .unwrap(),
+            vec![":main".to_string(), ":feature".to_string()]
+        );
+        // --delete requires at least one ref.
+        assert!(apply_delete_flag(vec![], true, false, false, false).is_err());
+        // --delete rejects a refspec that already carries a ':'.
+        assert!(apply_delete_flag(vec!["a:b".to_string()], true, false, false, false).is_err());
+        // --delete cannot combine with --set-upstream / --tags / --mirror.
+        assert!(apply_delete_flag(vec!["main".to_string()], true, true, false, false).is_err());
+        assert!(apply_delete_flag(vec!["main".to_string()], true, false, true, false).is_err());
+        assert!(apply_delete_flag(vec!["main".to_string()], true, false, false, true).is_err());
+    }
+
+    #[test]
     fn test_validate_push_args_rejects_invalid_combinations() {
         let args = PushArgs::parse_from(["push", "origin"]);
         assert!(matches!(
@@ -3181,6 +3266,7 @@ mod test {
             refspecs: vec!["main".to_string()],
             set_upstream: false,
             force: false,
+            delete: false,
             force_with_lease: None,
             force_if_includes: false,
             thin: false,

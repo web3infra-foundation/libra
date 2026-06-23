@@ -63,7 +63,7 @@
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, `--no-commit`, and `--commit` exposed; `--autostash` not exposed |
-| [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
+| [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete (`-d`/`--delete`), `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
 | [`rebase`](rebase.md) | `partial` | `--onto <newbase> [<upstream>] [<branch>]` supported; `--autosquash` / `--reapply-cherry-picks` not supported |
 | [`reflog`](reflog.md) | `supported` | show/delete/exists/expire supported; expire has documented intentional differences around no-ref handling, stale-fix depth, and updateref skips |
 | [`remote`](remote.md) | `partial` | add/remove/rename/list/get-url/set-url/prune/set-branches/set-head (incl. `--auto`)/update supported; `remote show` queries the remote by default (`--no-query` for offline cached data); `remote update [<group>]` fetches all/named remotes (groups expanded); `update -p`/`--prune` not exposed |
