@@ -52,6 +52,7 @@ EXAMPLES:
     libra log --name-status src/           Show changed files under src/
     libra log --shortstat -n 5             Show just the diffstat summary line
     libra log --oneline --parents          Show parent ids after each commit hash
+    libra log --author-date-order          Order by author date instead of committer date
     libra --json log -n 1                  Structured JSON output for agents";
 
 fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
@@ -252,6 +253,11 @@ pub struct LogArgs {
     /// Show commits in reverse order (oldest first).
     #[clap(long)]
     pub reverse: bool,
+
+    /// Order commits by author date instead of committer date (newest first).
+    /// Libra sorts by timestamp without Git's additional topological constraint.
+    #[clap(long = "author-date-order")]
+    pub author_date_order: bool,
 
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
@@ -856,6 +862,17 @@ async fn get_reachable_commits_excluding(
     Ok(reachable_commits)
 }
 
+/// Sort commits newest-first by committer date, or by author date when
+/// `--author-date-order` is requested. Libra sorts purely by timestamp and does
+/// not add Git's extra topological "no parent before its children" constraint.
+fn sort_commits_newest_first(commits: &mut [Commit], by_author_date: bool) {
+    if by_author_date {
+        commits.sort_by_key(|c| std::cmp::Reverse(c.author.timestamp));
+    } else {
+        commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
+    }
+}
+
 /// Parsed line-range specifier for `-L`.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -1079,7 +1096,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let mut reachable_commits =
         get_reachable_commits_excluding(start_commits, excludes, None, args.first_parent).await?;
     // newest first
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    sort_commits_newest_first(&mut reachable_commits, args.author_date_order);
     if args.reverse {
         reachable_commits.reverse();
     }
@@ -1372,7 +1389,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let mut reachable_commits =
         get_reachable_commits_excluding(start_commits, excludes, None, args.first_parent).await?;
     // newest first
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    sort_commits_newest_first(&mut reachable_commits, args.author_date_order);
     if args.reverse {
         reachable_commits.reverse();
     }
@@ -2323,6 +2340,26 @@ mod tests {
             Some(3)
         );
         assert_eq!(LogArgs::parse_from(["libra", "-n", "3"]).number, Some(3));
+    }
+
+    #[test]
+    fn test_sort_commits_newest_first_author_vs_committer() {
+        // A: author OLD (100), committer NEW (400).
+        let mut a = Commit::from_tree_id(ObjectHash::new(&[1; 20]), vec![], "A");
+        a.author.timestamp = 100;
+        a.committer.timestamp = 400;
+        // B: author NEW (200), committer OLD (300).
+        let mut b = Commit::from_tree_id(ObjectHash::new(&[2; 20]), vec![], "B");
+        b.author.timestamp = 200;
+        b.committer.timestamp = 300;
+
+        let mut commits = vec![a, b];
+        // Default (committer date, newest first): A=400 > B=300 → A leads.
+        sort_commits_newest_first(&mut commits, false);
+        assert_eq!(commits[0].message, "A", "committer-date order");
+        // --author-date-order: B=200 > A=100 → B leads (distinct from committer order).
+        sort_commits_newest_first(&mut commits, true);
+        assert_eq!(commits[0].message, "B", "author-date order");
     }
 
     #[test]

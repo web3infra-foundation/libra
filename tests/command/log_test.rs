@@ -2509,3 +2509,33 @@ fn log_grep_ignore_case_and_invert_grep() {
         "both excludes all case-folded matches: {both:?}"
     );
 }
+
+#[test]
+fn test_log_author_date_order_lists_all_commits() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for i in 1..=3 {
+        std::fs::write(p.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+        assert_cli_success(&run_libra_command(&["add", &format!("f{i}.txt")], p), "add");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", &format!("c{i}"), "--no-verify"], p),
+            "commit",
+        );
+    }
+
+    // `--author-date-order` is accepted and lists every commit. For commits
+    // whose author and committer dates match (the common case), the order is
+    // the same as the default committer-date order.
+    let ado = run_libra_command(&["log", "--author-date-order", "--oneline"], p);
+    assert_cli_success(&ado, "log --author-date-order");
+    let default = run_libra_command(&["log", "--oneline"], p);
+    assert_cli_success(&default, "log --oneline");
+    assert_eq!(
+        ado.stdout, default.stdout,
+        "author-date-order matches default when author == committer date"
+    );
+    assert!(
+        String::from_utf8_lossy(&ado.stdout).contains("c3"),
+        "lists the newest commit"
+    );
+}

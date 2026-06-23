@@ -228,6 +228,20 @@ libra log --reverse
 libra log --reverse --oneline
 ```
 
+### `--author-date-order`
+
+Order commits by author date instead of committer date (newest first). Libra
+sorts purely by timestamp and does not add Git's extra topological ("no parent
+before its children") constraint. Relative to Libra's own committer-date default
+the order changes only when author and committer dates differ; relative to Git it
+can additionally differ wherever the topological constraint would reorder
+commits.
+
+```bash
+libra log --author-date-order
+libra log --author-date-order --oneline
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved
@@ -374,6 +388,14 @@ histories.
 `--reverse` collects the filtered commits and prints them oldest-first. It
 applies after all other filters, so `-n` still limits the result set.
 
+### `--author-date-order`
+
+`--author-date-order` sorts the result set by author timestamp (newest first)
+instead of the default committer timestamp. The sort is purely by timestamp —
+Libra does not impose Git's topological constraint — so it diverges from the
+default only when a commit's author and committer dates differ (e.g. after a
+rebase or cherry-pick). `--reverse` still flips the final ordering.
+
 ### `--follow`
 
 `--follow` performs best-effort rename detection by walking history and matching
@@ -434,6 +456,7 @@ flag only affects the human rendering layer.
 | Invert grep | `git log --invert-grep --grep=<pat>` | N/A | `libra log --invert-grep --grep <pat>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
+| Author-date order | `git log --author-date-order` | N/A | `libra log --author-date-order` (timestamp-only) |
 | Follow renames | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | Structured JSON output | N/A | N/A | `--json` / `--machine` |
 | Error hints | Minimal | Minimal | Every error type has an actionable hint |
@@ -460,5 +483,6 @@ flag only affects the human rendering layer.
 - `--follow` uses best-effort rename detection and may miss complex renames
 - `-L` is accepted but does not yet provide blame-level line precision
 - `--reverse` is supported
+- `--author-date-order` is supported (timestamp-only; no topological constraint)
 - jj's log uses a template language (`-T`) for formatting; Libra uses Git-compatible `--pretty` format strings
 - In JSON mode, `files` contains structured change summaries; patch text is never included in JSON output
