@@ -23,7 +23,7 @@ EXAMPLES:
     libra clean -fd                     Also remove untracked directories
     libra clean -fx                     Remove untracked files including ignored ones
     libra clean -fX                     Remove only ignored files
-    libra clean -f --exclude '*.log'    Layer an additional exclusion on top of .libraignore
+    libra clean -f -e '*.log'           Exclude a pattern (-e is short for --exclude)
     libra clean -f untracked.txt        Remove only files matching the pathspec
     libra clean -fd build/              Remove untracked paths under a directory pathspec
     libra clean -n --json               Structured JSON output for agents";
@@ -47,7 +47,7 @@ pub struct CleanArgs {
     #[clap(short = 'X')]
     pub only_ignored: bool,
     /// Exclude files matching the given pattern (can be repeated)
-    #[clap(long = "exclude", value_name = "pattern")]
+    #[clap(short = 'e', long = "exclude", value_name = "pattern")]
     pub exclude: Vec<String>,
     /// Limit cleaning to paths matching the given pathspecs (file or directory prefix match)
     #[clap(value_name = "pathspec")]

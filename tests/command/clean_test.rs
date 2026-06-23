@@ -928,3 +928,28 @@ async fn test_clean_pathspec_dry_run_json_filters_candidates() {
         "gamma.log should not be in dry-run output"
     );
 }
+
+#[test]
+fn test_clean_short_exclude_alias() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("keep.log"), "x").unwrap();
+    fs::write(p.join("remove.txt"), "y").unwrap();
+
+    // `-e` is the short alias for `--exclude`: a dry-run lists remove.txt
+    // (would be removed) but not keep.log (excluded by the pattern).
+    let out = run_libra_command(&["clean", "-n", "-e", "*.log", "--json"], p);
+    assert_cli_success(&out, "clean -n -e *.log --json should succeed");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["dry_run"], true);
+    let removed = json["data"]["removed"].as_array().expect("removed array");
+    let names: Vec<&str> = removed.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        names.contains(&"remove.txt"),
+        "remove.txt would be removed: {names:?}"
+    );
+    assert!(
+        !names.contains(&"keep.log"),
+        "keep.log excluded by -e: {names:?}"
+    );
+}

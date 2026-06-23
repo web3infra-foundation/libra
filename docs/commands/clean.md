@@ -5,8 +5,8 @@ Remove untracked files (and optionally directories) from the working tree.
 ## Synopsis
 
 ```
-libra clean -n [-d] [-x | -X] [--exclude <pattern>]... [--json] [--quiet]
-libra clean -f [-d] [-x | -X] [--exclude <pattern>]... [--json] [--quiet]
+libra clean -n [-d] [-x | -X] [-e <pattern> | --exclude <pattern>]... [--json] [--quiet]
+libra clean -f [-d] [-x | -X] [-e <pattern> | --exclude <pattern>]... [--json] [--quiet]
 ```
 
 ## Description
@@ -34,7 +34,7 @@ attacks.
 | Directories | `-d` | `--dir` | Also remove untracked directories (otherwise only files). |
 | Include ignored | `-x` | | Remove untracked files **including** those matched by `.libraignore`. |
 | Only ignored | `-X` | | Remove **only** untracked files that are matched by `.libraignore`. |
-| Exclude | | `--exclude <pattern>` | Add an extra exclusion pattern; may be repeated. |
+| Exclude | `-e` | `--exclude <pattern>` | Add an extra exclusion pattern; may be repeated. |
 | JSON | | `--json` | Emit structured JSON output (see below). |
 | Quiet | | `--quiet` | Suppress all human-readable stdout. |
 
@@ -84,7 +84,7 @@ Inverse of `-x`. Removes only the files that `.libraignore` would
 normally protect. Useful for "clean my build artifacts but leave
 hand-edited files alone."
 
-**`--exclude <pattern>`**
+**`-e` / `--exclude <pattern>`**
 
 Add an additional exclusion pattern (in `.libraignore` syntax) for this
 invocation only. Can be passed multiple times to layer patterns:
@@ -193,7 +193,7 @@ safety guarantees while restoring parity with `git clean`.
 | Remove directories | `-d` / `--dir` | `-d` | N/A |
 | Ignore override (all) | `-x` | `-x` | N/A |
 | Ignore override (only ignored) | `-X` | `-X` | N/A |
-| Exclude pattern | `--exclude <pattern>` (repeatable) | `-e <pattern>` (repeatable) | N/A |
+| Exclude pattern | `-e <pattern>` / `--exclude <pattern>` (repeatable) | `-e <pattern>` (repeatable) | N/A |
 | Interactive mode | Not supported | `-i` | N/A |
 | Quiet mode | `--quiet` | `-q` / `--quiet` | N/A |
 | JSON output | `--json` | Not supported | N/A |

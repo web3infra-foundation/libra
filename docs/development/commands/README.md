@@ -31,7 +31,7 @@
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` plus `--batch-check` / `--batch` / `--batch-command` / `--batch-all-objects` (with optional `=<format>`) supported; `-e` JSON/machine output not exposed |
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus `-d`/`--detach` and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
 | [`cherry-pick`](cherry-pick.md) | `partial` | commit replay, `-n`, and `-x` supported; edit/mainline/signoff/sequencer/strategy flags incomplete |
-| [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` / `<pathspec>...` supported; `-i` not exposed |
+| [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `-e`/`--exclude` / `<pathspec>...` supported; `-i` not exposed |
 | [`clone`](clone.md) | `partial` | `--depth`, `--single-branch`, and `--tags`/`--no-tags` (clone fetches all tags by default) supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |
 | [`code`](code.md) | `intentionally-different` | Libra AI extension, not a Git command |

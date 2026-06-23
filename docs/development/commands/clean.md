@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` / `<pathspec>...` 已支持；`-i` 尚未公开。
+- 兼容级别：`partial`。`-n` / `-f` / `-d` / `-x` / `-X` / `-e`/`--exclude` / `<pathspec>...` 已支持；`-i` 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/clean.md`。
-- Synopsis：`libra clean (-n | -f) [-d] [-x | -X] [--exclude <pattern>]... [<pathspec>...] [--json] [--quiet]`。
-- 公开参数/子命令包括：`-n, --dry-run`、`-f, --force`、`-d, --dir`、`-x`、`-X`、`--exclude <pattern>`、`<pathspec>...`。
+- Synopsis：`libra clean (-n | -f) [-d] [-x | -X] [-e <pattern> | --exclude <pattern>]... [<pathspec>...] [--json] [--quiet]`。
+- 公开参数/子命令包括：`-n, --dry-run`、`-f, --force`、`-d, --dir`、`-x`、`-X`、`-e, --exclude <pattern>`、`<pathspec>...`。（`-e` 是 `--exclude` 的短别名，复用同一 `exclude` 字段。）
 
 
 ## 还未实现的功能
