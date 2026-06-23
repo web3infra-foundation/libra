@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。创建、列出、删除、重命名、复制（`-c`/`-C`/`--copy`，连同上游配置，保留源分支）、上游设置/清除、contains/no-contains、points-at、merged/no-merged、`--sort`（`refname`/`version:refname`，可加 `-` 反转）和 ignore-case 已支持；描述编辑、自定义 `--format`、其余 sort key（如 creatordate）尚未公开。
+- 兼容级别：`partial`。创建、列出、删除、重命名、复制（`-c`/`-C`/`--copy`，连同上游配置，保留源分支）、上游设置/清除、contains/no-contains、points-at、merged/no-merged、`--sort`（`refname`/`version:refname`，可加 `-` 反转）、ignore-case 和 `--column[=<always|auto|never>]`（列式列表布局）已支持；描述编辑、自定义 `--format`、其余 sort key（如 creatordate）尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/branch.md`。
-- Synopsis：`libra branch [-l] [-r] [-a] [--contains [<commit>]] [--no-contains [<commit>]] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case]` / `libra branch [<new_branch>] [<commit_hash>]` / `libra branch (-d | -D) <branch>` / `libra branch -m [<old_branch>] <new_branch>` / `libra branch (-c | -C) [<old_branch>] <new_branch>` / `libra branch -u <upstream>` / `libra branch --unset-upstream [<branch>]` / `libra branch --show-current`。
-- 公开参数/子命令包括：`[<new_branch>] [<commit_hash>]`、`-l, --list`、`-d, --delete <DELETE_SAFE>`、`-D, --delete-force <DELETE>`、`-u, --set-upstream-to <UPSTREAM>`、`--unset-upstream [<BRANCH>]`、`--show-current`、`-m, --move <OLD_BRANCH> <NEW_BRANCH>`、`-r, --remotes`、`-a, --all`、`--contains [<commit>]`、`--no-contains [<commit>]`、`--points-at <object>`、`--merged [<commit>]`、`--no-merged [<commit>]`、`--sort <key>`、`-c, --copy <OLD> <NEW>`、`-C, --copy-force <OLD> <NEW>`、`--ignore-case`。`-c`/`-C`（`copy_branch_impl`）在 `<old>` 的提交处创建 `<new>` 并复制上游配置（`branch.<old>.remote`/`.merge`→`<new>`），保留源分支、不移动 HEAD；`-c` 在目标已存在时报 `AlreadyExists`，`-C` 覆盖。一参数形式复制当前分支。`--merged`/`--no-merged`（缺省 HEAD）复用 `log::get_reachable_commits` 计算目标可达集合，保留（或排除）tip 在该集合内（即已合并入目标）的分支，是 `--contains` 的反方向。`--sort <key>`（`refname`/`version:refname`/`v:refname`，前导 `-` 反转）在 `collect_branch_output` 内由 `sort_branch_entries` 排序条目（人类与 JSON 输出一致，且不再按 current-first 排），未知 key 报 `LBR-CLI-002`；dash-leading 值需用 `--sort=-refname`。
+- Synopsis：`libra branch [-l] [-r] [-a] [--contains [<commit>]] [--no-contains [<commit>]] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case]` / `libra branch [<new_branch>] [<commit_hash>]` / `libra branch (-d | -D) <branch>` / `libra branch -m [<old_branch>] <new_branch>` / `libra branch (-c | -C) [<old_branch>] <new_branch>` / `libra branch -u <upstream>` / `libra branch --unset-upstream [<branch>]` / `libra branch --show-current`。列表形式额外接受 `[--column[=<MODE>]]`。
+- 公开参数/子命令包括：`[<new_branch>] [<commit_hash>]`、`-l, --list`、`-d, --delete <DELETE_SAFE>`、`-D, --delete-force <DELETE>`、`-u, --set-upstream-to <UPSTREAM>`、`--unset-upstream [<BRANCH>]`、`--show-current`、`-m, --move <OLD_BRANCH> <NEW_BRANCH>`、`-r, --remotes`、`-a, --all`、`--contains [<commit>]`、`--no-contains [<commit>]`、`--points-at <object>`、`--merged [<commit>]`、`--no-merged [<commit>]`、`--sort <key>`、`-c, --copy <OLD> <NEW>`、`-C, --copy-force <OLD> <NEW>`、`--ignore-case`、`--column[=<MODE>]`。`--column`（`always`/`auto`/`never`，bare 即 `always`；模式经 `tag::resolve_column_enabled` 校验、宽度经 `column_layout_width`）在 List 人类输出里用 `format_branch_columns` 把条目（current 分支带 `*` 前缀、纯名无颜色以保证列宽计算）按 column-major 排布；JSON/quiet 与非列表动作不受影响。`-c`/`-C`（`copy_branch_impl`）在 `<old>` 的提交处创建 `<new>` 并复制上游配置（`branch.<old>.remote`/`.merge`→`<new>`），保留源分支、不移动 HEAD；`-c` 在目标已存在时报 `AlreadyExists`，`-C` 覆盖。一参数形式复制当前分支。`--merged`/`--no-merged`（缺省 HEAD）复用 `log::get_reachable_commits` 计算目标可达集合，保留（或排除）tip 在该集合内（即已合并入目标）的分支，是 `--contains` 的反方向。`--sort <key>`（`refname`/`version:refname`/`v:refname`，前导 `-` 反转）在 `collect_branch_output` 内由 `sort_branch_entries` 排序条目（人类与 JSON 输出一致，且不再按 current-first 排），未知 key 报 `LBR-CLI-002`；dash-leading 值需用 `--sort=-refname`。
 
 
 ## 还未实现的功能

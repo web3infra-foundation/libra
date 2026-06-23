@@ -68,6 +68,7 @@ EXAMPLES:
     libra branch -u origin/main           Set upstream for the current branch
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
+    libra branch --column                 List branches laid out in columns
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -156,6 +157,9 @@ pub struct BranchListEntry {
     pub commit: String,
     #[serde(skip_serializing)]
     pub display_name: String,
+    /// Uncolored human label (used by the `--column` layout). Omitted from JSON.
+    #[serde(skip_serializing)]
+    pub plain_name: String,
 }
 
 // action options are mutually exclusive with query options
@@ -258,6 +262,11 @@ pub struct BranchArgs {
     /// Sorting and name comparisons ignore case where applicable.
     #[clap(long = "ignore-case", group = "query")]
     pub ignore_case: bool,
+
+    /// Display the branch list in columns. Modes: `always`, `auto` (only when
+    /// stdout is a terminal), `never`. Bare `--column` means `always`.
+    #[clap(long, num_args = 0..=1, default_missing_value = "always", value_name = "MODE")]
+    pub column: Option<String>,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -276,8 +285,13 @@ pub async fn execute(args: BranchArgs) {
 /// - All [`BranchError`] variants are mapped to [`CliError`] via the
 ///   `From` impl which sets stable codes and hints.
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
+    // Validate the `--column` mode up front so an invalid mode is rejected
+    // regardless of output path; the enable decision is recomputed at render.
+    if let Some(mode) = args.column.as_deref() {
+        super::tag::resolve_column_enabled(mode)?;
+    }
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output)?;
+    render_branch_output(&result, output, args.column.as_deref())?;
     if result.mutated_repo_state() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
     }
@@ -1129,6 +1143,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
             current: current_name == Some(branch.name.as_str()),
             commit: branch.commit.to_string(),
             display_name: branch.name.clone(),
+            plain_name: branch.name.clone(),
             name: branch.name,
         });
     }
@@ -1137,6 +1152,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
             current: false,
             commit: branch.commit.to_string(),
             display_name: format_branch_name(&branch),
+            plain_name: plain_branch_display_name(&branch),
             name: branch.name,
         });
     }
@@ -1237,6 +1253,33 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     }
 }
 
+/// Lay out branch list entries (each already prefixed with the current-branch
+/// marker) in dense column-major order to fit `width`, matching
+/// `git branch --column`. Column mode uses plain (uncolored) names so the width
+/// calculation is accurate.
+fn format_branch_columns(entries: &[String], width: usize) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let max_len = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0);
+    let col_width = max_len + 2;
+    let cols = std::cmp::max(1, width / col_width);
+    let rows = entries.len().div_ceil(cols);
+    let mut out = String::new();
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            let idx = c * rows + r;
+            if idx < entries.len() {
+                line.push_str(&format!("{:<col_width$}", entries[idx]));
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 /// Render [`BranchOutput`] for the chosen output mode.
 ///
 /// Functional scope:
@@ -1244,7 +1287,12 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
 /// - Human mode formats the list with a `*` prefix on the current branch,
 ///   sorts so the current branch sits at the top, prints a "detached at"
 ///   banner when relevant, and shows an unborn HEAD label as appropriate.
-fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResult<()> {
+///   `--column` lays the list out in columns instead of one branch per line.
+fn render_branch_output(
+    result: &BranchOutput,
+    output: &OutputConfig,
+    column: Option<&str>,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
     }
@@ -1291,11 +1339,31 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                 });
             }
 
-            for branch in sorted {
-                if branch.current {
-                    println!("* {}", branch.display_name.green());
-                } else {
-                    println!("  {}", branch.display_name);
+            let column_enabled = match column {
+                Some(mode) => super::tag::resolve_column_enabled(mode)?,
+                None => false,
+            };
+            if column_enabled {
+                // Plain names (current branch marked `* `) laid out in columns.
+                let entries: Vec<String> = sorted
+                    .iter()
+                    .map(|branch| {
+                        if branch.current {
+                            format!("* {}", branch.plain_name)
+                        } else {
+                            format!("  {}", branch.plain_name)
+                        }
+                    })
+                    .collect();
+                let width = super::tag::column_layout_width();
+                print!("{}", format_branch_columns(&entries, width));
+            } else {
+                for branch in sorted {
+                    if branch.current {
+                        println!("* {}", branch.display_name.green());
+                    } else {
+                        println!("  {}", branch.display_name);
+                    }
                 }
             }
         }
@@ -1409,7 +1477,14 @@ pub async fn create_branch_safe(
 /// tests::test_format_branch_name_with_short_remote_ref in
 /// src/command/branch.rs:1076.
 fn format_branch_name(branch: &Branch) -> String {
-    let display_name = if let Some(stripped) = branch.name.strip_prefix("refs/remotes/") {
+    plain_branch_display_name(branch).red().to_string()
+}
+
+/// The human-readable branch label without color (remote refs have their
+/// `refs/remotes/` prefix stripped, or are shown as `<remote>/<name>`). Used for
+/// the colorless `--column` layout so width calculation is accurate.
+fn plain_branch_display_name(branch: &Branch) -> String {
+    if let Some(stripped) = branch.name.strip_prefix("refs/remotes/") {
         stripped.to_string()
     } else {
         branch
@@ -1417,8 +1492,7 @@ fn format_branch_name(branch: &Branch) -> String {
             .as_ref()
             .map(|remote| format!("{remote}/{}", branch.name))
             .unwrap_or_else(|| branch.name.clone())
-    };
-    display_name.red().to_string()
+    }
 }
 
 /// List branches with the given mode and commit filters, rendering directly to stdout.
@@ -1452,9 +1526,10 @@ pub async fn list_branches(
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, &OutputConfig::default())
+    render_branch_output(&result, &OutputConfig::default(), args.column.as_deref())
 }
 
 /// Filter given branches by whether they contain or don't contain certain commits.

@@ -211,6 +211,7 @@ async fn test_grep_tree_accepts_branch_revisions() {
             no_merged: None,
             sort: None,
             ignore_case: false,
+            column: None,
         },
         &OutputConfig::default(),
     )

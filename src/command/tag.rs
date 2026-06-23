@@ -862,7 +862,7 @@ fn trim_tag_message(message: &str, show_lines: usize) -> Option<String> {
 /// Resolve `--column=<mode>` to whether column layout is active. `always`
 /// forces it, `auto` enables it only when stdout is a terminal, `never`
 /// disables it. Any other value is a usage error.
-fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
+pub(crate) fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
     use std::io::IsTerminal;
     match mode {
         "always" => Ok(true),
@@ -878,7 +878,7 @@ fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
 
 /// Width used for column layout: the `COLUMNS` environment variable if set and
 /// parseable, otherwise Git's 80-column fallback.
-fn column_layout_width() -> usize {
+pub(crate) fn column_layout_width() -> usize {
     std::env::var("COLUMNS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())

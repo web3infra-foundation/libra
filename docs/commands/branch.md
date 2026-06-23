@@ -8,7 +8,7 @@ Create, delete, rename, inspect, or list branches.
 
 ```
 libra branch [<new_branch>] [<commit_hash>]
-libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case]
+libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case] [--column[=<mode>]]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
@@ -50,6 +50,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--no-merged` | `[commit]` (default HEAD) | Only list branches not yet merged into the commit |
 | | `--sort` | `<key>` | Sort the list by `refname` or `version:refname` (`v:refname`); a leading `-` reverses (use `--sort=-refname` for the dash form) |
 | | `--ignore-case` | | Sort branch names case-insensitively where applicable |
+| | `--column[=<mode>]` | `always` / `auto` / `never` | Lay the branch list out in columns instead of one per line (bare `--column` means `always`; `auto` only when stdout is a terminal). Column mode shows plain, uncolored names. |
 
 ### Flag examples
 
@@ -231,6 +232,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Merged filter | `git branch --merged [<commit>]` / `--no-merged` | `libra branch --merged [<commit>]` / `--no-merged` | `jj log -r 'branches() & ::<rev>'` |
 | Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
 | Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname) | `jj branch list` (revset order) |
+| Column layout | `git branch --column[=<mode>]` | `libra branch --column[=<mode>]` | N/A |
 | Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" | No |

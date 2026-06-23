@@ -556,6 +556,7 @@ async fn test_branch() {
             no_merged: None,
             sort: None,
             ignore_case: false,
+            column: None,
         };
         execute(args).await;
 
@@ -599,6 +600,7 @@ async fn test_branch() {
             no_merged: None,
             sort: None,
             ignore_case: false,
+            column: None,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -632,6 +634,7 @@ async fn test_branch() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -693,6 +696,7 @@ async fn test_create_branch_from_remote() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -755,6 +759,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     })
     .await;
 
@@ -973,6 +978,7 @@ async fn test_branch_rename() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1005,6 +1011,7 @@ async fn test_branch_rename() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1105,6 +1112,7 @@ async fn test_rename_current_branch() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1181,6 +1189,7 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1205,6 +1214,7 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1230,6 +1240,7 @@ async fn test_rename_to_existing_branch() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1299,6 +1310,7 @@ async fn test_list_all_branches() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await;
 
@@ -1334,6 +1346,7 @@ async fn test_list_all_branches() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1408,6 +1421,7 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     })
     .await;
 
@@ -1477,6 +1491,7 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     })
     .await;
 
@@ -1547,6 +1562,7 @@ async fn test_branch_delete_safe() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     })
     .await;
 
@@ -1640,6 +1656,7 @@ async fn test_branch_contains_commit_filter() {
         no_merged: None,
         sort: None,
         ignore_case: false,
+        column: None,
     })
     .await;
 
@@ -2081,4 +2098,42 @@ fn branch_copy_duplicates_branch_with_config() {
         !onto_current.status.success(),
         "-C onto the current branch must be rejected"
     );
+}
+
+#[test]
+fn branch_column_lays_out_in_columns() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for b in ["aa", "bb", "cc", "dd", "ee"] {
+        assert_cli_success(&run_libra_command(&["branch", b], p), "branch");
+    }
+
+    // --column packs multiple branches per line; the plain listing is one per line.
+    let col = run_libra_command(&["branch", "--column"], p);
+    assert_cli_success(&col, "branch --column");
+    let col_out = String::from_utf8_lossy(&col.stdout);
+    let col_lines = col_out.lines().filter(|l| !l.trim().is_empty()).count();
+
+    let plain = run_libra_command(&["branch"], p);
+    assert_cli_success(&plain, "branch");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    let plain_lines = plain_out.lines().filter(|l| !l.trim().is_empty()).count();
+
+    assert!(
+        plain_lines >= 6,
+        "plain list is one branch per line: {plain_out:?}"
+    );
+    assert!(
+        col_lines < plain_lines,
+        "columns are more compact ({col_lines} < {plain_lines}): {col_out:?}"
+    );
+    // All branches are still present in the columnar output.
+    for b in ["main", "aa", "bb", "cc", "dd", "ee"] {
+        assert!(
+            col_out.contains(b),
+            "column output contains {b}: {col_out:?}"
+        );
+    }
 }
