@@ -5,7 +5,7 @@ Create, list, or delete tags.
 ## Synopsis
 
 ```
-libra tag [<name>] [-m <message>] [-f] [-s]
+libra tag [<name>] [-m <message> | -F <file>] [-f] [-s]
 libra tag -l [-n <lines>] [--points-at <object>] [--contains <commit>] [--merged <commit>] [--sort <key>]
 libra tag -v <name>
 libra tag -d <name>
@@ -15,7 +15,7 @@ libra tag -d <name>
 
 `libra tag` manages lightweight and annotated tags. A lightweight tag is simply a named pointer to a commit, while an annotated tag stores a full tag object with a message, tagger identity, and timestamp.
 
-Without arguments (or with `-l`), the command lists all tags. When given a name, it creates a new tag at HEAD. Adding `-m <message>` creates an annotated tag instead of a lightweight one. The `-f` flag allows overwriting an existing tag of the same name.
+Without arguments (or with `-l`), the command lists all tags. When given a name, it creates a new tag at HEAD. Adding `-m <message>` (or `-F <file>`, reading the message from a file or stdin) creates an annotated tag instead of a lightweight one. The `-f` flag allows overwriting an existing tag of the same name.
 
 Tag references are stored in the SQLite database alongside branch references, providing the same transactional guarantees.
 
@@ -27,6 +27,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | `-l` | `--list` | | List all tags |
 | `-d` | `--delete` | | Delete the named tag |
 | `-m` | `--message` | `<msg>` | Create an annotated tag with the given message |
+| `-F` | `--file` | `<file>` | Create an annotated tag, reading the message from a file (`-` for stdin). Conflicts with `-m`. |
 | `-f` | `--force` | | Overwrite an existing tag |
 | `-n` | `--n-lines` | `<lines>` | Number of annotation lines to display when listing (0 = names only) |
 | | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode |
@@ -46,6 +47,10 @@ libra tag v1.0
 
 # Create an annotated tag with a message
 libra tag -m "Release v1.1" v1.1
+
+# Create an annotated tag, reading the message from a file (or stdin with -)
+libra tag -F release-notes.txt v1.1
+libra log -1 --format=%B | libra tag -F - v1.1
 
 # Force-overwrite an existing tag
 libra tag -f v1.0
@@ -168,7 +173,7 @@ Signing requires `-m` (Libra does not open an editor for tag bodies). `libra tag
 
 ### Why lightweight vs annotated distinction?
 
-Libra preserves Git's two-tier tag model for on-disk format compatibility. Lightweight tags are simple ref pointers (ideal for temporary markers), while annotated tags store metadata useful for releases. The `-m` flag is the toggle: its presence creates an annotated tag, its absence creates a lightweight one. This matches Git's behavior exactly, keeping the mental model consistent for users migrating from Git.
+Libra preserves Git's two-tier tag model for on-disk format compatibility. Lightweight tags are simple ref pointers (ideal for temporary markers), while annotated tags store metadata useful for releases. A message source is the toggle: providing `-m` or `-F` creates an annotated tag, its absence creates a lightweight one. This matches Git's behavior exactly, keeping the mental model consistent for users migrating from Git.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -176,6 +181,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 |---------|-----|-------|----|
 | Create lightweight | `git tag <name>` | `libra tag <name>` | `jj tag create <name>` |
 | Create annotated | `git tag -a -m "msg" <name>` | `libra tag -m "msg" <name>` | Not supported (lightweight only) |
+| Annotated message from file | `git tag -F <file> <name>` | `libra tag -F <file> <name>` (`-` for stdin) | N/A |
 | List tags | `git tag -l` | `libra tag -l` | `jj tag list` |
 | List with message | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
 | List by target | `git tag --points-at <obj>` | `libra tag --points-at <obj>` | N/A |
@@ -193,7 +199,8 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | HEAD has no commit to tag | `LBR-REPO-003` | "create a commit first before tagging HEAD." |
 | Tag not found (delete/show) | `LBR-CLI-003` | "use 'libra tag -l' to list available tags." |
 | Unresolvable `--points-at` object | `LBR-CLI-003` | "use 'libra log --oneline' to see available commits." |
-| Missing tag name for --delete/--message/--force | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" |
+| Missing tag name for --delete/--message/--file/--force | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" |
+| `-m`/`-F` combined with a non-create mode (list/delete/verify/filters) | `LBR-CLI-002` | "-m/--message and -F/--file are only valid when creating a tag" |
 | Failed to resolve HEAD | `LBR-IO-001` or `LBR-REPO-002` | -- |
 | Failed to serialize annotated tag | `LBR-REPO-005` | -- |
 | Failed to store object | `LBR-IO-002` | -- |

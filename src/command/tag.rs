@@ -26,6 +26,7 @@ const TAG_EXAMPLES: &str = "\
 EXAMPLES:
     libra tag v1.0                        Create a lightweight tag at HEAD
     libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
+    libra tag -F notes.txt v1.1           Annotated tag with message from a file (- for stdin)
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag -d v1.0                     Delete a tag
     libra tag --points-at HEAD            List tags pointing at HEAD's commit
@@ -50,6 +51,11 @@ pub struct TagArgs {
     /// Message for the annotated tag. If provided, creates an annotated tag.
     #[clap(short, long)]
     pub message: Option<String>,
+
+    /// Read the annotated-tag message from a file (use `-` for standard input).
+    /// Like `-m`, providing it creates an annotated tag.
+    #[clap(short = 'F', long = "file", conflicts_with = "message")]
+    pub file: Option<String>,
 
     /// Replace an existing tag with the same name instead of failing
     #[clap(short, long, group = "action")]
@@ -136,7 +142,34 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
 }
 
 pub(crate) fn validate_cli_args(args: &TagArgs) -> CliResult<()> {
-    validate_named_tag_action(args).map_err(CliError::from)
+    validate_named_tag_action(args).map_err(CliError::from)?;
+    validate_message_source_create_only(args).map_err(CliError::from)
+}
+
+/// The message-source options `-m`/`--message` and `-F`/`--file` only make
+/// sense when creating a tag. Reject them when combined with list-mode,
+/// delete, verify, or any list filter so an invalid invocation is a usage
+/// error rather than silently ignoring the message (or performing a delete).
+fn validate_message_source_create_only(args: &TagArgs) -> Result<(), TagError> {
+    if args.message.is_none() && args.file.is_none() {
+        return Ok(());
+    }
+    let non_create = args.list
+        || args.delete
+        || args.verify
+        || args.n_lines.is_some()
+        || args.points_at.is_some()
+        || args.contains.is_some()
+        || args.no_contains.is_some()
+        || args.merged.is_some()
+        || args.no_merged.is_some()
+        || args.sort.is_some();
+    if non_create {
+        return Err(TagError::MessageOptionRequiresCreate(
+            "-m/--message and -F/--file are only valid when creating a tag".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +197,16 @@ enum TagError {
         name: String,
         #[source]
         source: DbErr,
+    },
+
+    #[error("{0}")]
+    MessageOptionRequiresCreate(String),
+
+    #[error("failed to read tag message file '{path}': {source}")]
+    MessageFileRead {
+        path: String,
+        #[source]
+        source: io::Error,
     },
 
     #[error("failed to serialize annotated tag object: {0}")]
@@ -276,6 +319,12 @@ impl From<TagError> for CliError {
             TagError::CheckExistingFailed { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            TagError::MessageOptionRequiresCreate(_) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("-m/--message and -F/--file create a tag; drop the listing/delete/verify options."),
+            TagError::MessageFileRead { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("check that the message file path exists and is readable."),
             TagError::SerializeAnnotatedTag(_) => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("this is a bug; please report it at {ISSUE_URL}")),
@@ -318,6 +367,26 @@ impl From<TagError> for CliError {
     }
 }
 
+/// Resolve the annotated-tag message from `-m`/`-F`: when `--file` is given,
+/// read the message from that file (or standard input for `-`); otherwise fall
+/// back to `--message`.
+fn resolve_tag_message(args: &TagArgs) -> Result<Option<String>, TagError> {
+    if let Some(path) = &args.file {
+        let content = if path == "-" {
+            io::read_to_string(io::stdin())
+        } else {
+            std::fs::read_to_string(path)
+        }
+        .map_err(|source| TagError::MessageFileRead {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(Some(content))
+    } else {
+        Ok(args.message.clone())
+    }
+}
+
 fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
     if args.name.is_some() {
         return Ok(());
@@ -325,8 +394,8 @@ fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
 
     let message = if args.delete {
         Some("tag name is required for --delete")
-    } else if args.message.is_some() {
-        Some("tag name is required when using --message")
+    } else if args.message.is_some() || args.file.is_some() {
+        Some("tag name is required when using --message/--file")
     } else if args.force {
         Some("tag name is required for --force")
     } else {
@@ -379,6 +448,10 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
 
 async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
+    // Enforced here (not only in the cli.rs preflight) so every entry point —
+    // including direct/programmatic `execute_safe` callers — rejects misusing a
+    // message source with a non-create mode rather than silently deleting.
+    validate_message_source_create_only(args)?;
     util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
     if args.verify {
@@ -451,7 +524,8 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         return run_delete_tag(name).await;
     }
 
-    run_create_tag(name, args.message.clone(), args.force, args.sign).await
+    let message = resolve_tag_message(args)?;
+    run_create_tag(name, message, args.force, args.sign).await
 }
 
 fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()> {

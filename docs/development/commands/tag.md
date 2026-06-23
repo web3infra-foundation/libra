@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、force/delete/list/`-n`、`--points-at <object>`、`--contains <commit>`/`--no-contains <commit>`、列表模式下的 `<pattern>` glob 过滤（`tag -l 'v1.*'`）、`-s`/`--sign`（vault-PGP 签名）、`-v`/`--verify`（vault-PGP 验签）、`--merged <commit>`/`--no-merged <commit>`、`--sort=<key>` 已支持；`--column` 尚未公开。
+- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、`-F`/`--file`（从文件或 stdin 读取 annotated 消息）、force/delete/list/`-n`、`--points-at <object>`、`--contains <commit>`/`--no-contains <commit>`、列表模式下的 `<pattern>` glob 过滤（`tag -l 'v1.*'`）、`-s`/`--sign`（vault-PGP 签名）、`-v`/`--verify`（vault-PGP 验签）、`--merged <commit>`/`--no-merged <commit>`、`--sort=<key>` 已支持；`-e` 编辑器消息录入、`--column` 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -47,8 +47,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/tag.md`。
-- Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE>] [-n <N_LINES>] [NAME]`。
-- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`-s, --sign`、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
+- Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE> | -F <FILE>] [-n <N_LINES>] [NAME]`。
+- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`-s, --sign`、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
+- `-F, --file <FILE>`（与 `-m` 互斥）：从文件读取 annotated 标签消息（`-` 表示从 stdin 读取），由 `resolve_tag_message` 解析，提供后即创建 annotated 标签。读文件失败报 `TagError::MessageFileRead`→`LBR-IO-001`（`IoReadFailed`）。签名（`-s`）当前仍要求 `-m`（因此与 `-F` 不组合）。
 - `-s, --sign`（要求 `-m`，因 Libra 不为标签正文打开编辑器）：用 vault PGP 密钥对规范化的未签名标签内容（`object/type/tag/tagger/\n\n/message`）签名，并把 armored 签名块（`vault::signature_to_armored`）追加到标签消息后，对齐 Git 的 signed-tag 布局；tagger 仅构建一次以保证被签名字节与落库对象一致。无 unseal key 时报 `CreateTagError::VaultSign`→`TagError::VaultSign`。
 - `-v, --verify <name>`：`internal::tag::verify` 在签名标记处切分标签消息、重建未签名内容、`vault::armored_to_signature_hex` 还原签名后调用 `vault::pgp_verify`（libvault `pki/keys/verify`）。好签名打印 `Good signature for tag '<name>'`（exit 0）；坏签名 `TagError::BadSignature`（exit 1）；未签名/非 annotated/未找到/无密钥经 `map_verify_tag_error` 报错。
 - `--contains <commit>` / `--no-contains <commit>`：仅保留（或排除）其 peeled commit 以 `<commit>` 为祖先的标签（即 tag “包含”该 commit），隐含 list 模式；复用 `log::get_reachable_commits` 对每个 tag 的 peeled commit 做一次可达性遍历。
@@ -61,8 +62,9 @@ flowchart TD
 | ✅ 已实现 | 签名标签 | 原始对照：git tag -s <name>；当前说明：已实现 `-s/--sign`（vault PGP，armored 签名块追加到 tag message；要求 `-m`）。Libra 的签名为 vault-PKI，非 GPG 互通。 |
 | ✅ 已实现 | 验证标签 | 原始对照：git tag -v <name>；当前说明：已实现 `-v/--verify`（`vault::pgp_verify` 经 libvault `pki/keys/verify`，重建未签名内容后验签）。Libra 验签为 vault-PKI，非 GPG 互通。 |
 | ✅ 已实现 | 按包含提交过滤 | 原始对照：git tag --contains / --no-contains <commit>；当前说明：已实现（`TagArgs.contains`/`no_contains`，复用 `log::get_reachable_commits` 逐 tag 可达性过滤，隐含 list 模式）。 |
-| 兼容差异项 | 按合并状态过滤 | 原始对照：git tag --merged / --no-merged；相关参数/替代：当前 `TagArgs` 未公开 `--merged` / `--no-merged`；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 排序输出 | 原始对照：git tag --sort=<key>；相关参数/替代：当前 `TagArgs` 未公开 `--sort`；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 从文件读取消息 | 原始对照：git tag -F <file>（`-` 为 stdin）；当前说明：已实现 `-F`/`--file`（`resolve_tag_message` 读取文件或 stdin，与 `-m` 互斥，提供后即 annotated）。签名 `-s` 当前仍要求 `-m`，故不与 `-F` 组合。带集成测试（`test_tag_dash_f_reads_message_from_file_and_stdin`）。 |
+| ✅ 已实现 | 按合并状态过滤 | 原始对照：git tag --merged / --no-merged；当前说明：已实现（`TagArgs.merged`/`no_merged`，复用可达性判定，隐含 list 模式）。 |
+| ✅ 已实现 | 排序输出 | 原始对照：git tag --sort=<key>；当前说明：已实现 `--sort`（`refname`/`-refname`/`creatordate`/`-creatordate`，经 `sort_tags`）。 |
 | 兼容差异项 | 多列输出 | 原始对照：git tag --column；相关参数/替代：当前 `TagArgs` 未公开 `--column`；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

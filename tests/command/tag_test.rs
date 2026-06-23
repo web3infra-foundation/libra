@@ -6,6 +6,7 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use clap::Parser;
 #[cfg(unix)]
 use libra::utils::path;
 use libra::{
@@ -14,7 +15,11 @@ use libra::{
         branch::Branch, config::ConfigKv, db::get_db_conn_instance, model::reference,
         tag as internal_tag,
     },
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    utils::{
+        error::StableErrorCode,
+        output::OutputConfig,
+        test::{ChangeDirGuard, setup_with_new_libra_in},
+    },
 };
 use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
@@ -828,6 +833,7 @@ async fn test_force_tag() {
     // Use CLI path for force update to exercise both CLI and internal logic.
     tag::execute(TagArgs {
         name: Some("v1.0".into()),
+        file: None,
         list: false,
         delete: false,
         message: Some("Updated".into()),
@@ -954,6 +960,7 @@ async fn test_delete_tag() {
 
     tag::execute(TagArgs {
         name: Some("to-delete".into()),
+        file: None,
         list: false,
         delete: true,
         message: None,
@@ -1017,6 +1024,7 @@ async fn test_annotation_lines_tag() {
     // Make second tag with single line annotation
     tag::execute(TagArgs {
         name: Some("v1.0.1".into()),
+        file: None,
         list: false,
         delete: false,
         message: Some("Single line annotation message".into()),
@@ -1067,6 +1075,7 @@ async fn test_annotation_lines_tag() {
     // Make third tag with multi line annotation
     tag::execute(TagArgs {
         name: Some("v1.0.3".into()),
+        file: None,
         list: false,
         delete: false,
         message: Some("multi\nline\nannotation\ntag".into()),
@@ -1309,5 +1318,114 @@ fn test_tag_merged_filters_reachable_tags() {
     assert!(
         !stdout.contains("v-second"),
         "v-second should not be in no-merged: {stdout}"
+    );
+}
+
+#[test]
+fn test_tag_dash_f_reads_message_from_file_and_stdin() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `-F <file>` creates an annotated tag carrying the file's content.
+    std::fs::write(p.join("tagmsg.txt"), "annotated from file\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-F", "tagmsg.txt", "v-file"], p),
+        "tag -F file",
+    );
+    let shown = run_libra_command(&["cat-file", "-p", "v-file"], p);
+    assert_cli_success(&shown, "cat-file -p v-file");
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("annotated from file"),
+        "annotated message from file: {}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+
+    // `-F -` reads the message from standard input.
+    let out = run_libra_command_with_stdin(&["tag", "-F", "-", "v-stdin"], p, "from stdin\n");
+    assert_cli_success(&out, "tag -F -");
+    let shown2 = run_libra_command(&["cat-file", "-p", "v-stdin"], p);
+    assert_cli_success(&shown2, "cat-file -p v-stdin");
+    assert!(
+        String::from_utf8_lossy(&shown2.stdout).contains("from stdin"),
+        "annotated message from stdin: {}",
+        String::from_utf8_lossy(&shown2.stdout)
+    );
+
+    // `-F` conflicts with `-m`.
+    let both = run_libra_command(&["tag", "-F", "tagmsg.txt", "-m", "x", "v-both"], p);
+    assert!(!both.status.success(), "-F conflicts with -m");
+}
+
+#[test]
+fn test_tag_dash_f_read_error_and_create_only_validation() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // A missing `-F` file fails with the stable read-error code and creates no tag.
+    let out = run_libra_command(&["--json", "tag", "-F", "nope.txt", "v-missing"], p);
+    assert!(!out.status.success(), "missing -F file should fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("LBR-IO-001"),
+        "stable read-error code expected: {combined}"
+    );
+    let tags = run_libra_command(&["tag", "-l"], p);
+    assert!(
+        !String::from_utf8_lossy(&tags.stdout).contains("v-missing"),
+        "no tag should be created on a read error"
+    );
+
+    // `-m`/`-F` are create-only: rejected when combined with delete/list modes.
+    std::fs::write(p.join("m.txt"), "x\n").unwrap();
+    for combo in [
+        vec!["tag", "-d", "-F", "m.txt", "v1"],
+        vec!["tag", "-l", "-F", "m.txt", "v1"],
+        vec!["tag", "-d", "-m", "x", "v1"],
+    ] {
+        let r = run_libra_command(&combo, p);
+        assert!(
+            !r.status.success(),
+            "{combo:?} should be a create-only usage error"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tag_create_only_validation_blocks_programmatic_entry() {
+    // The cli.rs preflight is not the only guard: the programmatic
+    // `execute_safe` entry must also reject a message source combined with a
+    // non-create mode. Run OUTSIDE a repository so the error TYPE pins the
+    // regression: the create-only validation fires before `require_repo`, so a
+    // working guard returns the usage error (CliInvalidArguments). Without it,
+    // delete-mode would reach `require_repo` and return repo-not-found instead.
+    let temp = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp.path()); // bare dir, no `.libra`
+
+    let args = TagArgs::try_parse_from(["tag", "-d", "-F", "msg.txt", "v-keep"])
+        .expect("clap should parse -d -F (the conflict is semantic, not clap-level)");
+    let err = tag::execute_safe(args, &OutputConfig::default())
+        .await
+        .expect_err("delete + --file must be rejected before any repo/delete work");
+    assert_eq!(
+        err.stable_code(),
+        StableErrorCode::CliInvalidArguments,
+        "expected the create-only usage error, not repo-not-found: {}",
+        err.message()
+    );
+
+    let args_msg = TagArgs::try_parse_from(["tag", "-d", "-m", "x", "v-keep"]).expect("clap parse");
+    let err_msg = tag::execute_safe(args_msg, &OutputConfig::default())
+        .await
+        .expect_err("delete + --message must also be rejected");
+    assert_eq!(
+        err_msg.stable_code(),
+        StableErrorCode::CliInvalidArguments,
+        "expected the create-only usage error for -m too: {}",
+        err_msg.message()
     );
 }
