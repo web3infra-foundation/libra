@@ -44,8 +44,9 @@ libra fetch origin --depth 2
 libra pull
 libra pull --ff-only
 libra pull --rebase
-! libra pull --squash
-! libra pull --commit
+libra pull --squash
+libra pull --commit
+libra pull --autostash
 libra fsck --connectivity-only
 ```
 
@@ -53,5 +54,5 @@ libra fsck --connectivity-only
 
 - 本地 Git fixture 可被 Libra clone，工作区内容、remote config 和 refs 可观察。
 - 当前 `remote`、`ls-remote`、`fetch`、`pull` 支持面覆盖基础正向路径，其中 `ls-remote --get-url` 不做 discovery，`--sort=version:refname` 按 refname 版本顺序排序，`--exit-code` 在无匹配时返回 2。
-- `remote set-branches/set-head/update`、`fetch --deepen/--unshallow/--prune`、`pull --squash/--commit` 当前作为负向路径验证。
+- `remote set-branches/set-head/update`、`fetch --deepen/--unshallow/--prune` 当前作为负向路径验证；`pull --squash`/`--commit`/`--autostash` 已实现并作为正向路径验证。
 - 失败路径不得破坏 clone 仓库，结尾 `fsck --connectivity-only` 必须通过。

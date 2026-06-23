@@ -180,7 +180,7 @@
 | `fetch [remote]` / `fetch --all` / `fetch --depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 默认 remote、全部 remote 和 depth fetch 可观察 |
 | unsupported fetch flags (`--deepen` / `--unshallow` / `--prune` / `--porcelain` / tags modes) | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 当前未实现，runner 负向断言 |
 | `pull` / `pull --ff-only` / `pull --rebase` | `cli.clone-fetch-pull-local` | 本地 fast-forward/rebase 基础路径可观察 |
-| unsupported pull flags (`--squash` / `--no-squash` / `--commit` / `--ff`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言 |
+| pull strategy flags (`--squash` / `--commit` / `--ff` / `--autostash`) | `cli.clone-fetch-pull-local` | 已实现，runner 正向断言 |
 | `push <remote> [refspec...]` | `live.github-create-push-clone-fetch` | 真实 GitHub remote ref 更新和 clone/fetch readback 可观察 |
 | `push --dry-run` / `--porcelain` | `live.github-create-push-clone-fetch`、`cli.push-local-file-remote-rejected` | 预览/机器输出语义；本地 file remote fail-closed |
 | `push -u/--set-upstream` | `live.github-create-push-clone-fetch` | upstream tracking config 写入 |

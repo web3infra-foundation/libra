@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--rebase] [--depth <n>] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -26,7 +26,7 @@ Pull supports already-up-to-date, fast-forward, and single-head three-way merge 
 
 With `--squash`, pull fetches and computes the merge but stages the merged tree without creating a commit or moving `HEAD`, leaving the result ready for a plain `libra commit` (mirroring `git pull --squash`). With `--no-commit`, pull performs the merge and stages the result but stops before committing, recording merge state so the two-parent commit can be finalized with `libra merge --continue`. `--squash` and `--no-commit` conflict with each other and with `--rebase`. `--commit` forces a merge commit (the default merge behavior) and is last-one-wins with `--no-commit` (the final flag on the command line decides); it conflicts with `--squash` and `--rebase`, matching `git pull --commit`.
 
-`pull` does not yet implement `--autostash`. It depends on the autostash state machine that is not present in the current build; it is documented as deferred rather than silently degraded.
+With `--autostash`, pull stashes your tracked working-tree changes before integrating (so a dirty tree does not block the merge/rebase) and re-applies them afterwards — even if the merge/rebase fails. Untracked and ignored files are left in place. If re-applying the stash conflicts, the stash is kept and the failure is reported; recover it with `libra stash pop`.
 
 ## Options
 
@@ -40,6 +40,7 @@ With `--squash`, pull fetches and computes the merge but stages the merged tree 
 | `--squash` | Stage the merged tree without committing or moving `HEAD`, leaving the result for a plain `libra commit`. Conflicts with `--no-commit`, `--rebase`. | `libra pull --squash` |
 | `--no-commit` | Merge and stage but stop before committing, recording merge state to finalize with `libra merge --continue`. Conflicts with `--squash`, `--rebase`. | `libra pull --no-commit` |
 | `--commit` | Force a merge commit (the default); last-one-wins with `--no-commit`. Conflicts with `--squash`, `--rebase`. | `libra pull --commit` |
+| `--autostash` | Stash tracked changes before integrating and re-apply them afterwards (even on failure), so `pull` works on a dirty tree. Untracked/ignored files are left in place. | `libra pull --autostash` |
 | `--depth <n>` | Limit the fetch phase to a shallow history of `n` commits per tip. Conflicts with `--rebase`. | `libra pull --depth 1` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
@@ -189,7 +190,7 @@ Rebase output omits `merge` and includes `rebase`:
 | Squash | `libra pull --squash` | `git pull --squash` | N/A |
 | No-commit | `libra pull --no-commit` (finalize with `libra merge --continue`) | `git pull --no-commit` | N/A |
 | Force-commit override | `libra pull --commit` (last-one-wins with `--no-commit`) | `git pull --commit` | N/A |
-| Autostash | Not supported (deferred — needs autostash state machine) | `git pull --autostash` | N/A |
+| Autostash | `libra pull --autostash` | `git pull --autostash` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Phase diagnostics | `phase` detail in error JSON | No | No |
 

@@ -6,7 +6,7 @@ use clap::Parser;
 use git_internal::errors::GitError;
 use serde::Serialize;
 
-use super::{fetch, merge, rebase};
+use super::{fetch, merge, rebase, stash};
 use crate::{
     internal::{
         config::{ConfigKv, RemoteConfig},
@@ -27,6 +27,7 @@ EXAMPLES:
     libra pull --rebase                    Rebase the current branch onto the upstream
     libra pull --commit                    Force a merge commit (override a prior --no-commit)
     libra pull --depth 1                   Shallow-fetch then integrate
+    libra pull --autostash                 Stash a dirty tree, pull, then re-apply
     libra pull --json                      Structured JSON output for agents
     libra pull --quiet                     Suppress progress output
 
@@ -83,6 +84,11 @@ pub struct PullArgs {
     /// Force a merge commit, overriding an earlier --no-commit (the default; last one wins).
     #[clap(long, conflicts_with_all = ["rebase", "squash"], overrides_with = "no_commit")]
     commit: bool,
+
+    /// Stash local (tracked) changes before integrating and re-apply them
+    /// afterwards, so `pull` works on a dirty working tree.
+    #[clap(long)]
+    autostash: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +172,9 @@ pub(crate) enum PullError {
 
     #[error("pull failed during rebase phase: {0}")]
     Rebase(#[source] rebase::RebaseError),
+
+    #[error("pull --autostash failed: {0}")]
+    Autostash(String),
 }
 
 impl From<PullError> for CliError {
@@ -191,6 +200,14 @@ impl From<PullError> for CliError {
             PullError::Fetch(error) => map_fetch_error_to_cli(&error).with_detail("phase", "fetch"),
             PullError::Merge(error) => map_merge_error_to_cli(&error).with_detail("phase", "merge"),
             PullError::Rebase(error) => CliError::from(error).with_detail("phase", "rebase"),
+            PullError::Autostash(detail) => {
+                CliError::failure(format!("pull --autostash failed: {detail}"))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_detail("phase", "autostash")
+                    .with_hint(
+                        "resolve the working tree, then recover the stash with 'libra stash pop'",
+                    )
+            }
         }
     }
 }
@@ -208,6 +225,7 @@ impl PullArgs {
             squash: false,
             no_commit: false,
             commit: false,
+            autostash: false,
         }
     }
 }
@@ -280,63 +298,84 @@ pub(crate) async fn run_pull(
         objects_fetched: fetch_result.objects_fetched,
     };
 
-    if args.rebase {
+    // `--autostash`: stash tracked changes before integrating so a dirty tree
+    // does not block the merge/rebase. The stash is re-applied afterwards.
+    let stashed = if args.autostash {
+        stash::autostash_push()
+            .await
+            .map_err(PullError::Autostash)?
+    } else {
+        false
+    };
+
+    // Capture the integrate result so the autostash can be popped afterwards
+    // even when the merge/rebase fails.
+    let integrate_result: Result<PullOutput, PullError> = if args.rebase {
         // Rebase resolves `<remote>/<branch>` through the same public ref
         // path used by `libra rebase`, so keep the human-readable upstream form.
-        let rebase_summary = rebase::run_rebase_for_pull(&target.upstream)
-            .await
-            .map_err(PullError::Rebase)?;
-        let up_to_date = matches!(
-            rebase_summary.status.as_str(),
-            "already-up-to-date" | "no-commits"
-        ) || rebase_summary.old_commit == rebase_summary.commit;
-        return Ok(PullOutput {
-            branch: target.branch,
-            upstream: target.upstream,
-            fetch: fetch_summary,
-            merge: None,
-            rebase: Some(PullRebaseResult {
-                status: rebase_summary.status,
-                old_commit: rebase_summary.old_commit,
-                commit: rebase_summary.commit,
-                replay_count: rebase_summary.replay_count,
-                up_to_date,
+        match rebase::run_rebase_for_pull(&target.upstream).await {
+            Ok(rebase_summary) => {
+                let up_to_date = matches!(
+                    rebase_summary.status.as_str(),
+                    "already-up-to-date" | "no-commits"
+                ) || rebase_summary.old_commit == rebase_summary.commit;
+                Ok(PullOutput {
+                    branch: target.branch,
+                    upstream: target.upstream,
+                    fetch: fetch_summary,
+                    merge: None,
+                    rebase: Some(PullRebaseResult {
+                        status: rebase_summary.status,
+                        old_commit: rebase_summary.old_commit,
+                        commit: rebase_summary.commit,
+                        replay_count: rebase_summary.replay_count,
+                        up_to_date,
+                    }),
+                })
+            }
+            Err(error) => Err(PullError::Rebase(error)),
+        }
+    } else {
+        match merge::run_merge_for_pull_with_options(
+            &target.merge_target,
+            &target.upstream,
+            &child_output,
+            merge::PullMergeOptions {
+                ff_only: args.ff_only,
+                no_ff: args.no_ff,
+                message: None,
+                squash: args.squash,
+                no_commit: args.no_commit,
+            },
+        )
+        .await
+        {
+            Ok(merge_result) => Ok(PullOutput {
+                branch: target.branch,
+                upstream: target.upstream,
+                fetch: fetch_summary,
+                merge: Some(PullMergeResult {
+                    strategy: merge_result.strategy,
+                    old_commit: merge_result.old_commit,
+                    commit: merge_result.commit,
+                    files_changed: merge_result.files_changed,
+                    up_to_date: merge_result.up_to_date,
+                    parents: merge_result.parents,
+                    conflicted_paths: merge_result.conflicted_paths,
+                    aborted: merge_result.aborted,
+                    continued: merge_result.continued,
+                }),
+                rebase: None,
             }),
-        });
+            Err(error) => Err(PullError::Merge(error)),
+        }
+    };
+
+    if stashed {
+        stash::autostash_pop().await.map_err(PullError::Autostash)?;
     }
 
-    let merge_result = merge::run_merge_for_pull_with_options(
-        &target.merge_target,
-        &target.upstream,
-        &child_output,
-        merge::PullMergeOptions {
-            ff_only: args.ff_only,
-            no_ff: args.no_ff,
-            message: None,
-            squash: args.squash,
-            no_commit: args.no_commit,
-        },
-    )
-    .await
-    .map_err(PullError::Merge)?;
-
-    Ok(PullOutput {
-        branch: target.branch,
-        upstream: target.upstream,
-        fetch: fetch_summary,
-        merge: Some(PullMergeResult {
-            strategy: merge_result.strategy,
-            old_commit: merge_result.old_commit,
-            commit: merge_result.commit,
-            files_changed: merge_result.files_changed,
-            up_to_date: merge_result.up_to_date,
-            parents: merge_result.parents,
-            conflicted_paths: merge_result.conflicted_paths,
-            aborted: merge_result.aborted,
-            continued: merge_result.continued,
-        }),
-        rebase: None,
-    })
+    integrate_result
 }
 
 async fn resolve_pull_target(args: &PullArgs) -> Result<ResolvedPullTarget, PullError> {

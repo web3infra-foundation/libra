@@ -480,6 +480,28 @@ async fn run_pop(stash: Option<String>) -> Result<StashOutput, StashError> {
     })
 }
 
+/// Stash the tracked working-tree changes for `pull --autostash`. Returns `true`
+/// when a stash was created, `false` when there was nothing to stash (clean
+/// tree). Untracked/ignored files are left in place, matching Git's autostash.
+pub(crate) async fn autostash_push() -> Result<bool, String> {
+    let options = StashPushOptions {
+        message: Some("autostash before pull".to_string()),
+        include_untracked: false,
+        include_ignored: false,
+        keep_index: false,
+    };
+    match run_push(options).await.map_err(|e| e.to_string())? {
+        StashOutput::Noop { .. } => Ok(false),
+        _ => Ok(true),
+    }
+}
+
+/// Re-apply and drop the autostash created by [`autostash_push`].
+pub(crate) async fn autostash_pop() -> Result<(), String> {
+    run_pop(None).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn run_list() -> Result<StashOutput, StashError> {
     if !has_stash() {
         return Ok(StashOutput::List {

@@ -928,3 +928,26 @@ async fn test_pull_no_ff_forces_merge_commit_on_fast_forwardable_history() {
         "pull --no-ff should still bring in the fetched content"
     );
 }
+
+#[test]
+fn pull_autostash_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `--autostash` parses and reaches the runtime: without an upstream it fails
+    // with a tracking-information error, NOT a clap "unexpected argument" error.
+    // (The stash/integrate/pop orchestration itself requires a remote and is
+    // covered by the network-gated pull tests; the stash mechanics it reuses are
+    // covered by the stash command tests.)
+    let out = run_libra_command(&["pull", "--autostash"], p);
+    assert!(!out.status.success(), "pull without an upstream fails");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("unexpected argument"),
+        "--autostash is accepted by the parser: {err:?}"
+    );
+    assert!(
+        err.contains("tracking information"),
+        "--autostash reaches the tracking check: {err:?}"
+    );
+}

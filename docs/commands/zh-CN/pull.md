@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## 说明
@@ -20,7 +20,7 @@ libra pull [--ff-only] [--rebase] [<repository> [<refspec>]]
 
 Pull 支持 already-up-to-date、fast-forward 和 single-head three-way merge 结果。如果本地和远程分支冲突，pull 会返回由 merge 拥有的 `LBR-CONFLICT-002` 错误，带有 `phase: "merge"`，并留下与 `libra merge` 相同的 merge 状态。使用 `libra add <path>` 解决冲突并运行 `libra merge --continue`，或运行 `libra merge --abort`。
 
-`pull` 不实现 `--squash`、`--no-ff`、自定义合并策略，或除 `--ff-only` 和 `--rebase` 之外的 pull 专用策略标志。
+`pull` 已支持 `--ff-only`、`--ff`、`--no-ff`、`--squash`、`--no-commit`、`--commit`、`--autostash`、`--rebase` 与 fetch `--depth`；尚不支持 octopus merge 与自定义合并策略（`--strategy`/`-X`）。`--autostash` 在集成前 stash 已跟踪改动、之后再 pop 回（即使整合失败也会 pop），让 `pull` 能在脏工作树上运行；未跟踪/忽略文件保持原样，pop 冲突时保留 stash 并报错（用 `libra stash pop` 恢复）。
 
 ## 选项
 
@@ -170,8 +170,11 @@ Rebase 输出省略 `merge` 并包含 `rebase`：
 | 仅快进 pull | `libra pull --ff-only` | `git pull --ff-only` | N/A |
 | 三方集成 | 通过 merge 引擎支持 | 支持 | N/A |
 | Pull 时 rebase | `libra pull --rebase` | `git pull --rebase` | N/A |
-| 强制合并提交 | 不支持 | `git pull --no-ff` | N/A |
-| Squash | 不支持 | `git pull --squash` | N/A |
+| 强制合并提交 | `libra pull --no-ff` | `git pull --no-ff` | N/A |
+| Squash | `libra pull --squash` | `git pull --squash` | N/A |
+| 不提交 | `libra pull --no-commit` | `git pull --no-commit` | N/A |
+| 强制提交 | `libra pull --commit` | `git pull --commit` | N/A |
+| Autostash | `libra pull --autostash` | `git pull --autostash` | N/A |
 | 结构化输出 | `--json` / `--machine` | 无 | 无 |
 | 阶段诊断 | 错误 JSON 中的 `phase` 详情 | 无 | 无 |
 
