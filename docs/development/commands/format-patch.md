@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`），merge 提交默认跳过。未实现的 Git 选项包括 `--attach`、`--inline`、`--signature-file`、`--from`、`--to`、`--cc`、`--base`、`--interdiff`、`--range-diff`、`--notes`、`--encode-email-headers` 和 `--force`。
+- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`；`--signature-file <file>`；`--encode-email-headers`/`--no-encode-email-headers`），merge 提交默认跳过。未实现的 Git 选项包括 `--attach`、`--inline`、`--from`、`--to`、`--cc`、`--base`、`--interdiff`、`--range-diff`、`--notes` 和 `--force`。
 
 ## 设计方案
 
@@ -50,7 +50,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `format_patch`，`src/cli.rs::Commands::FormatPatch` 负责 CLI 接入。
 - 用户文档：`docs/commands/format-patch.md`。
 - Synopsis：`libra format-patch [OPTIONS] [revision-range]`。
-- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`、`--zero-commit`、`--signature <SIGNATURE>`、`--no-signature`、`--numbered-files`。
+- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`、`--zero-commit`、`--signature <SIGNATURE>`、`--no-signature`、`--signature-file <FILE>`、`--encode-email-headers` / `--no-encode-email-headers`、`--numbered-files`。`--signature-file` 在 `execute_safe` 早期读文件并填入 `signature` 槽（与 `--signature` 互斥，trim 尾换行）；`--encode-email-headers` 经 `encode_email_header` 对含非 ASCII 的 `From` 名称与 `Subject` 做整值 RFC 2047 Q 编码（`=?UTF-8?q?...?=`），纯 ASCII 或未开启时原样输出。
 
 ## 还未实现的功能
 
@@ -59,12 +59,12 @@ flowchart TD
 | Git flag | `--attach` / `--inline` / `--no-attach`（MIME 附件/内联模式） | 未公开；当前固定输出 `text/plain; charset=UTF-8` 内联，不加 MIME multipart。命令层。 |
 | ✅ 已实现 | `--suffix <sfx>`（文件名后缀，默认 `.patch`） | 已公开：通过 `patch_filename` 的 `suffix` 参数与 cover-letter 列表统一使用；默认 `.patch` 保持原行为。带集成测试（`suffix_changes_patch_filename_extension`）。 |
 | ✅ 已实现 | `--signature <sig>` / `--no-signature`（自定义/省略签名） | 已公开：`push_signature` 统一两处页脚（补丁正文 + cover letter）——`--no-signature` 完全省略 `-- ` 页脚；`--signature <s>` 设置文本；默认仍为 libra 版本号。带集成测试（`signature_controls_patch_footer`）。 |
-| Git flag | `--signature-file <file>`（从文件读取签名） | 未公开；可在 `--signature` 之上扩展（读取文件内容作为签名文本）。命令层。 |
+| ✅ 已实现 | `--signature-file <file>`（从文件读取签名） | 已公开：`execute_safe` 早期读文件内容（trim 尾换行）填入 `signature` 槽，与 `--signature` 互斥，`--no-signature` 仍优先；读失败报 `LBR-IO-001`。带集成测试（`signature_file_sets_the_footer`）。 |
 | Git flag | `--from` / `--to` / `--cc` / `--no-to` / `--no-cc`（邮件收件人/抄送头） | 未公开；当前不生成这些头。命令层。 |
 | Git flag | `--base <tree-ish>`（记录基础提交，供 `git am --base` 使用） | 未公开；需生 `base-commit` 头。命令层。 |
 | Git flag | `--interdiff <prev>` / `--range-diff <prev>`（补丁间差异/范围差异） | 未公开；依赖 interdiff/range-diff 引擎。命令层。 |
 | Git flag | `--notes[=<ref>]` / `--no-notes`（在补丁中附加 notes） | 未公开；需集成 notes 子系统。命令层。 |
-| Git flag | `--encode-email-headers`（QP 编码非 ASCII 邮件头） | 未公开；当前头直接使用 UTF-8。命令层。 |
+| ✅ 已实现 | `--encode-email-headers` / `--no-encode-email-headers`（QP 编码非 ASCII 邮件头） | 已公开：`encode_email_header` 对含非 ASCII 的 `From` 名称与 `Subject` 做 RFC 2047 Q 编码（拆分为 ≤75 字符的多个 encoded-word，不跨多字节字符），纯 ASCII 或未开启时原样。默认关闭（Libra 无 `format.encodeEmailHeaders` 配置；git 由该配置决定，未设置时亦关闭）。带集成测试（`encode_email_headers_q_encodes_nonascii_subject`）。 |
 | Git flag | `--force`（强制覆盖已有文件） | 未公开；当前遇到同名文件直接覆盖。命令层。 |
 | ✅ 已实现 | `--zero-commit`（每个补丁的 `From <hash>` 信封行输出全零 hash） | 已公开：`format_patch_body` 按 `commit.id` 的十六进制长度生成全零串，仅替换信封行（其余补丁内容不变），与 `git format-patch` 一致。带集成测试（`zero_commit_zeroes_the_envelope_hash`）。 |
 | ✅ 已实现 | `--numbered-files`（纯序号文件名，不含 slug/后缀） | 已公开：`patch_filename` 在该模式下直接返回 `patch_num.to_string()`（cover letter 为 `0`），忽略 `--suffix`，与 `git format-patch` 一致。带集成测试（`numbered_files_uses_bare_sequence_numbers`）。 |

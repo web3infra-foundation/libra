@@ -51,6 +51,9 @@ Examples:
 
   # Custom filename suffix (0001-subject.txt instead of .patch)
   libra format-patch --suffix=.txt HEAD~2..HEAD
+
+  # Signature footer from a file, RFC 2047-encoding non-ASCII headers
+  libra format-patch --signature-file SIGNATURE --encode-email-headers HEAD~2..HEAD
 ";
 
 // ---------------------------------------------------------------------------
@@ -150,6 +153,30 @@ pub struct FormatPatchArgs {
     #[arg(long = "no-signature")]
     pub no_signature: bool,
 
+    /// Read the signature footer text from a file (mutually exclusive with
+    /// `--signature`). `--no-signature` still takes priority.
+    #[arg(
+        long = "signature-file",
+        value_name = "FILE",
+        conflicts_with = "signature"
+    )]
+    pub signature_file: Option<String>,
+
+    /// RFC 2047 Q-encode `From`/`Subject` header values that contain non-ASCII
+    /// characters (Git's `--encode-email-headers`). Off by default.
+    #[arg(
+        long = "encode-email-headers",
+        overrides_with = "no_encode_email_headers"
+    )]
+    pub encode_email_headers: bool,
+
+    /// Disable header encoding (the default); negates `--encode-email-headers`.
+    #[arg(
+        long = "no-encode-email-headers",
+        overrides_with = "encode_email_headers"
+    )]
+    pub no_encode_email_headers: bool,
+
     /// Name output files by a plain sequence number (1, 2, …) instead of
     /// `NNNN-subject`; the `--suffix` is not applied in this mode (matches Git).
     #[arg(long = "numbered-files")]
@@ -225,10 +252,24 @@ pub async fn execute(args: FormatPatchArgs) {
 /// - `IoWriteFailed` when a patch file cannot be written or the output
 ///   directory cannot be created.
 /// - Errors from lower-level object loading are forwarded as `CliError`.
-pub async fn execute_safe(args: FormatPatchArgs, output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> CliResult<()> {
     // 1. Ensure we are in a repo
     if util::require_repo().is_err() {
         return Err(CliError::from(FormatPatchError::NotInRepo));
+    }
+
+    // `--signature-file` reads the footer text from a file; resolve it into the
+    // same slot `--signature` uses (the two are mutually exclusive). Trailing
+    // newlines are trimmed so the footer is rendered consistently. Skip the read
+    // entirely under `--no-signature`, which suppresses the footer regardless.
+    if !args.no_signature
+        && let Some(path) = args.signature_file.clone()
+    {
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            CliError::failure(format!("failed to read signature file '{path}': {e}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        args.signature = Some(content.trim_end_matches('\n').to_string());
     }
 
     // 2. Resolve revision range
@@ -451,6 +492,7 @@ async fn format_patch_body(
 
     // ---- From: ----
     let author_name = sanitize_header_value(commit.author.name.trim());
+    let author_name = encode_email_header(&author_name, args.encode_email_headers);
     let author_email = sanitize_header_value(commit.author.email.trim());
     out.push_str(&format!("From: {author_name} <{author_email}>\n"));
 
@@ -461,6 +503,7 @@ async fn format_patch_body(
     let (raw_msg, _sig) = parse_commit_msg(&commit.message);
     let subject = raw_msg.lines().next().unwrap_or("").to_string();
     let subject = sanitize_header_value(&clean_subject(&subject, args.keep_subject));
+    let subject = encode_email_header(&subject, args.encode_email_headers);
 
     let version = args
         .reroll_count
@@ -889,6 +932,57 @@ fn sanitize_header_value(value: &str) -> String {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
         .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// RFC 2047 Q-encode a header value for `--encode-email-headers`.
+///
+/// When `enable` is false or `value` is pure ASCII the value passes through
+/// unchanged (matching Git, which only encodes headers that actually contain
+/// non-ASCII). Otherwise the value is Q-encoded: spaces become `_`, ASCII
+/// alphanumerics are kept verbatim, and every other byte is `=XX` hex-escaped
+/// (this over-approximates Git's per-run encoding but is valid RFC 2047 and
+/// decodes to the same text). The output is split into multiple
+/// `=?UTF-8?q?...?=` encoded-words so that no single word exceeds the RFC 2047
+/// 75-character limit, and a multi-byte character is never split across words;
+/// adjacent encoded-words are separated by a space, which a conforming decoder
+/// removes when concatenating them.
+fn encode_email_header(value: &str, enable: bool) -> String {
+    if !enable || value.is_ascii() {
+        return value.to_string();
+    }
+    const PREFIX: &str = "=?UTF-8?q?";
+    const SUFFIX: &str = "?=";
+    // 75-char encoded-word limit minus the `=?UTF-8?q?` / `?=` delimiters.
+    const MAX_PAYLOAD: usize = 75 - PREFIX.len() - SUFFIX.len();
+
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        // Encode one whole character so its bytes never straddle two words.
+        let mut token = String::new();
+        if ch == ' ' {
+            token.push('_');
+        } else if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else {
+            let mut buf = [0u8; 4];
+            for &byte in ch.encode_utf8(&mut buf).as_bytes() {
+                token.push_str(&format!("={byte:02X}"));
+            }
+        }
+        if !current.is_empty() && current.len() + token.len() > MAX_PAYLOAD {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push_str(&token);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+        .iter()
+        .map(|w| format!("{PREFIX}{w}{SUFFIX}"))
         .collect::<Vec<_>>()
         .join(" ")
 }

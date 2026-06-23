@@ -853,3 +853,115 @@ fn numbered_files_uses_bare_sequence_numbers() {
         "suffix must be ignored under --numbered-files: {names2:?}"
     );
 }
+
+#[test]
+#[serial]
+fn signature_file_sets_the_footer() {
+    let repo = repo_with_commits(1);
+    let sig = repo.path().join("sig.txt");
+    fs::write(&sig, "Sent via Libra\n-- the team\n").unwrap();
+
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "--signature-file",
+            sig.to_str().unwrap(),
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "signature-file");
+    let s = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        s.contains("-- \nSent via Libra\n-- the team"),
+        "footer must come from the signature file: {s}"
+    );
+}
+
+#[test]
+#[serial]
+fn encode_email_headers_q_encodes_nonascii_subject() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("f.txt"), "x\n").unwrap();
+    run_libra_command(&["add", "f.txt"], repo.path());
+    run_libra_command(&["commit", "-m", "café résumé", "--no-verify"], repo.path());
+
+    // With --encode-email-headers the Subject is RFC 2047 Q-encoded.
+    let encoded = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "--encode-email-headers",
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&encoded, "encode-email-headers");
+    let es = String::from_utf8_lossy(&encoded.stdout);
+    let subj = es
+        .lines()
+        .find(|l| l.starts_with("Subject:"))
+        .expect("a Subject line");
+    assert!(
+        subj.contains("=?UTF-8?q?"),
+        "subject must be Q-encoded: {subj}"
+    );
+    assert!(
+        !subj.contains("café"),
+        "raw non-ASCII must not appear: {subj}"
+    );
+
+    // Without the flag the Subject keeps the raw UTF-8 text.
+    let plain = run_libra_command(&["format-patch", "--stdout", "HEAD~1..HEAD"], repo.path());
+    let ps = String::from_utf8_lossy(&plain.stdout);
+    let psubj = ps
+        .lines()
+        .find(|l| l.starts_with("Subject:"))
+        .expect("a Subject line");
+    assert!(
+        psubj.contains("café"),
+        "raw subject without the flag: {psubj}"
+    );
+}
+
+#[test]
+#[serial]
+fn encode_email_headers_splits_long_words_under_75_chars() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("g.txt"), "x\n").unwrap();
+    run_libra_command(&["add", "g.txt"], repo.path());
+    // A long non-ASCII subject forces the Q-encoding across multiple words.
+    let long_subject = "é".repeat(60);
+    run_libra_command(&["commit", "-m", &long_subject, "--no-verify"], repo.path());
+
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "--encode-email-headers",
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "encode long subject");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let subj = s
+        .lines()
+        .find(|l| l.starts_with("Subject:"))
+        .expect("a Subject line");
+    let words: Vec<&str> = subj
+        .split_whitespace()
+        .filter(|w| w.starts_with("=?UTF-8?q?"))
+        .collect();
+    assert!(
+        words.len() >= 2,
+        "a long subject must split into multiple encoded-words: {subj}"
+    );
+    for w in &words {
+        assert!(
+            w.chars().count() <= 75,
+            "each RFC 2047 encoded-word must be <= 75 chars: {w}"
+        );
+    }
+}

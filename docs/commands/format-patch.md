@@ -43,6 +43,8 @@ commits, the command exits with an error.
 | `--zero-commit` | | Use an all-zero hash in each patch's `From <hash>` envelope line | false |
 | `--signature <SIGNATURE>` | | Text placed after the `-- ` line of each patch and the cover letter | libra version |
 | `--no-signature` | | Omit the `-- `/signature footer entirely | false |
+| `--signature-file <FILE>` | | Read the signature footer text from a file (mutually exclusive with `--signature`) | |
+| `--encode-email-headers` / `--no-encode-email-headers` | | RFC 2047 Q-encode `From`/`Subject` header values that contain non-ASCII characters | off |
 | `--numbered-files` | | Name output files by a bare sequence number (suffix not applied) | false |
 
 ## Examples
@@ -87,7 +89,12 @@ unified diff
 ```
 
 The `-- ` footer defaults to the libra version; `--signature <text>` replaces
-it with custom text and `--no-signature` omits the footer entirely.
+it with custom text, `--signature-file <file>` reads the footer text from a
+file, and `--no-signature` omits the footer entirely. `--encode-email-headers`
+RFC 2047 Q-encodes `From`/`Subject` header values that contain non-ASCII
+characters. It is off by default in Libra (which has no `format.encodeEmailHeaders`
+config knob); Git derives its default from that config, which is itself off
+unless set.
 
 With `--json` or `--machine`, `data.patches` lists every generated output.
 When `--cover-letter` is set, the list includes the cover letter as record
