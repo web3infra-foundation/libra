@@ -1138,3 +1138,31 @@ fn test_diff_check_reports_whitespace_errors() {
         "no warnings for a clean diff"
     );
 }
+
+#[test]
+fn test_diff_reverse_swaps_sides() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("r.txt"), "line1\nline2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    std::fs::write(p.join("r.txt"), "line1\nCHANGED\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r.txt"], p), "stage change");
+
+    // Normal staged diff: line2 removed, CHANGED added.
+    let normal = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&normal, "diff --cached");
+    let n = String::from_utf8_lossy(&normal.stdout);
+    assert!(n.contains("-line2"), "normal removes line2: {n:?}");
+    assert!(n.contains("+CHANGED"), "normal adds CHANGED: {n:?}");
+
+    // Reverse: the sides swap, so CHANGED is removed and line2 is added.
+    let reverse = run_libra_command(&["diff", "--cached", "-R"], p);
+    assert_cli_success(&reverse, "diff --cached -R");
+    let r = String::from_utf8_lossy(&reverse.stdout);
+    assert!(r.contains("-CHANGED"), "reverse removes CHANGED: {r:?}");
+    assert!(r.contains("+line2"), "reverse adds line2: {r:?}");
+}

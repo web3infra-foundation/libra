@@ -46,6 +46,7 @@ EXAMPLES:
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra diff --cached --check             Warn about whitespace errors on added lines
+    libra diff -R                           Reverse diff (swap additions and deletions)
     libra --json diff --staged              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -127,6 +128,11 @@ pub struct DiffArgs {
     /// when any problem is found. (Git's blank-at-eof check is not performed.)
     #[clap(long = "check")]
     pub check: bool,
+
+    /// Show the reverse diff: swap the two sides so additions become deletions
+    /// and vice-versa (e.g. the patch that would undo the change).
+    #[clap(short = 'R', long = "reverse")]
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -321,7 +327,25 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let load_error = Rc::new(RefCell::new(None::<DiffError>));
     let load_error_for_read = Rc::clone(&load_error);
-    let diff_output = Diff::diff(old_side.blobs, new_side.blobs, paths, move |path, hash| {
+    // `-R`/`--reverse`: swap the two sides so the diff is computed new->old. The
+    // loader resolves blobs by hash (content-addressed) and the worktree check
+    // above stays correct regardless of which side a blob lands on.
+    let (first_blobs, second_blobs, old_label, new_label) = if args.reverse {
+        (
+            new_side.blobs,
+            old_side.blobs,
+            new_side.label,
+            old_side.label,
+        )
+    } else {
+        (
+            old_side.blobs,
+            new_side.blobs,
+            old_side.label,
+            new_side.label,
+        )
+    };
+    let diff_output = Diff::diff(first_blobs, second_blobs, paths, move |path, hash| {
         if worktree_entries.get(path) == Some(hash) {
             if let Some(data) = worktree_cache.borrow().get(hash).cloned() {
                 return data;
@@ -364,8 +388,8 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     let files_changed = files.len();
 
     Ok(DiffOutput {
-        old_ref: old_side.label,
-        new_ref: new_side.label,
+        old_ref: old_label,
+        new_ref: new_label,
         files,
         total_insertions,
         total_deletions,
@@ -909,6 +933,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         no_patch: false,
         null: false,
         check: false,
+        reverse: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))
