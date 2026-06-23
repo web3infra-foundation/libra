@@ -2180,6 +2180,8 @@ async fn test_log_all_includes_branches() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;

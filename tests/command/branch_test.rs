@@ -550,6 +550,8 @@ async fn test_branch() {
             contains: vec![],
             no_contains: vec![],
             points_at: None,
+            merged: None,
+            no_merged: None,
             ignore_case: false,
         };
         execute(args).await;
@@ -588,6 +590,8 @@ async fn test_branch() {
             contains: vec![],
             no_contains: vec![],
             points_at: None,
+            merged: None,
+            no_merged: None,
             ignore_case: false,
         };
         execute(args).await;
@@ -616,6 +620,8 @@ async fn test_branch() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -672,6 +678,8 @@ async fn test_create_branch_from_remote() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -729,6 +737,8 @@ async fn test_create_branch_from_remote_tracking_ref() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -942,6 +952,8 @@ async fn test_branch_rename() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -969,6 +981,8 @@ async fn test_branch_rename() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1064,6 +1078,8 @@ async fn test_rename_current_branch() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1135,6 +1151,8 @@ async fn test_rename_to_existing_branch() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1154,6 +1172,8 @@ async fn test_rename_to_existing_branch() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1174,6 +1194,8 @@ async fn test_rename_to_existing_branch() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1238,6 +1260,8 @@ async fn test_list_all_branches() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await;
@@ -1268,6 +1292,8 @@ async fn test_list_all_branches() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
@@ -1337,6 +1363,8 @@ async fn test_branch_delete_safe() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -1401,6 +1429,8 @@ async fn test_branch_delete_safe() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -1466,6 +1496,8 @@ async fn test_branch_delete_safe() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -1554,6 +1586,8 @@ async fn test_branch_contains_commit_filter() {
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -1838,4 +1872,52 @@ fn test_filter_branches_propagates_error_for_corrupt_commit() {
         "error should mention failed commit load, got: {}",
         err.message()
     );
+}
+
+#[test]
+fn branch_merged_and_no_merged_filters() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `old` stays at the base commit; once `main` advances, `old` is merged into it.
+    assert_cli_success(&run_libra_command(&["branch", "old"], p), "branch old");
+    std::fs::write(p.join("m.txt"), "m\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "m.txt"], p), "add m");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2 on main",
+    );
+
+    // `side` diverges with its own commit, so it is NOT merged into main.
+    assert_cli_success(&run_libra_command(&["branch", "side"], p), "branch side");
+    assert_cli_success(&run_libra_command(&["switch", "side"], p), "switch side");
+    std::fs::write(p.join("s.txt"), "s\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "s.txt"], p), "add s");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c3", "--no-verify"], p),
+        "commit c3 on side",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+
+    // --merged main: main + old (reachable from main), NOT side.
+    let merged = run_libra_command(&["branch", "--merged", "main"], p);
+    assert_cli_success(&merged, "branch --merged main");
+    let m = String::from_utf8_lossy(&merged.stdout).into_owned();
+    assert!(
+        m.contains("old") && m.contains("main"),
+        "merged has old+main: {m:?}"
+    );
+    assert!(
+        !m.contains("side"),
+        "side must not be merged into main: {m:?}"
+    );
+
+    // --no-merged main: side, NOT old/main.
+    let no_merged = run_libra_command(&["branch", "--no-merged", "main"], p);
+    assert_cli_success(&no_merged, "branch --no-merged main");
+    let n = String::from_utf8_lossy(&no_merged.stdout).into_owned();
+    assert!(n.contains("side"), "side is not merged into main: {n:?}");
+    assert!(!n.contains("old"), "old IS merged into main: {n:?}");
 }

@@ -65,6 +65,7 @@ EXAMPLES:
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
     libra branch -u origin/main           Set upstream for the current branch
+    libra branch --merged main            List branches already merged into main
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -218,6 +219,14 @@ pub struct BranchArgs {
     /// Only list branches pointing at the given object. Implies --list.
     #[clap(long = "points-at", group = "query", value_name = "object")]
     pub points_at: Option<String>,
+
+    /// Only list branches already merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
+    pub merged: Option<String>,
+
+    /// Only list branches not yet merged into the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long = "no-merged", group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
+    pub no_merged: Option<String>,
 
     /// Sorting and name comparisons ignore case where applicable.
     #[clap(long = "ignore-case", group = "query")]
@@ -944,8 +953,11 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     } else {
         BranchListMode::Local
     };
-    let has_commit_filters =
-        !args.contains.is_empty() || !args.no_contains.is_empty() || args.points_at.is_some();
+    let has_commit_filters = !args.contains.is_empty()
+        || !args.no_contains.is_empty()
+        || args.points_at.is_some()
+        || args.merged.is_some()
+        || args.no_merged.is_some();
     let (head_name, detached_head) = match Head::current().await {
         Head::Branch(name) => (Some(name), None),
         Head::Detached(commit_hash) => (None, Some(commit_hash.to_string())),
@@ -978,8 +990,19 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 
     let contains_set = resolve_commits(&args.contains).await?;
     let no_contains_set = resolve_commits(&args.no_contains).await?;
+    // `--merged`/`--no-merged` keep (or drop) branches whose tip is reachable
+    // from the target commit (i.e. already merged into it) — the inverse of
+    // `--contains`. The reachable set is computed once per target.
+    let merged_set = resolve_reachable_for_merge(args.merged.as_deref()).await?;
+    let no_merged_set = resolve_reachable_for_merge(args.no_merged.as_deref()).await?;
     for branches in [&mut local_branches, &mut remote_branches] {
         filter_branches_result(branches, &contains_set, &no_contains_set)?;
+        if let Some(set) = &merged_set {
+            branches.retain(|branch| set.contains(&branch.commit));
+        }
+        if let Some(set) = &no_merged_set {
+            branches.retain(|branch| !set.contains(&branch.commit));
+        }
     }
     let local_branches_empty = local_branches.is_empty();
 
@@ -1283,6 +1306,8 @@ pub async fn list_branches(
         contains: commits_contains.to_vec(),
         no_contains: commits_no_contains.to_vec(),
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
@@ -1348,6 +1373,24 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
         set.insert(target_commit);
     }
     Ok(set)
+}
+
+/// For `--merged`/`--no-merged`: resolve the target spec and return the set of
+/// commits reachable from it (its history). A branch is "merged into" the
+/// target iff its tip is in this set. Returns `None` when the flag is absent.
+async fn resolve_reachable_for_merge(
+    spec: Option<&str>,
+) -> Result<Option<HashSet<ObjectHash>>, BranchError> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let target = get_target_commit(spec)
+        .await
+        .map_err(|_| BranchError::InvalidCommit(spec.to_string()))?;
+    let reachable = get_reachable_commits(target.to_string(), None)
+        .await
+        .map_err(BranchError::DelegatedCli)?;
+    Ok(Some(reachable.iter().map(|c| c.id).collect()))
 }
 
 /// check if a branch contains at least one of the commits

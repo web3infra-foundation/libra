@@ -205,6 +205,8 @@ async fn test_grep_tree_accepts_branch_revisions() {
             contains: Vec::new(),
             no_contains: Vec::new(),
             points_at: None,
+            merged: None,
+            no_merged: None,
             ignore_case: false,
         },
         &OutputConfig::default(),

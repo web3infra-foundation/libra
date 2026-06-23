@@ -654,6 +654,8 @@ async fn setup_standard_repo(
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -704,6 +706,8 @@ async fn setup_standard_repo(
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -754,6 +758,8 @@ async fn setup_standard_repo(
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
@@ -804,6 +810,8 @@ async fn setup_standard_repo(
         contains: vec![],
         no_contains: vec![],
         points_at: None,
+        merged: None,
+        no_merged: None,
         ignore_case: false,
     })
     .await;
