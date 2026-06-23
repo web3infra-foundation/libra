@@ -2,10 +2,13 @@
 
 use clap::Parser;
 
-use crate::utils::{
-    error::{CliError, CliResult},
-    output::{OutputConfig, emit_json_data},
-    util,
+use crate::{
+    internal::{branch::Branch, config::ConfigKv, head::Head, tag},
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        output::{OutputConfig, emit_json_data},
+        util,
+    },
 };
 
 #[path = "rev_list_cherry.rs"]
@@ -47,6 +50,12 @@ pub struct RevListArgs {
     /// (`--max-count`/`--skip`) is applied first, then the result is reversed.
     #[clap(long)]
     pub reverse: bool,
+
+    /// Pretend as if all refs (branches, remote-tracking branches, and
+    /// tags) and the current HEAD are listed as `<SPEC>`, in addition to any
+    /// explicit revisions.
+    #[clap(long)]
+    pub all: bool,
 
     /// Print only the number of commits after filters
     #[clap(long)]
@@ -163,7 +172,18 @@ pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult
 }
 
 async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
-    let selection = resolve_revision_selection(&args.specs, args.first_parent).await?;
+    // `--all` seeds the walk with every ref tip; explicit specs (incl `^`
+    // exclusions) are appended so they still apply.
+    let specs = if args.all {
+        let mut specs = all_ref_specs().await?;
+        specs.extend(args.specs.iter().cloned());
+        specs
+    } else {
+        args.specs.clone()
+    };
+    // `--all` supplies the ref set as the input; don't fall back to HEAD when
+    // that set (plus explicit specs) is empty (e.g. an unborn repository).
+    let selection = resolve_revision_selection(&specs, args.first_parent, !args.all).await?;
     let mut commits = selection.commits;
     sort_rev_list_commits(&mut commits);
     let children = build_rev_list_children(&commits);
@@ -279,6 +299,69 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         max_count: args.max_count,
         skip: args.skip,
     })
+}
+
+/// Collect a resolvable spec for every ref (local branches, remote-tracking
+/// branches, and tags) for `--all`. Branches/remote-tracking refs contribute
+/// their tip commit hash directly (unambiguous); tags contribute their name so
+/// the normal spec resolver peels annotated tags. The resolver de-duplicates
+/// the resulting commits.
+async fn all_ref_specs() -> CliResult<Vec<String>> {
+    let mut specs = Vec::new();
+
+    // Git's `--all` seeds from every ref in refs/ AND the current HEAD, so a
+    // detached-HEAD commit not pointed to by any branch/tag is still walked.
+    // An unborn HEAD (None) contributes nothing; the resolver de-duplicates a
+    // HEAD that coincides with a branch tip.
+    if let Some(head_commit) = Head::current_commit_result().await.map_err(|source| {
+        CliError::fatal(format!("failed to resolve HEAD: {source}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        specs.push(head_commit.to_string());
+    }
+
+    let branches = Branch::list_branches_result(None).await.map_err(|source| {
+        CliError::fatal(format!("failed to list branches: {source}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for branch in branches {
+        specs.push(branch.commit.to_string());
+    }
+
+    let remotes = ConfigKv::all_remote_configs().await.map_err(|source| {
+        CliError::fatal(format!("failed to list remotes: {source}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for remote in remotes {
+        let remote_branches = Branch::list_branches_result(Some(&remote.name))
+            .await
+            .map_err(|source| {
+                CliError::fatal(format!("failed to list remote branches: {source}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            })?;
+        for branch in remote_branches {
+            specs.push(branch.commit.to_string());
+        }
+    }
+
+    let tags = tag::list().await.map_err(|source| {
+        CliError::fatal(format!("failed to list tags: {source}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for t in tags {
+        // Seed by the ref target's object id (unambiguous) rather than the tag
+        // name — a same-named branch would otherwise shadow the tag and drop
+        // its tag-only commits. The resolver peels annotated-tag objects.
+        let oid = match &t.object {
+            tag::TagObject::Commit(commit) => commit.id,
+            tag::TagObject::Tag(tag_obj) => tag_obj.id,
+            tag::TagObject::Tree(tree) => tree.id,
+            tag::TagObject::Blob(blob) => blob.id,
+        };
+        specs.push(oid.to_string());
+    }
+
+    Ok(specs)
 }
 
 fn rev_list_count_fields(commits: &[RevListSelectedCommit], args: &RevListArgs) -> Vec<usize> {

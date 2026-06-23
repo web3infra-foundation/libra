@@ -19,6 +19,7 @@ libra rev-list [OPTIONS] [SPEC]
 | `-n <N>`, `--max-count <N>` | 排序后最多输出 `N` 个提交。 |
 | `--skip <N>` | 输出或计数前跳过前 `N` 个提交。 |
 | `--reverse` | 反转所选提交的输出顺序。先应用提交限制（`--max-count`/`--skip`），再反转结果。 |
+| `--all` | 以所有 ref（分支、远程跟踪分支和标签）和当前 HEAD 为遍历起点，叠加于任何显式 `<SPEC>`。 |
 | `--count` | 只打印过滤后的提交数量。 |
 | `--merges` | 只打印至少有两个父提交的 merge commit。 |
 | `--no-merges` | 排除至少有两个父提交的 merge commit。 |
@@ -36,6 +37,7 @@ libra rev-list HEAD
 libra rev-list --count HEAD
 libra rev-list -n 5 HEAD
 libra rev-list --reverse HEAD
+libra rev-list --all
 libra rev-list --skip 5 --max-count 10 HEAD
 libra rev-list --merges HEAD
 libra rev-list --no-merges HEAD

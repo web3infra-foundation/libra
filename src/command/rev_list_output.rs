@@ -22,6 +22,7 @@ EXAMPLES:
     libra rev-list --count HEAD     Count reachable commits after filters
     libra rev-list -n 5 HEAD        Limit output to the first five commits
     libra rev-list --reverse HEAD   Print reachable commits oldest first
+    libra rev-list --all            Walk every branch, remote-tracking, and tag ref
     libra rev-list main feature     Walk from multiple revisions, de-duplicated
     libra rev-list ^main feature    Exclude commits reachable from main
     libra rev-list main..feature    Walk commits reachable from feature, not main

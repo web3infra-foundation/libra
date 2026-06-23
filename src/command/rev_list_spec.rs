@@ -35,8 +35,9 @@ enum RevisionTerm<'a> {
 pub(super) async fn resolve_revision_selection(
     specs: &[String],
     first_parent: bool,
+    default_to_head: bool,
 ) -> CliResult<RevListSelection> {
-    let input_terms = normalized_inputs(specs);
+    let input_terms = normalized_inputs(specs, default_to_head);
     let mut included = Vec::<Commit>::new();
     let mut included_ids = HashSet::<String>::new();
     let mut excluded = HashSet::<String>::new();
@@ -98,8 +99,10 @@ pub(super) async fn resolve_revision_selection(
     })
 }
 
-fn normalized_inputs(specs: &[String]) -> Vec<String> {
-    if specs.is_empty() {
+fn normalized_inputs(specs: &[String], default_to_head: bool) -> Vec<String> {
+    if specs.is_empty() && default_to_head {
+        // Bare `rev-list` walks HEAD; but `--all` supplies the ref set as the
+        // input, so an empty set there must stay empty (not fall back to HEAD).
         vec!["HEAD".to_string()]
     } else {
         specs.to_vec()

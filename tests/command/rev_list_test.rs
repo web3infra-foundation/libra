@@ -281,3 +281,155 @@ fn test_rev_list_reverse_outputs_oldest_first() {
         "limit-then-reverse keeps the newest"
     );
 }
+
+#[test]
+fn test_rev_list_all_includes_every_ref() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let rev = |spec: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", spec], p).stdout)
+            .trim()
+            .to_string()
+    };
+    let c1 = rev("HEAD");
+
+    // A divergent commit on branch `other`.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(&run_libra_command(&["switch", "other"], p), "switch other");
+    std::fs::write(p.join("other.txt"), "o\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "other.txt"], p), "add other");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = rev("HEAD");
+
+    // Advance main with its own commit.
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("main.txt"), "m\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "main.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c3", "--no-verify"], p),
+        "commit c3",
+    );
+    let c3 = rev("HEAD");
+
+    // `rev-list main` sees main's history but not the `other` branch tip.
+    let main_only = run_libra_command(&["rev-list", "main"], p);
+    assert_cli_success(&main_only, "rev-list main");
+    let s = String::from_utf8_lossy(&main_only.stdout).into_owned();
+    assert!(s.contains(&c3) && s.contains(&c1), "main has c3+c1: {s:?}");
+    assert!(!s.contains(&c2), "main must not see other's c2: {s:?}");
+
+    // `rev-list --all` includes every ref tip's history.
+    let all = run_libra_command(&["rev-list", "--all"], p);
+    assert_cli_success(&all, "rev-list --all");
+    let s_all = String::from_utf8_lossy(&all.stdout).into_owned();
+    assert!(
+        s_all.contains(&c1) && s_all.contains(&c2) && s_all.contains(&c3),
+        "--all must include c1, c2 (other), and c3 (main): {s_all:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_all_includes_tag_only_commits() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let rev = |spec: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", spec], p).stdout)
+            .trim()
+            .to_string()
+    };
+    let c1 = rev("HEAD");
+
+    // Commit c2 and tag it, then reset main back to c1 so c2 is reachable ONLY
+    // via the tag (not from any branch).
+    std::fs::write(p.join("t.txt"), "t\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "t.txt"], p), "add t");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = rev("HEAD");
+    assert_cli_success(&run_libra_command(&["tag", "mytag"], p), "tag mytag at c2");
+    assert_cli_success(
+        &run_libra_command(&["reset", "--hard", &c1], p),
+        "reset main to c1",
+    );
+
+    // main no longer reaches c2.
+    let main_only = run_libra_command(&["rev-list", "main"], p);
+    assert_cli_success(&main_only, "rev-list main");
+    assert!(
+        !String::from_utf8_lossy(&main_only.stdout).contains(&c2),
+        "main must not reach the tag-only commit c2"
+    );
+
+    // --all reaches c2 through the tag (seeded by object id, not name).
+    let all = run_libra_command(&["rev-list", "--all"], p);
+    assert_cli_success(&all, "rev-list --all");
+    let s = String::from_utf8_lossy(&all.stdout).into_owned();
+    assert!(
+        s.contains(&c1) && s.contains(&c2),
+        "--all must include the tag-only commit c2: {s:?}"
+    );
+}
+
+#[test]
+fn test_rev_list_all_on_unborn_repo_is_empty() {
+    // `--all` supplies the ref set as input; with no refs the output is empty
+    // (exit 0), not a fallback to an unborn HEAD error.
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let out = run_libra_command(&["rev-list", "--all"], repo.path());
+    assert_cli_success(&out, "rev-list --all on an unborn repo");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "no refs -> empty output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn test_rev_list_all_includes_detached_head_commit() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let rev = |spec: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", spec], p).stdout)
+            .trim()
+            .to_string()
+    };
+    let c1 = rev("HEAD");
+
+    // Detach HEAD, then make a commit reachable only from the detached HEAD.
+    assert_cli_success(
+        &run_libra_command(&["switch", "--detach", &c1], p),
+        "detach HEAD",
+    );
+    std::fs::write(p.join("d.txt"), "d\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "d.txt"], p), "add d");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "detached", "--no-verify"], p),
+        "commit detached",
+    );
+    let cdet = rev("HEAD");
+    assert_ne!(cdet, c1, "detached commit must advance HEAD");
+
+    // main does not reach the detached commit.
+    let main_only = run_libra_command(&["rev-list", "main"], p);
+    assert_cli_success(&main_only, "rev-list main");
+    assert!(
+        !String::from_utf8_lossy(&main_only.stdout).contains(&cdet),
+        "main must not reach the detached commit"
+    );
+
+    // --all includes the detached HEAD commit (Git seeds --all with HEAD too).
+    let all = run_libra_command(&["rev-list", "--all"], p);
+    assert_cli_success(&all, "rev-list --all");
+    assert!(
+        String::from_utf8_lossy(&all.stdout).contains(&cdet),
+        "--all must include the detached HEAD commit: {}",
+        String::from_utf8_lossy(&all.stdout)
+    );
+}
