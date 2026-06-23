@@ -1005,3 +1005,61 @@ fn test_diff_summary_lists_creates_and_deletes() {
         "summary lists the deleted file in git's format: {s:?}"
     );
 }
+
+#[test]
+fn test_diff_shortstat_exit_code_and_no_patch() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("tracked.txt"), "tracked\nupdated line\n").unwrap();
+
+    // --shortstat: just the trailing summary line (no per-file rows).
+    let ss = run_libra_command(&["diff", "--shortstat"], p);
+    assert!(ss.status.success(), "shortstat exits 0 without --exit-code");
+    let s = String::from_utf8_lossy(&ss.stdout);
+    assert!(s.contains("1 file changed"), "shortstat summary: {s:?}");
+    assert!(
+        !s.contains(" | "),
+        "shortstat omits the per-file rows: {s:?}"
+    );
+    assert_eq!(
+        s.lines().filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "shortstat is a single line: {s:?}"
+    );
+
+    // --exit-code: still prints the diff, but exits 1 when there are changes.
+    let ec = run_libra_command(&["diff", "--exit-code"], p);
+    assert_eq!(ec.status.code(), Some(1), "exit-code is 1 when changed");
+    assert!(
+        !String::from_utf8_lossy(&ec.stdout).trim().is_empty(),
+        "--exit-code still prints the diff body"
+    );
+
+    // -s / --no-patch: suppress the body; exit 0 without --exit-code.
+    let no_patch = run_libra_command(&["diff", "-s"], p);
+    assert!(no_patch.status.success(), "--no-patch exits 0 on its own");
+    assert!(
+        String::from_utf8_lossy(&no_patch.stdout).trim().is_empty(),
+        "--no-patch suppresses the diff body"
+    );
+
+    // -s --exit-code: no body, exit 1.
+    let both = run_libra_command(&["diff", "-s", "--exit-code"], p);
+    assert_eq!(both.status.code(), Some(1), "--no-patch + --exit-code = 1");
+    assert!(
+        String::from_utf8_lossy(&both.stdout).trim().is_empty(),
+        "--no-patch still suppresses the body with --exit-code"
+    );
+
+    // --exit-code applies in JSON mode too: still emit JSON, but exit 1.
+    let json = run_libra_command(&["--json", "diff", "--exit-code"], p);
+    assert_eq!(
+        json.status.code(),
+        Some(1),
+        "--json --exit-code exits 1 on changes"
+    );
+    assert!(
+        String::from_utf8_lossy(&json.stdout).contains("\"files_changed\""),
+        "--json --exit-code still emits the JSON payload"
+    );
+}

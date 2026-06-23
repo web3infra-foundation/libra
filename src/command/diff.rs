@@ -42,6 +42,8 @@ EXAMPLES:
     libra diff --staged                     Compare HEAD against the index
     libra diff --old HEAD~1 --new HEAD      Compare two revisions
     libra diff --stat src/                  Show diff statistics under src/
+    libra diff --shortstat                  Show just the files-changed/insertions/deletions line
+    libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra --json diff --staged              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -97,6 +99,21 @@ pub struct DiffArgs {
     /// Show a condensed summary of created and deleted files
     #[clap(long)]
     pub summary: bool,
+
+    /// Output only the last line of `--stat`: the files-changed / insertions /
+    /// deletions summary.
+    #[clap(long)]
+    pub shortstat: bool,
+
+    /// Exit with code 1 when there are differences, 0 when there are none
+    /// (the diff is still printed, unlike `--quiet`).
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
+
+    /// Suppress the patch (diff body) output. Combine with `--exit-code` for a
+    /// status-only check.
+    #[clap(short = 's', long = "no-patch")]
+    pub no_patch: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -616,7 +633,10 @@ fn render_diff_output(
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
-        return emit_json_data("diff", result, output);
+        emit_json_data("diff", result, output)?;
+        // `--exit-code` applies regardless of output format: emit the JSON, then
+        // signal differences via the process status.
+        return diff_exit_result(args, result);
     }
 
     if output.quiet && args.output.is_none() {
@@ -652,8 +672,14 @@ fn render_diff_output(
             .join("\n")
     } else if args.stat {
         format_diff_stat_output(result)
+    } else if args.shortstat {
+        format_diff_shortstat_output(result)
     } else if args.summary {
         format_diff_summary(result)
+    } else if args.no_patch {
+        // `-s` / `--no-patch`: suppress the patch body (used for status-only
+        // checks, typically with `--exit-code`).
+        String::new()
     } else {
         format_unified_diff(result)
     };
@@ -668,7 +694,7 @@ fn render_diff_output(
         if output.quiet && result.files_changed > 0 {
             return Err(CliError::silent_exit(1));
         }
-        return Ok(());
+        return diff_exit_result(args, result);
     }
 
     if output.quiet {
@@ -679,18 +705,35 @@ fn render_diff_output(
     }
 
     if rendered.is_empty() {
-        return Ok(());
+        return diff_exit_result(args, result);
     }
     let mut pager = Pager::with_config(output)?;
-    let rendered =
-        if args.name_only || args.name_status || args.numstat || args.stat || args.summary {
-            rendered
-        } else {
-            maybe_colorize_diff(&rendered, io::stdout().is_terminal())
-        };
+    let rendered = if args.name_only
+        || args.name_status
+        || args.numstat
+        || args.stat
+        || args.shortstat
+        || args.summary
+    {
+        rendered
+    } else {
+        maybe_colorize_diff(&rendered, io::stdout().is_terminal())
+    };
     pager.write_str(&format!("{rendered}\n"))?;
     pager.finish()?;
-    Ok(())
+    diff_exit_result(args, result)
+}
+
+/// `--exit-code`: exit 1 when the diff is non-empty, 0 otherwise. The diff
+/// output (if any) has already been emitted by the time this is called, so the
+/// silent exit only sets the process status (unlike `--quiet`, which also
+/// suppresses output).
+fn diff_exit_result(args: &DiffArgs, result: &DiffOutput) -> CliResult<()> {
+    if args.exit_code && result.files_changed > 0 {
+        Err(CliError::silent_exit(1))
+    } else {
+        Ok(())
+    }
 }
 
 /// Render `--summary`: one line per created or deleted file (plain content
@@ -755,6 +798,9 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         numstat: false,
         stat: false,
         summary: false,
+        shortstat: false,
+        exit_code: false,
+        no_patch: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))
@@ -766,6 +812,39 @@ fn maybe_colorize_diff(diff_text: &str, should_colorize: bool) -> String {
     } else {
         diff_text.to_string()
     }
+}
+
+/// Render `--shortstat`: just the trailing summary line of `--stat`, omitting
+/// the insertion/deletion clause when its count is zero (matching Git, which
+/// shows e.g. ` 1 file changed, 2 insertions(+)` with no deletions clause).
+fn format_diff_shortstat_output(result: &DiffOutput) -> String {
+    if result.files.is_empty() {
+        return String::new();
+    }
+    let mut line = format!(
+        " {} file{} changed",
+        result.files_changed,
+        if result.files_changed == 1 { "" } else { "s" }
+    );
+    if result.total_insertions > 0 {
+        line.push_str(&format!(
+            ", {} insertion{}(+)",
+            result.total_insertions,
+            if result.total_insertions == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if result.total_deletions > 0 {
+        line.push_str(&format!(
+            ", {} deletion{}(-)",
+            result.total_deletions,
+            if result.total_deletions == 1 { "" } else { "s" }
+        ));
+    }
+    line
 }
 
 fn format_diff_stat_output(result: &DiffOutput) -> String {
