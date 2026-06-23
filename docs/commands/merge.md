@@ -5,7 +5,7 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -18,13 +18,19 @@ If the current branch can be fast-forwarded, Libra moves the branch pointer to t
 
 Clean three-way merges create a two-parent merge commit, update HEAD, rebuild the index, restore the working tree, and write a merge reflog entry. Conflicting three-way merges write conflict markers to the working tree, write unmerged index stages, save Libra merge state, and return `LBR-CONFLICT-002` with hints for `libra merge --continue` and `libra merge --abort`.
 
-Libra still does not implement octopus merges, custom strategies, `--squash`, `--no-ff`, strategy options, message editing, or signature verification.
+Libra still does not implement octopus merges, custom strategies, strategy options, interactive message editing (`--edit`/launching an editor), or signature verification.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
 | `<branch>` | Target branch, commit, or remote-tracking ref to merge. |
+| `-m, --message <MSG>` | Override the merge commit message (default `Merge <branch> into <head>`). |
+| `--ff-only` | Refuse to merge unless the current branch can be fast-forwarded. |
+| `--no-ff` | Always create a two-parent merge commit, even when a fast-forward is possible. |
+| `--squash` | Produce the merged index/working tree but create no commit and do not move HEAD; finish with a plain `libra commit`. |
+| `--no-commit` | Perform the merge and stage the result but stop before committing; finish with `libra merge --continue`. |
+| `--no-edit` | Accept the auto-generated merge message without launching an editor. Libra never opens an editor for merge, so this is a no-op accepted for Git parity. |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
 | `--json` | Emit a structured success envelope. |
@@ -117,9 +123,13 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | Single-head three-way | Supported | Supported | N/A |
 | Continue / abort | `--continue`, `--abort` | `--continue`, `--abort` | N/A |
 | Octopus merge | Not supported | Supported | N/A |
-| Squash | Not supported | `--squash` | N/A |
+| Fast-forward only | `--ff-only` | `--ff-only` | N/A |
+| Force merge commit | `--no-ff` | `--no-ff` | N/A |
+| Squash | `--squash` | `--squash` | N/A |
+| No-commit | `--no-commit` | `--no-commit` | N/A |
+| Commit message | `-m <msg>` | `-m <msg>` | N/A |
+| No editor | `--no-edit` (no-op; never edits) | `--no-edit` | N/A |
 | Custom strategy | Not supported | `--strategy`, `-X` | N/A |
-| Commit message | Not supported | `-m <msg>` | N/A |
 | Verify signatures | Not supported | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
 

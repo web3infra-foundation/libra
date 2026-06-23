@@ -50,6 +50,7 @@ pub const MERGE_EXAMPLES: &str = "\
 EXAMPLES:
     libra merge feature-x          Fast-forward current branch onto feature-x if possible
     libra merge origin/main        Fast-forward onto a remote-tracking branch
+    libra merge feature-x --no-edit  Accept the default merge message (no editor)
     libra merge --continue         Finish an in-progress merge after resolving conflicts
     libra merge --abort            Restore the pre-merge HEAD, index, and worktree
     libra merge --json feature-x   Structured JSON output for agents
@@ -94,6 +95,12 @@ pub struct MergeArgs {
     /// recording merge state; finalize with `libra merge --continue`.
     #[arg(long = "no-commit", conflicts_with_all = ["squash", "ff_only", "continue_merge", "abort"])]
     pub no_commit: bool,
+
+    /// Accept the auto-generated merge message without launching an editor.
+    /// Libra never opens an editor for merge (it uses `-m` or the default
+    /// message), so this is accepted for Git parity and is a no-op.
+    #[arg(long = "no-edit")]
+    pub no_edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

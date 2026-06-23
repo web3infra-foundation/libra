@@ -967,3 +967,35 @@ fn test_merge_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+fn test_merge_no_edit_accepts_default_message() {
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    // `--no-edit` accepts the auto-generated merge message without an editor
+    // (Libra never opens one, so this behaves like a plain three-way merge).
+    let output = run_libra_command(&["merge", "feature", "--no-edit"], temp_path);
+    assert_cli_success(&output, "merge feature --no-edit");
+    let log = run_libra_command(&["log", "--oneline", "-n", "1"], temp_path);
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("Merge feature into main"),
+        "merge commit landed with the default message: {:?}",
+        String::from_utf8_lossy(&log.stdout)
+    );
+}
