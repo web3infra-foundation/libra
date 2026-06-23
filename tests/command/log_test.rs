@@ -2378,3 +2378,75 @@ fn log_format_is_alias_for_pretty() {
     let both = run_libra_command(&["log", "--format=%s", "--pretty=%s", "-1"], p);
     assert!(!both.status.success(), "--format conflicts with --pretty");
 }
+
+#[test]
+fn log_parents_and_children_annotate_commit_lines() {
+    use std::fs;
+
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let head = |s: &str| {
+        let out = run_libra_command(&["rev-parse", s], p);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let short = |full: &str| full.chars().take(7).collect::<String>();
+
+    let c0 = head("HEAD");
+    fs::write(p.join("a.txt"), "a\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "a.txt"], p), "add a");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "c1",
+    );
+    let c1 = head("HEAD");
+    fs::write(p.join("b.txt"), "b\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], p), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "c2",
+    );
+    let c2 = head("HEAD");
+
+    // --parents: c1's line carries c0 (its parent); c2's carries c1.
+    let parents = run_libra_command(&["log", "--oneline", "--parents"], p);
+    assert_cli_success(&parents, "log --oneline --parents");
+    let pj = String::from_utf8_lossy(&parents.stdout).into_owned();
+    let c1_line = pj
+        .lines()
+        .find(|l| l.starts_with(&short(&c1)))
+        .expect("c1 line");
+    assert!(
+        c1_line.contains(&short(&c0)),
+        "c1 line must show parent c0: {c1_line:?}"
+    );
+
+    // --children: c0's line carries c1 (its child in range); c1's carries c2.
+    let children = run_libra_command(&["log", "--oneline", "--children"], p);
+    assert_cli_success(&children, "log --oneline --children");
+    let cj = String::from_utf8_lossy(&children.stdout).into_owned();
+    let c0_line = cj
+        .lines()
+        .find(|l| l.starts_with(&short(&c0)))
+        .expect("c0 line");
+    assert!(
+        c0_line.contains(&short(&c1)),
+        "c0 line must show child c1: {c0_line:?}"
+    );
+    let c1_cline = cj
+        .lines()
+        .find(|l| l.starts_with(&short(&c1)))
+        .expect("c1 line");
+    assert!(
+        c1_cline.contains(&short(&c2)),
+        "c1 line must show child c2: {c1_cline:?}"
+    );
+
+    // --parents and --children are mutually exclusive.
+    let conflict = run_libra_command(&["log", "--parents", "--children"], p);
+    assert!(
+        !conflict.status.success(),
+        "--parents conflicts with --children"
+    );
+}

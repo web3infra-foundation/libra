@@ -224,6 +224,20 @@ relative to the current directory.
 libra log --follow src/main.rs
 ```
 
+### `--parents` / `--children`
+
+Append commit ids after each commit hash. `--parents` shows each commit's parent
+ids; `--children` shows, for each commit, the ids of the *other commits in this
+log's output* that have it as a parent (the child map is built over the rendered
+commit set, so children outside the shown range are not listed). The ids use the
+same abbreviation as the commit hash and appear in the full and oneline formats.
+The two flags are mutually exclusive.
+
+```bash
+libra log --oneline --parents
+libra log --children
+```
+
 ### `-L <RANGE:FILE>`
 
 Accept Git-style line-range syntax. Full blame-level precision is not yet

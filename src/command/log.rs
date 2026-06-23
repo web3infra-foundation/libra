@@ -49,6 +49,7 @@ EXAMPLES:
     libra log --grep 'fix(' -n 20          Filter commits by message substring
     libra log --name-status src/           Show changed files under src/
     libra log --shortstat -n 5             Show just the diffstat summary line
+    libra log --oneline --parents          Show parent ids after each commit hash
     libra --json log -n 1                  Structured JSON output for agents";
 
 fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
@@ -129,6 +130,14 @@ pub struct LogArgs {
     /// Show full hash
     #[clap(long)]
     pub no_abbrev_commit: bool,
+
+    /// Print the parent commit ids after each commit hash (Git's `--parents`).
+    #[clap(long, conflicts_with = "children")]
+    pub parents: bool,
+    /// Print the child commit ids (within the shown range) after each commit
+    /// hash (Git's `--children`).
+    #[clap(long, conflicts_with = "parents")]
+    pub children: bool,
 
     /// Show diffs for each commit (like git -p)
     #[clap(short = 'p', long = "patch")]
@@ -1105,6 +1114,29 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         full_hash_len
     };
+    // For `--children`, map each shown commit to the shown commits that list it
+    // as a parent (built before the loop consumes `selected_commits`).
+    let child_map: std::collections::HashMap<String, Vec<String>> = if args.children {
+        let visible: std::collections::HashSet<String> = selected_commits
+            .iter()
+            .map(|s| s.commit.id.to_string())
+            .collect();
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for selected in &selected_commits {
+            let child = selected.commit.id.to_string();
+            for parent in &selected.commit.parent_commit_ids {
+                let parent_id = parent.to_string();
+                if visible.contains(&parent_id) {
+                    map.entry(parent_id).or_default().push(child.clone());
+                }
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
     for (index, selected) in selected_commits.into_iter().enumerate() {
         let SelectedLogCommit {
             commit,
@@ -1191,10 +1223,37 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
             String::new()
         };
 
+        // `--parents`/`--children` append abbreviated ids after the commit hash;
+        // children are limited to the commits in this log's rendered output (the
+        // `child_map` is built over `selected_commits`), so out-of-range children
+        // are not listed.
+        let abbreviate = |id: &str| id.chars().take(abbrev_len).collect::<String>();
+        let extra_hashes = if args.parents {
+            commit
+                .parent_commit_ids
+                .iter()
+                .map(|p| abbreviate(&p.to_string()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else if args.children {
+            child_map
+                .get(&commit.id.to_string())
+                .map(|kids| {
+                    kids.iter()
+                        .map(|c| abbreviate(c))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let ctx = FormatContext {
             graph_prefix: &graph_prefix,
             decoration: &ref_msg,
             abbrev_len,
+            extra_hashes: &extra_hashes,
         };
         let mut message = formatter.format(&commit, &ctx);
 

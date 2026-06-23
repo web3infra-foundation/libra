@@ -22,6 +22,10 @@ pub struct FormatContext<'a> {
     pub graph_prefix: &'a str,
     pub decoration: &'a str,
     pub abbrev_len: usize,
+    /// Pre-formatted parent or child commit ids (already abbreviated and
+    /// space-joined) appended after the commit hash for `--parents`/`--children`
+    /// in the full and oneline formats. Empty when neither flag is set.
+    pub extra_hashes: &'a str,
 }
 
 pub struct CommitFormatter {
@@ -66,6 +70,10 @@ impl CommitFormatter {
             "commit".yellow(),
             display_hash.yellow()
         );
+        if !ctx.extra_hashes.is_empty() {
+            header.push(' ');
+            header.push_str(ctx.extra_hashes);
+        }
         if !ctx.decoration.is_empty() {
             header.push_str(&format!(" ({})", ctx.decoration));
         }
@@ -102,15 +110,20 @@ impl CommitFormatter {
         let (subject, _) = parse_commit_msg(&commit.message);
         let first_line = subject.lines().next().unwrap_or("");
 
+        // Parent/child ids (when `--parents`/`--children`) sit right after the
+        // hash, before any ref decoration, matching Git.
+        let hash_part = if ctx.extra_hashes.is_empty() {
+            short_hash.yellow().to_string()
+        } else {
+            format!("{} {}", short_hash.yellow(), ctx.extra_hashes)
+        };
+
         if ctx.decoration.is_empty() {
-            format!("{}{} {}", ctx.graph_prefix, short_hash.yellow(), first_line)
+            format!("{}{} {}", ctx.graph_prefix, hash_part, first_line)
         } else {
             format!(
                 "{}{} ({}) {}",
-                ctx.graph_prefix,
-                short_hash.yellow(),
-                ctx.decoration,
-                first_line
+                ctx.graph_prefix, hash_part, ctx.decoration, first_line
             )
         }
     }
@@ -198,6 +211,7 @@ mod tests {
             graph_prefix: "",
             decoration: "",
             abbrev_len: 7,
+            extra_hashes: "",
         };
         let out = formatter.format(&commit, &ctx);
         assert!(out.contains(" - Test subject"));
@@ -221,6 +235,7 @@ mod tests {
             graph_prefix: "* ",
             decoration: "tag: v1.0",
             abbrev_len: 8,
+            extra_hashes: "",
         };
 
         let out = formatter.format(&commit, &ctx);

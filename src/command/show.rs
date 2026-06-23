@@ -567,6 +567,7 @@ fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
             graph_prefix: "",
             decoration: "",
             abbrev_len: 7,
+            extra_hashes: "",
         };
         output.push_str(&formatter.format(commit, &ctx));
         output.push('\n');
