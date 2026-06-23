@@ -70,6 +70,7 @@ EXAMPLES:
     libra branch --sort version:refname   List branches sorted by version-aware name
     libra branch --column                 List branches laid out in columns
     libra branch -v                       List branches with tip sha and subject
+    libra branch -vv                      Also show upstream tracking [ahead/behind]
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -270,8 +271,8 @@ pub struct BranchArgs {
     pub column: Option<String>,
 
     /// Show the sha1 and commit subject line for each branch (`-v`). Repeat
-    /// (`-vv`) for more verbosity; Git's `-vv` upstream-tracking detail is not
-    /// yet shown, so `-v` and `-vv` currently render the same.
+    /// (`-vv`) to also show the upstream-tracking segment
+    /// `[<upstream>: ahead N, behind M]` for branches with a configured upstream.
     #[clap(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 }
@@ -298,7 +299,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
         super::tag::resolve_column_enabled(mode)?;
     }
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output, args.column.as_deref(), args.verbose)?;
+    render_branch_output(&result, output, args.column.as_deref(), args.verbose).await?;
     if result.mutated_repo_state() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
     }
@@ -1287,10 +1288,12 @@ fn format_branch_columns(entries: &[String], width: usize) -> String {
     out
 }
 
-/// Build the `-v` suffix (` <short-sha> <subject>`) for a branch's tip commit.
-/// The short sha is always shown (Git lists it regardless); the subject is
-/// best-effort and omitted if the commit object cannot be loaded.
-fn branch_verbose_suffix(commit_hash: &str) -> String {
+/// Build the `-v`/`-vv` suffix for a branch's tip commit. The short sha is
+/// always shown (Git lists it regardless); the subject is best-effort and
+/// omitted if the commit object cannot be loaded. At verbosity >= 2 (`-vv`) the
+/// upstream-tracking segment (`[<upstream>: ahead N, behind M]`) is inserted
+/// between the sha and the subject for branches with a configured upstream.
+async fn branch_verbose_suffix(branch_name: &str, commit_hash: &str, verbose: u8) -> String {
     let short = short_display_hash(commit_hash);
     let subject = commit_hash
         .parse::<ObjectHash>()
@@ -1305,11 +1308,58 @@ fn branch_verbose_suffix(commit_hash: &str) -> String {
                 .to_string()
         })
         .unwrap_or_default();
-    if subject.is_empty() {
-        format!(" {short}")
+    let upstream = if verbose >= 2 {
+        branch_upstream_segment(branch_name, commit_hash).await
     } else {
-        format!(" {short} {subject}")
+        None
+    };
+    // Assemble `<sha> [<upstream>] <subject>`, omitting empty parts and keeping
+    // single-space separation.
+    let mut parts = vec![short.to_string()];
+    if let Some(segment) = upstream {
+        parts.push(segment);
     }
+    if !subject.is_empty() {
+        parts.push(subject);
+    }
+    format!(" {}", parts.join(" "))
+}
+
+/// Resolve the `[<upstream>: ahead N, behind M]` tracking segment for a local
+/// branch (`-vv`). Returns `None` when the branch has no configured upstream.
+/// When the remote-tracking ref cannot be resolved (e.g. never fetched), the
+/// ahead/behind counts are omitted and only `[<upstream>]` is shown.
+async fn branch_upstream_segment(branch_name: &str, branch_commit: &str) -> Option<String> {
+    let remote = ConfigKv::get(&format!("branch.{branch_name}.remote"))
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)?;
+    let merge = ConfigKv::get(&format!("branch.{branch_name}.merge"))
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)?;
+    let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    let upstream_display = format!("{remote}/{merge_short}");
+    let remote_ref = format!("refs/remotes/{remote}/{merge_short}");
+
+    let counts = match get_target_commit(&remote_ref).await {
+        Ok(upstream_commit) => branch_commit
+            .parse::<ObjectHash>()
+            .ok()
+            .map(|local| super::status::compute_ahead_behind(&local, &upstream_commit)),
+        Err(_) => None,
+    };
+    let segment = match counts {
+        Some((ahead, behind)) if ahead > 0 && behind > 0 => {
+            format!("[{upstream_display}: ahead {ahead}, behind {behind}]")
+        }
+        Some((ahead, _)) if ahead > 0 => format!("[{upstream_display}: ahead {ahead}]"),
+        Some((_, behind)) if behind > 0 => format!("[{upstream_display}: behind {behind}]"),
+        _ => format!("[{upstream_display}]"),
+    };
+    Some(segment)
 }
 
 /// Render [`BranchOutput`] for the chosen output mode.
@@ -1320,7 +1370,7 @@ fn branch_verbose_suffix(commit_hash: &str) -> String {
 ///   sorts so the current branch sits at the top, prints a "detached at"
 ///   banner when relevant, and shows an unborn HEAD label as appropriate.
 ///   `--column` lays the list out in columns instead of one branch per line.
-fn render_branch_output(
+async fn render_branch_output(
     result: &BranchOutput,
     output: &OutputConfig,
     column: Option<&str>,
@@ -1395,7 +1445,7 @@ fn render_branch_output(
             } else {
                 for branch in sorted {
                     let suffix = if verbose >= 1 {
-                        branch_verbose_suffix(&branch.commit)
+                        branch_verbose_suffix(&branch.name, &branch.commit, verbose).await
                     } else {
                         String::new()
                     };
@@ -1576,6 +1626,7 @@ pub async fn list_branches(
         args.column.as_deref(),
         args.verbose,
     )
+    .await
 }
 
 /// Filter given branches by whether they contain or don't contain certain commits.

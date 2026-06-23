@@ -1819,7 +1819,7 @@ async fn resolve_upstream_info(
 /// common ancestor) this visits all reachable commits from both sides.
 /// Falls back gracefully when a commit object is missing or corrupt
 /// (e.g. shallow clone) by stopping traversal on that branch.
-fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
+pub(crate) fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
     if local == remote {
         return (0, 0);
     }

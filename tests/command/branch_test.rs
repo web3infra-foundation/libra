@@ -2196,3 +2196,45 @@ fn branch_verbose_shows_sha_and_subject() {
         );
     }
 }
+
+#[test]
+fn branch_vv_shows_upstream_segment() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "create feature",
+    );
+
+    // Configure an upstream for `feature`.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.feature.remote", "origin"], p),
+        "set remote",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.feature.merge", "refs/heads/feature"], p),
+        "set merge",
+    );
+
+    // `-vv` shows the upstream tracking segment for `feature`; the remote-tracking
+    // ref is not fetched, so the ahead/behind counts are omitted.
+    let vv = run_libra_command(&["branch", "-vv"], p);
+    assert_cli_success(&vv, "branch -vv");
+    let vv_out = String::from_utf8_lossy(&vv.stdout);
+    let feature_line = vv_out
+        .lines()
+        .find(|l| l.contains("feature"))
+        .expect("feature line");
+    assert!(
+        feature_line.contains("[origin/feature]"),
+        "-vv shows the upstream segment: {feature_line:?}"
+    );
+
+    // `-v` does NOT show the upstream segment (only the sha + subject).
+    let v = run_libra_command(&["branch", "-v"], p);
+    assert_cli_success(&v, "branch -v");
+    assert!(
+        !String::from_utf8_lossy(&v.stdout).contains("[origin/feature]"),
+        "-v omits the upstream segment"
+    );
+}
