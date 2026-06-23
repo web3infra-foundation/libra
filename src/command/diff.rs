@@ -133,6 +133,12 @@ pub struct DiffArgs {
     /// and vice-versa (e.g. the patch that would undo the change).
     #[clap(short = 'R', long = "reverse")]
     pub reverse: bool,
+
+    /// Treat all files as text. Accepted for Git parity and is a no-op: Libra's
+    /// diff never performs binary detection, so it already shows the content
+    /// diff of every file (it never prints "Binary files differ").
+    #[clap(short = 'a', long = "text")]
+    pub text: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -934,6 +940,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         null: false,
         check: false,
         reverse: false,
+        text: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

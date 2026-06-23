@@ -1166,3 +1166,31 @@ fn test_diff_reverse_swaps_sides() {
     assert!(r.contains("-CHANGED"), "reverse removes CHANGED: {r:?}");
     assert!(r.contains("+line2"), "reverse adds line2: {r:?}");
 }
+
+#[test]
+fn diff_text_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Stage a change including a NUL byte (Git would call this "binary").
+    std::fs::write(p.join("data.bin"), b"line\x00\x01\x02\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "data.bin"], p),
+        "stage data.bin",
+    );
+
+    let plain = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&plain, "diff --cached");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+
+    // `--text` and its short `-a` are accepted and produce identical output:
+    // Libra's diff never detects binary files, so it already shows content.
+    for flag in ["--text", "-a"] {
+        let out = run_libra_command(&["diff", "--cached", flag], p);
+        assert_cli_success(&out, &format!("diff --cached {flag}"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            plain_out,
+            "diff --cached {flag} matches plain diff (no-op)"
+        );
+    }
+}

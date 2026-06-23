@@ -42,6 +42,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | NUL output | `-z` | `--null` | NUL-terminate `--name-only`/`--name-status`/`--numstat` records (and split the `--name-status` status and path into separate NUL fields); other modes are unaffected. |
 | Whitespace check | | `--check` | Instead of the diff, warn about whitespace errors on added lines (trailing whitespace and space-before-tab in the indent), printing `<path>:<line>: <message>` and exiting 2 when any are found. Git's blank-at-eof check is not performed; takes precedence over other output modes. |
 | Reverse | `-R` | `--reverse` | Swap the two sides so additions become deletions and vice-versa (the patch that would undo the change). |
+| Text | `-a` | `--text` | Treat all files as text. Accepted no-op: Libra's diff never detects binary files, so it always shows the content diff (it never prints "Binary files differ"). Distinct from `--binary` (binary-patch format), which is not supported. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -230,8 +231,9 @@ These Git options provide alternative diff presentations that are useful for pro
 | NUL-terminated output | `-z` / `--null` | `-z` | N/A |
 | Whitespace check | `--check` (trailing-ws / space-before-tab) | `--check` | N/A |
 | Reverse diff | `-R` / `--reverse` | `-R` | N/A |
+| Treat as text | `-a` / `--text` (no-op; always shown) | `-a` / `--text` | N/A |
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
-| Binary diff | Not supported | `--binary` | N/A |
+| Binary diff (binary patch) | Not supported | `--binary` | N/A |
 | Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |
 | Ignore whitespace | Not supported | `-w` / `--ignore-all-space` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
