@@ -1136,3 +1136,22 @@ fn test_stash_clear_force_removes_all_entries() {
         0
     );
 }
+
+#[test]
+fn stash_push_dash_k_is_keep_index_alias() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("k.txt"), "v1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "k.txt"], p), "stage k.txt");
+
+    // `-k` is the short alias for `--keep-index`; the push succeeds and the
+    // staged content is kept in the index.
+    let push = run_libra_command(&["stash", "push", "-k"], p);
+    assert_cli_success(&push, "stash push -k");
+    // The staged change is still present after `-k` (index kept).
+    let status = run_libra_command(&["status", "--short"], p);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("k.txt"),
+        "the staged file remains tracked after stash push -k"
+    );
+}

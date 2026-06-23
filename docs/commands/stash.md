@@ -5,7 +5,7 @@ Stash the changes in a dirty working directory away.
 ## Synopsis
 
 ```
-libra stash push [-m <message>] [-u | -a] [--keep-index]
+libra stash push [-m <message>] [-u | -a] [-k | --keep-index]
 libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
@@ -34,7 +34,7 @@ Save your local modifications to a new stash and clean the working directory.
 | Message | `-m` | `--message` | Optional descriptive message for the stash entry. If omitted, a default "WIP on `<branch>`: `<short-hash>` ..." message is generated. |
 | Include untracked | `-u` | `--include-untracked` | Include visible untracked files in the stash and remove them from the worktree. Ignored files remain in place. |
 | Include all | `-a` | `--all` | Include visible untracked and ignored files in the stash, then remove them from the worktree. |
-| Keep index |  | `--keep-index` | Keep staged changes in the index and restore the worktree to the staged content, removing only unstaged deltas. |
+| Keep index | `-k` | `--keep-index` | Keep staged changes in the index and restore the worktree to the staged content, removing only unstaged deltas. |
 
 ```bash
 # Save with default message

@@ -488,6 +488,7 @@ pub enum Stash {
         )]
         all: bool,
         #[arg(
+            short = 'k',
             long = "keep-index",
             help = "Keep staged changes in the index and working tree"
         )]

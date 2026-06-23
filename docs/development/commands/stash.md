@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`），`push` 支持 `-u` / `--include-untracked`、`-a` / `--all` 与 `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），同时把 patch 级差异（`-p` / `--patch`）以及 create/store 等 plumbing 子命令延后（详见“还未实现的功能”）。
+`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`），`push` 支持 `-u` / `--include-untracked`、`-a` / `--all` 与 `-k` / `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），同时把 patch 级差异（`-p` / `--patch`）以及 create/store 等 plumbing 子命令延后（详见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
@@ -48,14 +48,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/stash.md`。
 - Synopsis：`libra stash (push [-m <message>] | pop [<stash>] | list | apply [<stash>] | drop [<stash>] | show [<stash>] [--name-only | --name-status] | branch <branch> [<stash>] | clear [--force])`。
-- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [-a, --all] [--keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
+- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [-a, --all] [-k, --keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` 支持；`push` 支持 `-m`、`-u` / `--include-untracked`、`-a` / `--all`、`--keep-index`；`create` / `store` 延后 (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` 支持；`push` 支持 `-m`、`-u` / `--include-untracked`、`-a` / `--all`、`-k` / `--keep-index`；`create` / `store` 延后 (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Patch 级差异 (stash show) | 原始对照：不支持；相关参数/替代：-p / --patch；当前说明：`stash show` 仅产出文件级摘要（`--name-only` / `--name-status`），不输出统一 diff。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Pathspec (部分支持 stash) | 原始对照：不支持；相关参数/替代：-- <pathspec>...；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Plumbing create/store | 原始对照：不支持 (延后 — see compatibility/declined.md D8/D9)；相关参数/替代：stash create / stash store；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
