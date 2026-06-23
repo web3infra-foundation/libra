@@ -111,6 +111,18 @@ libra log --author alice
 libra log --author "alice@example.com"
 ```
 
+### `--grep <PATTERN>` / `-i` / `--invert-grep`
+
+按提交消息过滤。`--grep` 保留消息包含该（大小写敏感）子串的提交；`-i` /
+`--regexp-ignore-case` 改为大小写不敏感匹配（author/committer 在 Libra 中本就大小写不敏感）；
+`--invert-grep` 保留消息**不**匹配的提交。
+
+```bash
+libra log --grep "fix(" -n 20
+libra log --grep fix -i              # 大小写不敏感
+libra log --grep WIP --invert-grep   # 隐藏 WIP 提交
+```
+
 ### `--since <DATE>`
 
 显示晚于指定日期的提交。
@@ -377,6 +389,8 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 仅远程 | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
 | 修订范围 | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
 | Grep 消息 | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
+| 大小写不敏感 grep | `git log -i --grep=<pat>` | N/A | `libra log -i --grep <pat>` |
+| 反向 grep | `git log --invert-grep --grep=<pat>` | N/A | `libra log --invert-grep --grep <pat>` |
 | 路径过滤 | `git log -- <paths>` | N/A（使用 revset） | `libra log -- <paths>` |
 | 反向顺序 | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
 | 追踪重命名 | `git log --follow <file>` | N/A | `libra log --follow <file>` |

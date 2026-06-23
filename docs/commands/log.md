@@ -121,6 +121,19 @@ libra log --author alice
 libra log --author "alice@example.com"
 ```
 
+### `--grep <PATTERN>` / `-i` / `--invert-grep`
+
+Filter commits by message. `--grep` keeps commits whose message contains the
+(case-sensitive) substring. `-i` / `--regexp-ignore-case` makes the match
+case-insensitive (author/committer matching is already case-insensitive in
+Libra). `--invert-grep` keeps commits whose message does *not* match.
+
+```bash
+libra log --grep "fix(" -n 20
+libra log --grep fix -i              # case-insensitive
+libra log --grep WIP --invert-grep   # hide WIP commits
+```
+
 ### `--since <DATE>`
 
 Show commits more recent than the specified date.
@@ -417,6 +430,8 @@ flag only affects the human rendering layer.
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
 | Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
 | Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
+| Case-insensitive grep | `git log -i --grep=<pat>` | N/A | `libra log -i --grep <pat>` |
+| Invert grep | `git log --invert-grep --grep=<pat>` | N/A | `libra log --invert-grep --grep <pat>` |
 | Path filter | `git log -- <paths>` | N/A (use revset) | `libra log -- <paths>` |
 | Reverse order | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
 | Follow renames | `git log --follow <file>` | N/A | `libra log --follow <file>` |

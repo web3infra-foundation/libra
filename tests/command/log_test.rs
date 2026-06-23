@@ -2452,3 +2452,58 @@ fn log_parents_and_children_annotate_commit_lines() {
         "--parents conflicts with --children"
     );
 }
+
+#[test]
+fn log_grep_ignore_case_and_invert_grep() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for msg in ["Fix alpha", "add beta", "FIX gamma"] {
+        assert_cli_success(
+            &run_libra_command(&["commit", "--allow-empty", "-m", msg, "--no-verify"], p),
+            "commit",
+        );
+    }
+    let subjects = |args: &[&str]| -> String {
+        let out = run_libra_command(args, p);
+        assert!(out.status.success(), "log ok: {args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // Case-sensitive --grep matches only "Fix alpha".
+    let cs = subjects(&["log", "--oneline", "--grep", "Fix"]);
+    assert!(cs.contains("Fix alpha"), "cs: {cs:?}");
+    assert!(!cs.contains("FIX gamma"), "cs excludes other case: {cs:?}");
+    assert!(!cs.contains("add beta"), "cs excludes non-match: {cs:?}");
+
+    // -i makes it case-insensitive: both Fix/FIX match.
+    let ci = subjects(&["log", "--oneline", "--grep", "Fix", "-i"]);
+    assert!(
+        ci.contains("Fix alpha") && ci.contains("FIX gamma"),
+        "ci: {ci:?}"
+    );
+    assert!(
+        !ci.contains("add beta"),
+        "ci still excludes non-match: {ci:?}"
+    );
+
+    // --invert-grep keeps the non-matching commits (case-sensitive).
+    let inv = subjects(&["log", "--oneline", "--grep", "Fix", "--invert-grep"]);
+    assert!(
+        inv.contains("add beta") && inv.contains("FIX gamma"),
+        "inv: {inv:?}"
+    );
+    assert!(
+        !inv.contains("Fix alpha"),
+        "inv excludes the match: {inv:?}"
+    );
+
+    // -i + --invert-grep: exclude both Fix and FIX.
+    let both = subjects(&["log", "--oneline", "--grep", "Fix", "-i", "--invert-grep"]);
+    assert!(both.contains("add beta"), "both keeps non-match: {both:?}");
+    assert!(
+        !both.contains("Fix alpha") && !both.contains("FIX gamma"),
+        "both excludes all case-folded matches: {both:?}"
+    );
+}

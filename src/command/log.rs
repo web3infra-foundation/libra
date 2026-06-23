@@ -47,6 +47,8 @@ EXAMPLES:
     libra log --author alice                Filter commits by author (case-insensitive substring)
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
     libra log --grep 'fix(' -n 20          Filter commits by message substring
+    libra log --grep fix -i                Case-insensitive message grep
+    libra log --grep WIP --invert-grep     Hide commits whose message matches
     libra log --name-status src/           Show changed files under src/
     libra log --shortstat -n 5             Show just the diffstat summary line
     libra log --oneline --parents          Show parent ids after each commit hash
@@ -200,6 +202,15 @@ pub struct LogArgs {
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
 
+    /// Match `--grep` case-insensitively. (Author/committer matching is already
+    /// case-insensitive in Libra.)
+    #[clap(short = 'i', long = "regexp-ignore-case")]
+    pub ignore_case: bool,
+
+    /// Keep commits whose message does NOT match `--grep`.
+    #[clap(long = "invert-grep")]
+    pub invert_grep: bool,
+
     /// Filter commits by committer name or email (case-insensitive substring match)
     #[clap(long, value_name = "PATTERN")]
     pub committer: Option<String>,
@@ -337,6 +348,10 @@ struct CommitFilter {
     until: Option<i64>,
     paths: Vec<PathBuf>,
     grep: Option<String>,
+    /// `-i`/`--regexp-ignore-case`: case-insensitive `--grep` message match.
+    grep_ignore_case: bool,
+    /// `--invert-grep`: keep commits whose message does NOT match `--grep`.
+    invert_grep: bool,
     min_parents: Option<usize>,
     max_parents: Option<usize>,
     /// Pickaxe filter (`-S` literal occurrence count, or `-G` diff-line regex).
@@ -371,10 +386,21 @@ impl CommitFilter {
             until,
             paths,
             grep,
+            grep_ignore_case: false,
+            invert_grep: false,
             min_parents,
             max_parents,
             pickaxe,
         }
+    }
+
+    /// Apply `-i`/`--regexp-ignore-case` and `--invert-grep` to the `--grep`
+    /// message filter. Author/committer matching is already case-insensitive
+    /// (both sides are lower-cased), so `-i` only affects `--grep` here.
+    fn with_grep_options(mut self, ignore_case: bool, invert_grep: bool) -> Self {
+        self.grep_ignore_case = ignore_case;
+        self.invert_grep = invert_grep;
+        self
     }
 
     fn passes_non_path_filters(&self, commit: &Commit) -> bool {
@@ -426,9 +452,20 @@ impl CommitFilter {
 
         if let Some(pattern) = &self.grep
             && !pattern.is_empty()
-            && !commit.message.contains(pattern.as_str())
         {
-            return false;
+            let matches = if self.grep_ignore_case {
+                commit
+                    .message
+                    .to_lowercase()
+                    .contains(&pattern.to_lowercase())
+            } else {
+                commit.message.contains(pattern.as_str())
+            };
+            // `--invert-grep` keeps the non-matching commits: exclude exactly
+            // when `matches == invert_grep` (matches & !invert, or !matches & invert).
+            if matches == self.invert_grep {
+                return false;
+            }
         }
 
         true
@@ -1030,7 +1067,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         min_parents,
         max_parents,
         pickaxe,
-    );
+    )
+    .with_grep_options(args.ignore_case, args.invert_grep);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let (start_commits, excludes) = resolve_log_start_commits(&args).await?;
@@ -1322,7 +1360,8 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         min_parents,
         max_parents,
         pickaxe,
-    );
+    )
+    .with_grep_options(args.ignore_case, args.invert_grep);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let (start_commits, excludes) = resolve_log_start_commits(args).await?;

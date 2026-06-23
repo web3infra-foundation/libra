@@ -51,7 +51,7 @@
 | [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; `--stdin`, `--keep[=<MSG>]`, and progress flags supported; `--fix-thin` not exposed |
 | [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
-| [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`/`--parents`/`--children`; positional ranges and exact line history remain partial |
+| [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`/`--parents`/`--children`/`-i`/`--invert-grep`; positional ranges and exact line history remain partial |
 | [`ls-files`](ls-files.md) | `partial` | default cached listing plus modified/deleted/stage/untracked filters, `.libraignore`-aware `--others --exclude-standard`, pathspecs, `--error-unmatch`, `-z`, status tags `-t` (H/R/C/?/M), unmerged-only `-u`/`--unmerged`, `--full-name` (accepted no-op; Libra always prints repo-root-relative paths), and JSON/machine output supported |
 | [`ls-remote`](ls-remote.md) | `partial` | heads/tags/refs filtering, patterns, get-url, sort, and exit-code supported; symref not exposed |
 | [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, `REV:path` tree-ish syntax, JSON, common output flags, and partial `--format` atom support exposed; full Git pathspec magic remains incomplete |
