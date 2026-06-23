@@ -7,7 +7,7 @@ Summarize reachable commits by author.
 ## Synopsis
 
 ```
-libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges]
+libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges | --merges]
                [--top <N>] [--min-count <N>] [--reverse]
                [--since <date>] [--until <date>] [-w[<W>[,<I1>[,<I2>]]]]
 ```
@@ -30,6 +30,7 @@ Date filtering via `--since` and `--until` restricts which commits are included 
 | Committer | `-c` | `--committer` | Group commits by committer identity instead of author. |
 | Group | | `--group <TYPE>` | Group by `author` (default), `committer`, or `trailer:<key>` (one group per value of the named commit-message trailer, e.g. `trailer:Co-authored-by`). Takes precedence over `-c`. |
 | No merges | | `--no-merges` | Exclude merge commits (commits with more than one parent) before aggregation. |
+| Merges | | `--merges` | Include only merge commits (the inverse of `--no-merges`; the two override each other). |
 | Top | | `--top <N>` | Show only the top N identities (after sorting). |
 | Min count | | `--min-count <N>` | Show only identities with at least N commits. |
 | Reverse | | `--reverse` | Reverse the output order. |
@@ -187,11 +188,11 @@ Git's `--group=author`/`--group=committer`/`--group=trailer:<key>` selects what 
 
 Git's `shortlog` can operate in two modes: reading from `git log` output piped via stdin, or directly traversing commit history. The piped mode (`git log | git shortlog`) is a Unix-philosophy composability feature, but it requires parsing serialized commit data, which is fragile and format-dependent.
 
-Libra takes the revision as a positional argument and always reads directly from the commit graph. This is simpler, faster (no serialization/deserialization), and works naturally with the `--json` output mode. For filtering beyond the built-in filters (`--since`/`--until`, `--author`, `--no-merges`), use `libra log --json` with external tooling.
+Libra takes the revision as a positional argument and always reads directly from the commit graph. This is simpler, faster (no serialization/deserialization), and works naturally with the `--json` output mode. For filtering beyond the built-in filters (`--since`/`--until`, `--author`, `--merges`/`--no-merges`), use `libra log --json` with external tooling.
 
 ### Why a curated filter subset instead of full log options?
 
-Git's `shortlog` inherits the full set of `git log` options when used directly (not piped) — `--author`, `--grep`, `--no-merges`, and dozens of others. Libra exposes a curated subset that covers the common shortlog needs — date filtering (`--since`/`--until`), `--author`, and `--no-merges` — without inheriting the full complexity of the log command's option space. Less common log filters such as `--grep` are not exposed.
+Git's `shortlog` inherits the full set of `git log` options when used directly (not piped) — `--author`, `--grep`, `--no-merges`, and dozens of others. Libra exposes a curated subset that covers the common shortlog needs — date filtering (`--since`/`--until`), `--author`, and `--merges`/`--no-merges` — without inheriting the full complexity of the log command's option space. Less common log filters such as `--grep` are not exposed.
 
 ### Why committer timestamp for filtering?
 
@@ -212,6 +213,7 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Committer grouping | `-c` / `--committer` | `--committer` (deprecated, use `--group=committer`) | N/A |
 | Piped input | Not supported | Reads from stdin when piped | N/A |
 | No merges | `--no-merges` | `--no-merges` | N/A |
+| Merges only | `--merges` | `--merges` | N/A |
 | Author filter | `--author=<pattern>` | `--author=<pattern>` | N/A |
 | Output wrapping | `-w[<width>[,<i1>[,<i2>]]]` | `-w[<width>[,<i1>[,<i2>]]]` | N/A |
 | Grep filter | Not supported | `--grep=<pattern>` | N/A |

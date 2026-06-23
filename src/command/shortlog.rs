@@ -76,6 +76,7 @@ EXAMPLES:
     libra shortlog -c -s            Summarize by committer instead of author
     libra shortlog --group=trailer:Co-authored-by   Group by Co-authored-by trailer values
     libra shortlog --no-merges      Exclude merge commits from the summary
+    libra shortlog --merges         Summarize only merge commits
     libra shortlog --top 5          Show only the top 5 authors
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog -w50             Wrap commit subjects at 50 columns
@@ -120,8 +121,12 @@ pub struct ShortlogArgs {
     pub committer: bool,
 
     /// Do not include merge commits (commits with more than one parent).
-    #[clap(long = "no-merges")]
+    #[clap(long = "no-merges", overrides_with = "merges")]
     pub no_merges: bool,
+
+    /// Include only merge commits (commits with more than one parent).
+    #[clap(long = "merges", overrides_with = "no_merges")]
+    pub merges: bool,
 
     /// Show only the top N authors.
     #[clap(long = "top", value_name = "N")]
@@ -390,8 +395,12 @@ async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
 
     // `--no-merges` drops merge commits (more than one parent) before
     // aggregation so the counts and totals reflect only non-merge commits.
+    // `--merges` is the inverse, keeping only merge commits. The two override
+    // each other (last one wins), so at most one filter applies.
     if args.no_merges {
         commits.retain(|commit| commit.parent_commit_ids.len() <= 1);
+    } else if args.merges {
+        commits.retain(|commit| commit.parent_commit_ids.len() >= 2);
     }
 
     // `--author=<pattern>` keeps only commits whose author identity contains the

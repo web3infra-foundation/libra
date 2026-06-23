@@ -911,3 +911,59 @@ fn shortlog_wrap_wraps_long_subjects() {
         "a -w spec with more than three components must be rejected"
     );
 }
+
+#[test]
+fn test_shortlog_merges_and_no_merges() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Diverge main and feat on different files, then merge (a real merge commit).
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feat"], p),
+        "switch feat",
+    );
+    std::fs::write(p.join("feat.txt"), "f\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "feat.txt"], p), "add feat");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feat-c1", "--no-verify"], p),
+        "commit feat-c1",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("main.txt"), "m\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "main.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main-c2", "--no-verify"], p),
+        "commit main-c2",
+    );
+    assert_cli_success(&run_libra_command(&["merge", "feat"], p), "merge feat");
+
+    let body = |args: &[&str]| -> String {
+        let out = run_libra_command(args, p);
+        assert!(out.status.success(), "shortlog ok: {args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // --merges keeps only the merge commit.
+    let m = body(&["shortlog", "--merges"]);
+    assert!(
+        m.contains("Merge feat into main"),
+        "--merges shows the merge: {m:?}"
+    );
+    assert!(
+        !m.contains("main-c2"),
+        "--merges excludes a non-merge: {m:?}"
+    );
+
+    // --no-merges drops the merge commit.
+    let nm = body(&["shortlog", "--no-merges"]);
+    assert!(
+        !nm.contains("Merge feat into main"),
+        "--no-merges drops the merge: {nm:?}"
+    );
+    assert!(
+        nm.contains("main-c2"),
+        "--no-merges keeps a non-merge: {nm:?}"
+    );
+}

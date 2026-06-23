@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、no-merges、top 限制、mailmap、范围解析和 JSON 摘要，同时把 format、stdin 和更复杂过滤作为差异项。
+`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、`--merges`/`--no-merges`、top 限制、mailmap、范围解析和 JSON 摘要，同时把 format、stdin 和更复杂过滤作为差异项。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--no-merges`、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）已支持；`--format` 和 stdin 输入尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--merges`/`--no-merges`（互相覆盖）、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）已支持；`--format` 和 stdin 输入尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/shortlog.md`。
-- Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [--since <date>] [--until <date>]`。
-- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--group <TYPE>`（`author`/`committer`/`trailer:<key>`）、`--no-merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`-w, --wrap [<W>[,<I1>[,<I2>]]]`、`[<revision>]`。`-w` 由 `parse_wrap_spec` 解析（默认 76/6/9，缺省组件回落默认值，非法值报 `LBR-CLI-002`），存入 `ShortlogOutput.wrap`（serde skip），渲染时由 `wrap_subject_lines` 对每个主题做词级换行（首行缩进 I1、续行 I2；width 0 仅缩进）。
+- Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges | --merges] [--since <date>] [--until <date>]`。
+- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--group <TYPE>`（`author`/`committer`/`trailer:<key>`）、`--no-merges`、`--merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`-w, --wrap [<W>[,<I1>[,<I2>]]]`、`[<revision>]`。`--merges` 与 `--no-merges` 互为反向且 `overrides_with`（最后给出者生效）：`--no-merges` 保留父数 ≤1，`--merges` 保留父数 ≥2。`-w` 由 `parse_wrap_spec` 解析（默认 76/6/9，缺省组件回落默认值，非法值报 `LBR-CLI-002`），存入 `ShortlogOutput.wrap`（serde skip），渲染时由 `wrap_subject_lines` 对每个主题做词级换行（首行缩进 I1、续行 I2；width 0 仅缩进）。
 
 
 ## 还未实现的功能
