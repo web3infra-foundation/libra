@@ -14,6 +14,7 @@ libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
 libra remote set-url [--add | --delete] [--push] [--all] <name> <value>
 libra remote prune [--dry-run] <name>
+libra remote update [<group> | <remote>...]
 ```
 
 ## Description
@@ -50,8 +51,8 @@ the HEAD is the live default branch, branches are classified `tracked` /
 > already fetched), `new` (advertised but not yet fetched — a later `fetch`
 > stores it), `stale` (fetched locally but no longer advertised — `libra remote
 > prune` removes it). When the remote is unreachable, `show` fails with a hint to
-> retry with `--no-query`. `remote update` (multi-remote fetch) is not yet
-> implemented (see `COMPATIBILITY.md`).
+> retry with `--no-query`. For multi-remote fetching, see the `update`
+> subcommand.
 
 ### Subcommand: `-v` (list verbose)
 
@@ -119,6 +120,19 @@ Delete local remote-tracking branches that no longer exist on the remote.
 | `<name>` | Remote name | `origin` |
 | `--dry-run` | Show what would be pruned without deleting | `libra remote prune --dry-run origin` |
 
+### Subcommand: `update`
+
+Fetch from one or more remotes. With no arguments, every configured remote is
+fetched; otherwise each argument is a remote name, or a `remotes.<group>`
+config entry that expands to that group's member remotes.
+
+| Flag / Argument | Description | Example |
+|-----------------|-------------|---------|
+| `[<group> \| <remote>...]` | Remotes or remote groups to fetch (default: all) | `libra remote update origin upstream` |
+
+> `remote update -p` / `--prune` (pruning stale tracking refs after the fetch)
+> is not yet exposed; run `libra remote prune <name>` separately.
+
 ### Subcommand: `set-branches`
 
 Set the branches tracked by a remote by rewriting its `remote.<name>.fetch`
@@ -145,7 +159,9 @@ Set or delete a remote's default branch pointer (`refs/remotes/<name>/HEAD`).
 > Both `set-head <branch>` and `--auto` require the resolved branch's tracking
 > ref `refs/remotes/<name>/<branch>` to already exist (fetch it first); `--auto`
 > additionally contacts the remote to discover its default branch. `remote
-> update` (multi-remote fetch) is not yet implemented (see `COMPATIBILITY.md`).
+> update [<group>|<remote>...]` fetches all configured remotes (or the named
+> ones, expanding any `remotes.<group>` config); its `-p`/`--prune` flag is not
+> yet exposed (see `COMPATIBILITY.md`).
 
 ## Common Commands
 

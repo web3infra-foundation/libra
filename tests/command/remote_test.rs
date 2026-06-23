@@ -2112,3 +2112,40 @@ fn test_remote_set_branches_json_schema() {
     let specs = json["data"]["fetch_refspecs"].as_array().expect("refspecs");
     assert_eq!(specs.len(), 1);
 }
+
+#[test]
+#[serial]
+fn remote_update_resolves_and_fetches_configured_remotes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // No remotes configured: `remote update` succeeds with a notice.
+    let none = run_libra_command(&["remote", "update"], p);
+    assert_cli_success(&none, "remote update (no remotes)");
+    assert!(
+        String::from_utf8_lossy(&none.stdout).contains("No remotes to update"),
+        "expected the empty notice: {}",
+        String::from_utf8_lossy(&none.stdout)
+    );
+
+    // An unknown remote name is an error (ensure_remote_exists).
+    let unknown = run_libra_command(&["remote", "update", "does-not-exist"], p);
+    assert!(
+        !unknown.status.success(),
+        "updating an unknown remote must error"
+    );
+
+    // A configured but unreachable remote: `remote update` resolves it and
+    // attempts the fetch, which fails — proving the resolved remote reaches the
+    // fetch path. (Successful fetching is covered by the fetch command tests.)
+    let bogus = p.join("nonexistent-remote.git");
+    assert_cli_success(
+        &run_libra_command(&["remote", "add", "origin", bogus.to_str().unwrap()], p),
+        "remote add origin",
+    );
+    let attempt = run_libra_command(&["remote", "update"], p);
+    assert!(
+        !attempt.status.success(),
+        "updating an unreachable remote must fail at the fetch step"
+    );
+}

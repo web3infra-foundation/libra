@@ -83,6 +83,7 @@ EXAMPLES:
     libra remote set-url --push origin https://example.com/org/repo.git
                                                    Replace the push URL only
     libra remote prune --dry-run origin            Preview which tracking refs would be removed
+    libra remote update                            Fetch all configured remotes (or named ones)
     libra remote set-branches origin main          Track only the named branch(es)
     libra remote set-head origin main              Point the remote's default branch at main
     libra remote set-head origin --auto            Query the remote and set HEAD automatically
@@ -171,6 +172,16 @@ pub enum RemoteCmds {
         /// Dry run - show what would be pruned without actually deleting
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Fetch updates from one or more remotes (all configured remotes when none
+    /// are named). A name matching a `remotes.<group>` config is expanded to
+    /// that group's member remotes.
+    ///
+    /// Examples:{n}{n}  libra remote update                    # fetch all remotes{n}  libra remote update origin upstream    # fetch the named remotes
+    Update {
+        /// Remotes or remote groups to update (default: all remotes).
+        #[arg(value_name = "GROUP")]
+        groups: Vec<String>,
     },
     /// Set the branches tracked by a remote (rewrites `remote.<name>.fetch`).
     ///
@@ -405,6 +416,9 @@ pub enum RemoteOutput {
         dry_run: bool,
         stale_branches: Vec<RemotePruneEntry>,
     },
+    Update {
+        remotes: Vec<String>,
+    },
     Show {
         name: String,
         fetch_urls: Vec<String>,
@@ -439,7 +453,7 @@ pub async fn execute_safe(command: RemoteCmds, output: &OutputConfig) -> CliResu
     // Runtime usage validation for the new subcommands (parameter errors map to
     // `command_usage` / 129, not a `RemoteError`).
     validate_remote_usage(&command)?;
-    let result = run_remote(command).await.map_err(CliError::from)?;
+    let result = run_remote(command, output).await.map_err(CliError::from)?;
     render_remote_output(&result, output)
 }
 
@@ -483,7 +497,10 @@ fn validate_tracking_branch_name(name: &str) -> CliResult<()> {
     Ok(())
 }
 
-async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
+async fn run_remote(
+    command: RemoteCmds,
+    output: &OutputConfig,
+) -> Result<RemoteOutput, RemoteError> {
     match command {
         RemoteCmds::Add { name, url } => run_add_remote(name, url).await,
         RemoteCmds::Remove { name } => run_remove_remote(name).await,
@@ -507,6 +524,7 @@ async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
             value,
         } => run_set_url(name, value, push, add, delete, all).await,
         RemoteCmds::Prune { name, dry_run } => run_prune_remote(name, dry_run).await,
+        RemoteCmds::Update { groups } => run_remote_update(groups, output).await,
         RemoteCmds::SetBranches {
             add,
             name,
@@ -726,6 +744,57 @@ async fn run_set_url(
         urls,
         removed: 0,
     })
+}
+
+/// Resolve the set of remotes for `remote update`: with no arguments, every
+/// configured remote (in config order); otherwise each argument is either a
+/// `remotes.<group>` config (expanded to its space-separated members) or a
+/// single remote name. The result preserves first-seen order and de-duplicates.
+async fn resolve_update_remotes(groups: Vec<String>) -> Result<Vec<String>, RemoteError> {
+    if groups.is_empty() {
+        return list_remote_names().await;
+    }
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in groups {
+        let names: Vec<String> =
+            match ConfigKv::get(&format!("remotes.{entry}"))
+                .await
+                .map_err(|error| RemoteError::ConfigRead {
+                    detail: error.to_string(),
+                })? {
+                Some(cfg) => cfg.value.split_whitespace().map(String::from).collect(),
+                None => vec![entry],
+            };
+        for name in names {
+            if seen.insert(name.clone()) {
+                resolved.push(name);
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// `remote update [<group>|<remote>...]`: fetch from each resolved remote. An
+/// unknown remote name is an error; a fetch failure aborts the run.
+async fn run_remote_update(
+    groups: Vec<String>,
+    output: &OutputConfig,
+) -> Result<RemoteOutput, RemoteError> {
+    let remotes = resolve_update_remotes(groups).await?;
+    let mut updated = Vec::new();
+    for name in remotes {
+        ensure_remote_exists(&name).await?;
+        let remote_config = ConfigKv::remote_config(&name)
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?
+            .ok_or_else(|| RemoteError::NoUrlConfigured { name: name.clone() })?;
+        fetch::fetch_repository_safe(remote_config, None, false, None, None, output).await?;
+        updated.push(name);
+    }
+    Ok(RemoteOutput::Update { remotes: updated })
 }
 
 async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, RemoteError> {
@@ -1348,6 +1417,7 @@ fn redacted_remote_output(result: &RemoteOutput) -> RemoteOutput {
         RemoteOutput::Remove { .. }
         | RemoteOutput::Rename { .. }
         | RemoteOutput::Prune { .. }
+        | RemoteOutput::Update { .. }
         | RemoteOutput::SetBranches { .. }
         | RemoteOutput::SetHead { .. } => result.clone(),
     }
@@ -1470,6 +1540,19 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
                     stale_branches.len()
                 )
                 .map_err(write_err)?;
+            }
+            Ok(())
+        }
+        RemoteOutput::Update { remotes } => {
+            // The per-remote fetch already streamed its own progress; emit a
+            // short confirmation line per updated remote (or a notice when
+            // there were none to update).
+            if remotes.is_empty() {
+                writeln!(writer, "No remotes to update").map_err(write_err)?;
+            } else {
+                for name in remotes {
+                    writeln!(writer, "Updated {name}").map_err(write_err)?;
+                }
             }
             Ok(())
         }

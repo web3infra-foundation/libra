@@ -14,6 +14,7 @@ libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
 libra remote set-url [--add | --delete] [--push] [--all] <name> <value>
 libra remote prune [--dry-run] <name>
+libra remote update [<group> | <remote>...]
 ```
 
 ## 说明
@@ -97,6 +98,16 @@ libra remote prune [--dry-run] <name>
 |-----------------|-------------|---------|
 | `<name>` | 远程名称 | `origin` |
 | `--dry-run` | 显示会修剪什么，但不删除 | `libra remote prune --dry-run origin` |
+
+### 子命令：`update`
+
+从一个或多个远程 fetch。无参数时 fetch 所有配置的远程；否则每个参数是一个远程名，或一个 `remotes.<group>` 配置项（展开为该组的成员远程）。
+
+| 标志 / 参数 | 说明 | 示例 |
+|-----------------|-------------|---------|
+| `[<group> \| <remote>...]` | 要 fetch 的远程或远程组（默认：全部） | `libra remote update origin upstream` |
+
+> `remote update -p` / `--prune`（fetch 后修剪陈旧跟踪 ref）尚未公开；可单独运行 `libra remote prune <name>`。
 
 ## 常用命令
 

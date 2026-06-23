@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`add`/`remove`/`rename`/`-v`/`show`/`get-url`/`set-url`/`prune` 加上 `set-branches [--add]`（重写 `remote.<name>.fetch`）、`set-head <branch>`/`-d`/`--delete`/`--auto`（写入/删除 `refs/remotes/<name>/HEAD`；`--auto` 向远端查询 HEAD）与详细 `remote show <name>` 已支持。`remote show <name>` 默认**在线**：通过 `fetch::discover_remote_with_name` 拉取远端 HEAD/ref，把分支分类为 `tracked`/`new`/`stale`，`queried = true`；`--no-query` 走离线缓存路径（状态 `cached`，`queried = false`）。尚未公开：`remote update`（多远端 fetch）。
+- 兼容级别：`partial`。`add`/`remove`/`rename`/`-v`/`show`/`get-url`/`set-url`/`prune` 加上 `set-branches [--add]`（重写 `remote.<name>.fetch`）、`set-head <branch>`/`-d`/`--delete`/`--auto`（写入/删除 `refs/remotes/<name>/HEAD`；`--auto` 向远端查询 HEAD）与详细 `remote show <name>` 已支持。`remote show <name>` 默认**在线**：通过 `fetch::discover_remote_with_name` 拉取远端 HEAD/ref，把分支分类为 `tracked`/`new`/`stale`，`queried = true`；`--no-query` 走离线缓存路径（状态 `cached`，`queried = false`）。`remote update [<group>|<remote>...]` 已支持：无参数时 fetch 所有配置远端，否则 fetch 指定远端；名称命中 `remotes.<group>` 配置时展开为该组成员（`resolve_update_remotes`），每个远端调用 `fetch::fetch_repository_safe`。尚未公开：`remote update -p`/`--prune`（fetch 后顺带 prune）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-10-25 `5703987b`（`feat: add option rename for remote command (#27)`）：基础实现节点：add option rename for remote command (#27)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-09 `b8e6b4f4`（`feat(remote): add detailed `remote show <name>` subcommand (#379)`）：引入带 `<name>` 参数的详细 `remote show <name>`（fetch/push URL、HEAD 分支、远端及本地跟踪分支）。该 Show 详情曾被一次 reconcile 丢失内容，已于 2026-06-18 以**离线**形态恢复到当前代码：`RemoteCmds::Show { name: Option<String>, no_query, verbose }` 分发到 `run_show_remote`（带 `<name>`）或 `run_list_remotes(false)`（无 `<name>`），新增 `RemoteOutput::Show` 变体与 JSON 凭据脱敏层（`redacted_remote_output`）。在线发现（`fetch::discover_remote_with_name`）与 `remote update` 未恢复，故 `queried` 恒为 `false`。
+- 2026-06-09 `b8e6b4f4`（`feat(remote): add detailed `remote show <name>` subcommand (#379)`）：引入带 `<name>` 参数的详细 `remote show <name>`（fetch/push URL、HEAD 分支、远端及本地跟踪分支）。该 Show 详情曾被一次 reconcile 丢失内容，已于 2026-06-18 以**离线**形态恢复到当前代码：`RemoteCmds::Show { name: Option<String>, no_query, verbose }` 分发到 `run_show_remote`（带 `<name>`）或 `run_list_remotes(false)`（无 `<name>`），新增 `RemoteOutput::Show` 变体与 JSON 凭据脱敏层（`redacted_remote_output`）。其后在线发现（`fetch::discover_remote_with_name`）已恢复——`remote show <name>` 默认查询远端（`queried = true`，`--no-query` 走离线缓存）；`remote update`（多远端 fetch）也已实现（见上文兼容级别）。
 - 2026-06-06 `586231c0`（`feat(remote): add set-branches and set-head subcommands (#1392)`）：引入 set-branches / set-head 子命令。其内容曾被一次 reconcile 丢失，已于 2026-06-18 恢复到当前代码：`set-branches [--add]` 在单个 `ConfigKv` 事务内重写 `remote.<name>.fetch`，`set-head <branch>`/`-d`/`--delete` 写入/删除 `refs/remotes/<name>/HEAD`（`Head` 行），`--auto` 在 `validate_remote_usage` 中按 129 拒绝（deferred），新增 `RemoteError::RemoteTrackingBranchNotFound`。
 - 2026-06-19（PR-11）：补齐 `remote show <name>` 在线发现与 `set-head --auto`。抽出 `fetch::resolve_remote_default_branch(capabilities, ref_heads, remote_head)`（symref capability > HEAD OID 匹配 > main/master/first），由 fetch 缓存 remote HEAD、`remote show`/`set-head --auto` 复用。`run_show_remote` 默认在线（`discover_remote_refs` + `classify_remote_branches_online` 给出 `tracked`/`new`/`stale`，`queried = true`），`--no-query` 保留离线 `cached` 路径；`set-head --auto` 解析远端默认分支后校验本地跟踪 ref 再写入。新增 `RemoteError::Discovery`（带 `--no-query` 提示）与 `NoRemoteHead`。
 - 2026-05-29 `a22d3b4b`（`fix(remote): guard ssh key namespace rename`）：实现修正：guard ssh key namespace rename；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
@@ -48,14 +48,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/remote.md`。
 - Synopsis：`libra remote <subcommand> [OPTIONS] [ARGS]`。
-- 公开参数/子命令包括：`add <name> <url>`、`remove <name>`、`rename <old> <new>`、`-v`（verbose 列表）、`show [-n/--no-query] [-v/--verbose] [<name>]`、`get-url [--push] [--all] <name>`、`set-url [--add] [--delete] [--push] [--all] <name> <value>`、`prune [--dry-run] <name>`、`set-branches [--add] <name> <branch>...`、`set-head [-a/--auto] [-d/--delete] <name> [<branch>]`。
+- 公开参数/子命令包括：`add <name> <url>`、`remove <name>`、`rename <old> <new>`、`-v`（verbose 列表）、`show [-n/--no-query] [-v/--verbose] [<name>]`、`get-url [--push] [--all] <name>`、`set-url [--add] [--delete] [--push] [--all] <name> <value>`、`prune [--dry-run] <name>`、`update [<group>|<remote>...]`、`set-branches [--add] <name> <branch>...`、`set-head [-a/--auto] [-d/--delete] <name> [<branch>]`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 子命令 | `remote update`（按 remote group 批量 fetch）。`RemoteCmds` 与 `RemoteOutput` 均无 `Update` 变体。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| ✅ 已实现 | `remote update [<group>\|<remote>...]`（批量 fetch） | `RemoteCmds::Update`/`RemoteOutput::Update` 已加；`resolve_update_remotes` 解析（无参=全部远端；命中 `remotes.<group>` 展开为组成员，否则按远端名），逐个调用 `fetch::fetch_repository_safe`。带集成测试（`remote_update_resolves_and_fetches_configured_remotes`）。 |
+| Git flag | `remote update -p` / `--prune`（fetch 后顺带 prune 陈旧 tracking ref） | 未公开；可在 update 后复用 prune 逻辑。 |
 
 ## 维护要求
 
