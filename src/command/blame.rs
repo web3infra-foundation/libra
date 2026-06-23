@@ -87,6 +87,12 @@ pub struct BlameArgs {
     /// Use N hex digits for the abbreviated commit hash (ignored when `-l` is set).
     #[clap(long, value_name = "N")]
     pub abbrev: Option<usize>,
+
+    /// Do not treat root commits as boundaries. Accepted for Git parity and is a
+    /// no-op: Libra's blame never prefixes boundary commits with `^`, so a root
+    /// commit is already shown as a normal commit.
+    #[clap(long)]
+    pub root: bool,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.

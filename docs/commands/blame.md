@@ -28,6 +28,7 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Suppress | `-s` | | Suppress the author name and timestamp columns (show only hash + line). |
 | Raw time | `-t` | | Show the raw author timestamp (epoch seconds) instead of a formatted date. |
 | Abbrev | | `--abbrev <N>` | Use N hex digits for the abbreviated commit hash (ignored with `-l`). |
+| Root | | `--root` | Do not treat root commits as boundaries. Accepted no-op: Libra's blame never prefixes boundary/root commits with `^`, so root commits already appear as normal commits. |
 | Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (commit metadata once per commit). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
@@ -152,6 +153,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Suppress author/date | `-s` | `-s` | N/A |
 | Show timestamp | `-t` (raw epoch; formatted by default) | `-t` (raw timestamp) | N/A |
 | Abbrev length | `--abbrev <N>` | `--abbrev=<N>` | N/A |
+| Don't treat root as boundary | `--root` (no-op; root already shown as normal) | `--root` | N/A |
 | Porcelain format | `-p` / `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `-p` / `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
 | Score threshold | Not supported | `-M` / `-C` (move/copy detection) | N/A |

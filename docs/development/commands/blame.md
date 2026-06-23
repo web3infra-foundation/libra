@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础文件 blame、数字 `-L` 范围、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`--abbrev <n>` 已支持；reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
+- 兼容级别：`partial`。基础文件 blame、数字 `-L` 范围、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`--abbrev <n>`、`--root`（接受式 no-op：Libra 从不给边界/root 提交加 `^` 前缀）已支持；reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/blame.md`。
-- Synopsis：`libra blame <file> [<commit>] [-L <range>]`。
-- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`。
+- Synopsis：`libra blame <file> [<commit>] [-L <range>] [--root]`。
+- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`、`--root`（接受式 no-op：字段 `root` 解析后不被读取；Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 `--root` 请求的“root 按普通提交显示”已是默认行为）。
 - `-l`/`-s`/`-t`/`--abbrev <N>`（默认人类格式的显示标志，复用现有 `BlameLine` 字段）：`-l` 在每行行首打印完整提交 hash（取代缩写）；`--abbrev=<n>` 用 n 位 hex 缩写（`-l` 优先于 `--abbrev`）；`-s` 整列隐藏作者与日期，仅保留 `<hash> <line>) <content>`；`-t` 在日期列打印原始 author 时间戳（epoch 秒）取代本地化日期。`BlameLine` 现额外序列化 `timestamp`（JSON 加项）。这些标志只影响默认人类格式，不影响 porcelain。
 - `-e`/`--show-email`：默认人类输出中以 `<email>` 形式显示作者邮箱代替作者名；与作者名共用固定 15 列宽（过长按 12 + `...` 截断，属与 Git 动态列宽的既有有意差异）。仅影响默认格式，不影响 `--porcelain`（其本身已含 `author-mail`）。`BlameLine` 现额外序列化 `author_email`（JSON 加项）。
 - `--porcelain`/`--line-porcelain`：机器可读输出，每行先打印 `<sha> <orig> <final> [<group>]` 头部，再（`--porcelain` 每个提交一次、`--line-porcelain` 每行）打印 author/author-mail/author-time/author-tz/committer*/summary/filename 元数据块，最后是 `\t<content>`。元数据通过重新加载归属提交读取。**有意差异/限制**：blame 遍历不跟踪每提交的原始行号，`<orig>` 以 `<final>` 近似。

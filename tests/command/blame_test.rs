@@ -590,6 +590,7 @@ async fn blame_runs_with_sha1() {
         suppress: false,
         raw_timestamp: false,
         abbrev: None,
+        root: false,
     })
     .await;
 }
@@ -616,6 +617,7 @@ async fn blame_runs_with_sha256() {
         suppress: false,
         raw_timestamp: false,
         abbrev: None,
+        root: false,
     })
     .await;
 }
@@ -702,4 +704,29 @@ fn test_blame_display_flags_long_suppress_timestamp_abbrev() {
         String::from_utf8_lossy(&porc.stdout).contains("author "),
         "-p emits porcelain headers"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn blame_root_flag_is_accepted_noop() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    prepare_history().await;
+
+    // `--root` is accepted and is a no-op: Libra's blame never prefixes
+    // boundary/root commits with `^`, so the output is unchanged.
+    blame::execute(BlameArgs {
+        file: "foo.txt".into(),
+        commit: "HEAD".into(),
+        line_range: None,
+        porcelain: false,
+        line_porcelain: false,
+        show_email: false,
+        long: false,
+        suppress: false,
+        raw_timestamp: false,
+        abbrev: None,
+        root: true,
+    })
+    .await;
 }
