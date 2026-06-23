@@ -6,7 +6,7 @@
 
 ```
 libra tag [<name>] [-m <message> | -F <file>] [-f]
-libra tag -l [-n <lines>]
+libra tag -l [-n <lines>] [--column[=<mode>]]
 libra tag -d <name>
 ```
 
@@ -29,6 +29,7 @@ libra tag -d <name>
 | `-F` | `--file` | `<file>` | 创建附注标签，从文件读取消息（`-` 表示 stdin）。与 `-m` 互斥。 |
 | `-f` | `--force` | | 覆盖已有标签 |
 | `-n` | `--n-lines` | `<lines>` | 列出时显示的附注行数（0 = 只显示名称） |
+| | `--column` | `[mode]` | 以多列布局列出标签。模式 `always`/`auto`/`never`（缺省 = `always`）。不能与 `-n` 同用。 |
 
 ### 标志示例
 
@@ -172,6 +173,7 @@ Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标
 | 从文件读取附注消息 | `git tag -F <file> <name>` | `libra tag -F <file> <name>`（`-` 表示 stdin） | N/A |
 | 列出标签 | `git tag -l` | `libra tag -l` | `jj tag list` |
 | 带消息列出 | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
+| 多列布局 | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]`（always/auto/never） | N/A |
 | 删除 | `git tag -d <name>` | `libra tag -d <name>` | `jj tag delete <name>` |
 | 强制覆盖 | `git tag -f <name>` | `libra tag -f <name>` | `jj tag create <name>`（总是覆盖） |
 | 签名标签 | `git tag -s <name>` | 不支持（计划基于 vault） | N/A |

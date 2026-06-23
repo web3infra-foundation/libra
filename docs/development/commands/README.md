@@ -81,7 +81,7 @@
 | [`status`](status.md) | `supported` | 见命令文档。 |
 | [`switch`](switch.md) | `partial` | `-C/--force-create`、`--orphan`、`--detach`、`--track`、`--guess`/`--no-guess`（DWIM 远端跟踪猜测，默认开启，受 `checkout.guess` / `checkout.defaultRemote` 控制）已公开；`-f/--discard-changes`、merge/conflict/submodule 相关参数未公开。 |
 | [`symbolic-ref`](symbolic-ref.md) | `partial` | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
-| [`tag`](tag.md) | `partial` | lightweight/message/annotated tags, `-F`/`--file` (message from file or stdin), force/delete/list/`-n`, points-at, contains/no-contains, merged/no-merged, sort, and vault-PGP sign/verify supported; editor (`-e`)/column and Git GPG interop not exposed |
+| [`tag`](tag.md) | `partial` | lightweight/message/annotated tags, `-F`/`--file` (message from file or stdin), force/delete/list/`-n`, points-at, contains/no-contains, merged/no-merged, sort, `--column` (always/auto/never), and vault-PGP sign/verify supported; editor (`-e`) and Git GPG interop not exposed |
 | [`usage`](usage.md) | `intentionally-different` | Libra AI provider/model usage reporting extension, not a Git command |
 | [`verify-pack`](verify-pack.md) | `partial` | validates one or more `.idx` files against matching `.pack` siblings; `-s` / `--stat-only` supported; `--pack` is available for a single explicit pack path |
 | [`worktree`](worktree.md) | `intentionally-different` | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refus... |

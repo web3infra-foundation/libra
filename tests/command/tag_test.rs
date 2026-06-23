@@ -845,6 +845,7 @@ async fn test_force_tag() {
         merged: None,
         no_merged: None,
         sort: None,
+        column: None,
         sign: false,
         verify: false,
     })
@@ -972,6 +973,7 @@ async fn test_delete_tag() {
         merged: None,
         no_merged: None,
         sort: None,
+        column: None,
         sign: false,
         verify: false,
     })
@@ -1036,6 +1038,7 @@ async fn test_annotation_lines_tag() {
         merged: None,
         no_merged: None,
         sort: None,
+        column: None,
         sign: false,
         verify: false,
     })
@@ -1087,6 +1090,7 @@ async fn test_annotation_lines_tag() {
         merged: None,
         no_merged: None,
         sort: None,
+        column: None,
         sign: false,
         verify: false,
     })
@@ -1428,4 +1432,74 @@ async fn test_tag_create_only_validation_blocks_programmatic_entry() {
         "expected the create-only usage error for -m too: {}",
         err_msg.message()
     );
+}
+
+#[test]
+fn tag_column_lays_out_in_column_major_order() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for t in ["v1", "v2", "v3", "v4"] {
+        assert_cli_success(&run_libra_command(&["tag", t], p), t);
+    }
+
+    // COLUMNS=8, col_width = 2 + 2 = 4, cols = 8/4 = 2, rows = ceil(4/2) = 2.
+    // Column-major (fill down then across):
+    //   v1  v3
+    //   v2  v4
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(p)
+        .env("COLUMNS", "8")
+        .args(["tag", "--column=always"])
+        .output()
+        .expect("run tag --column=always");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["v1  v3", "v2  v4"],
+        "column-major layout: {stdout:?}"
+    );
+
+    // `never` falls back to one tag per line.
+    let never = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(p)
+        .env("COLUMNS", "8")
+        .args(["tag", "--column=never"])
+        .output()
+        .expect("run tag --column=never");
+    let never_out = String::from_utf8_lossy(&never.stdout);
+    let never_lines: Vec<&str> = never_out.lines().collect();
+    assert_eq!(
+        never_lines,
+        vec!["v1", "v2", "v3", "v4"],
+        "never = one per line"
+    );
+
+    // An unknown mode is a usage error.
+    let bogus = run_libra_command(&["tag", "--column=bogus"], p);
+    assert!(!bogus.status.success(), "unknown --column mode must error");
+
+    // The mode is validated up front, so it also errors under --json, where the
+    // human column renderer is skipped entirely.
+    let bogus_json = run_libra_command(&["--json", "tag", "--column=bogus"], p);
+    assert!(
+        !bogus_json.status.success(),
+        "unknown --column mode must error even with --json (upfront validation)"
+    );
+
+    // `-m` (create) combined with the list-only `--column` is a usage error.
+    let create_conflict = run_libra_command(&["tag", "-m", "msg", "--column=always", "vX"], p);
+    assert!(
+        !create_conflict.status.success(),
+        "-m with --column must be a usage error"
+    );
+
+    // --column cannot be combined with -n.
+    let conflict = run_libra_command(&["tag", "--column", "-n", "1"], p);
+    assert!(!conflict.status.success(), "--column conflicts with -n");
 }

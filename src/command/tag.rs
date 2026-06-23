@@ -30,6 +30,7 @@ EXAMPLES:
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag -d v1.0                     Delete a tag
     libra tag --points-at HEAD            List tags pointing at HEAD's commit
+    libra tag -l --column                 List tags laid out in columns
     libra tag --json v1.0                 Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -89,6 +90,12 @@ pub struct TagArgs {
     #[clap(long, value_name = "key")]
     pub sort: Option<String>,
 
+    /// Display the tag list in columns. Modes: `always`, `auto` (only when
+    /// stdout is a terminal), `never`. Bare `--column` means `always`. Cannot
+    /// be combined with `-n`.
+    #[clap(long, value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "n_lines")]
+    pub column: Option<String>,
+
     /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
     /// since Libra does not open an editor for the tag body).
     #[clap(short = 's', long = "sign", requires = "message")]
@@ -138,12 +145,19 @@ pub async fn execute(args: TagArgs) {
 /// provided arguments.
 pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_tag(&args).await.map_err(CliError::from)?;
-    render_tag_output(&result, output)
+    render_tag_output(&result, output, args.column.as_deref())
 }
 
 pub(crate) fn validate_cli_args(args: &TagArgs) -> CliResult<()> {
     validate_named_tag_action(args).map_err(CliError::from)?;
-    validate_message_source_create_only(args).map_err(CliError::from)
+    validate_message_source_create_only(args).map_err(CliError::from)?;
+    // Validate the `--column` mode up front so an invalid mode is rejected for
+    // every output mode (including `--json`/`--quiet`, which skip the human
+    // column renderer). The boolean enable decision is recomputed at render.
+    if let Some(mode) = args.column.as_deref() {
+        resolve_column_enabled(mode)?;
+    }
+    Ok(())
 }
 
 /// The message-source options `-m`/`--message` and `-F`/`--file` only make
@@ -163,7 +177,8 @@ fn validate_message_source_create_only(args: &TagArgs) -> Result<(), TagError> {
         || args.no_contains.is_some()
         || args.merged.is_some()
         || args.no_merged.is_some()
-        || args.sort.is_some();
+        || args.sort.is_some()
+        || args.column.is_some();
     if non_create {
         return Err(TagError::MessageOptionRequiresCreate(
             "-m/--message and -F/--file are only valid when creating a tag".to_string(),
@@ -476,6 +491,7 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         || args.merged.is_some()
         || args.no_merged.is_some()
         || args.sort.is_some()
+        || args.column.is_some()
         || args.name.is_none()
     {
         // `--points-at` peels each tag to its commit and keeps only those that
@@ -528,7 +544,11 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     run_create_tag(name, message, args.force, args.sign).await
 }
 
-fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()> {
+fn render_tag_output(
+    result: &TagOutput,
+    output: &OutputConfig,
+    column: Option<&str>,
+) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("tag", result, output);
     }
@@ -539,7 +559,15 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 
     match result {
         TagOutput::List { tags } => {
-            print!("{}", format_tag_entries(tags));
+            if let Some(mode) = column {
+                if resolve_column_enabled(mode)? {
+                    print!("{}", format_tag_columns(tags, column_layout_width()));
+                } else {
+                    print!("{}", format_tag_entries(tags));
+                }
+            } else {
+                print!("{}", format_tag_entries(tags));
+            }
         }
         TagOutput::Create {
             name,
@@ -586,7 +614,7 @@ async fn delete_tag(tag_name: &str) {
 #[cfg(test)]
 async fn delete_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
     let result = run_delete_tag(tag_name).await.map_err(CliError::from)?;
-    render_tag_output(&result, output)?;
+    render_tag_output(&result, output, None)?;
     Ok(())
 }
 
@@ -829,6 +857,63 @@ fn trim_tag_message(message: &str, show_lines: usize) -> Option<String> {
         .join("\n");
 
     if value.is_empty() { None } else { Some(value) }
+}
+
+/// Resolve `--column=<mode>` to whether column layout is active. `always`
+/// forces it, `auto` enables it only when stdout is a terminal, `never`
+/// disables it. Any other value is a usage error.
+fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
+    use std::io::IsTerminal;
+    match mode {
+        "always" => Ok(true),
+        "auto" => Ok(std::io::stdout().is_terminal()),
+        "never" => Ok(false),
+        other => Err(
+            CliError::command_usage(format!("unsupported --column mode '{other}'"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("supported modes: always, auto, never"),
+        ),
+    }
+}
+
+/// Width used for column layout: the `COLUMNS` environment variable if set and
+/// parseable, otherwise Git's 80-column fallback.
+fn column_layout_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(80)
+}
+
+/// Lay out tag names in dense, column-major order to fit `width` (matching
+/// Git's `tag --column`): column width is the longest name plus two padding
+/// spaces, the number of columns is `width / col_width` (at least one), and
+/// entries fill down each column before moving right. Trailing padding on each
+/// row is trimmed.
+fn format_tag_columns(tags: &[TagListEntry], width: usize) -> String {
+    let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    let max_len = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    let col_width = max_len + 2;
+    let cols = std::cmp::max(1, width / col_width);
+    let rows = names.len().div_ceil(cols);
+
+    let mut out = String::new();
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            let idx = c * rows + r;
+            if idx < names.len() {
+                line.push_str(&format!("{:<col_width$}", names[idx]));
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 fn format_tag_entries(tags: &[TagListEntry]) -> String {
