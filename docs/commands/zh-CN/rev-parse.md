@@ -23,6 +23,7 @@ libra rev-parse [OPTIONS] [SPEC]
 | 标志 | 说明 |
 |------|-------------|
 | `--short` | 打印无歧义的缩写对象 ID。 |
+| `--sq` | 对解析出的对象名做单引号 shell 引用，便于安全地交给 shell 消费。仅影响解析出的修订输出，不影响 `--show-toplevel` 等查询模式。 |
 | `--abbrev-ref` | 打印符号分支名，而不是提交哈希。 |
 | `--show-toplevel` | 打印顶层工作树的绝对路径。 |
 | `--git-dir` | 打印 `.libra` 目录路径（Libra 的 `$GIT_DIR`）；在 Libra 中始终为绝对路径。 |
@@ -90,6 +91,7 @@ main
 | 解析完整提交 ID | `rev-parse <spec>` | `git rev-parse <spec>` | `jj log -r <rev> --no-graph -T commit_id` |
 | 缩写提交 ID | `--short` | `--short` | `jj log -r <rev> -T change_id.short()` |
 | 符号分支名 | `--abbrev-ref` | `--abbrev-ref` | N/A |
+| Shell 引用输出 | `--sq` | `--sq` | N/A |
 | 工作树根目录 | `--show-toplevel` | `--show-toplevel` | `jj root` |
 | JSON 输出 | `--json` | 无 | 无 |
 

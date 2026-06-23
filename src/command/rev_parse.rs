@@ -33,6 +33,7 @@ EXAMPLES:
     libra rev-parse HEAD                Print the full 40-char hash for HEAD
     libra rev-parse main~3              Resolve any revision spec to a full hash
     libra rev-parse --short HEAD        Print a non-ambiguous short hash
+    libra rev-parse --sq HEAD           Print the resolved object name, shell-quoted
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
@@ -65,6 +66,12 @@ pub struct RevParseArgs {
     /// Use this revision when no SPEC is given (Git's `--default <arg>`).
     #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir"])]
     pub default: Option<String>,
+
+    /// Shell-quote the resolved object name for safe shell consumption
+    /// (Git's `--sq`). Only affects the resolved-revision output, not the
+    /// repository-query modes (e.g. `--show-toplevel`).
+    #[clap(long = "sq")]
+    pub sq: bool,
 
     /// Print "true" when run inside a working tree, "false" otherwise.
     #[clap(long = "is-inside-work-tree", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_bare_repository", "git_dir", "absolute_git_dir"])]
@@ -148,8 +155,23 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        write_rev_parse_output(&mut writer, &result.value)
+        // `--sq` shell-quotes the resolved object name (the `resolve`/`short`
+        // modes), matching Git; the repository-query modes are left verbatim.
+        let value = if args.sq && matches!(result.mode, "resolve" | "short") {
+            sq_quote(&result.value)
+        } else {
+            result.value.clone()
+        };
+        write_rev_parse_output(&mut writer, &value)
     }
+}
+
+/// Single-quote a value for safe shell consumption (Git's `--sq`): wrap the
+/// whole value in single quotes and escape any embedded single quote as
+/// `'\''`. Applied unconditionally (Git quotes even values with no special
+/// characters).
+fn sq_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn write_rev_parse_output<W: Write>(writer: &mut W, value: &str) -> CliResult<()> {

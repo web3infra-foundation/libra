@@ -24,6 +24,7 @@ It also supports `--show-toplevel` to print the absolute repository root for a w
 |------|-------------|
 | `--verify` | Assert that `<SPEC>` resolves to exactly one object; print it, or exit 128 on failure (silent exit 1 under the global `--quiet` / `-q`). |
 | `--short` | Print a non-ambiguous abbreviated object ID. |
+| `--sq` | Shell-quote the resolved object name (single-quoted) for safe shell consumption. Only affects the resolved-revision output, not query modes like `--show-toplevel`. |
 | `--abbrev-ref` | Print the symbolic branch name instead of a commit hash. |
 | `--show-toplevel` | Print the absolute path to the top-level working tree. |
 | `--is-inside-git-dir` | Print `true` when the current directory is inside the `.libra` directory (Libra's `$GIT_DIR` equivalent), `false` otherwise. |
@@ -93,6 +94,7 @@ With `--show-toplevel`:
 | Resolve full commit ID | `rev-parse <spec>` | `git rev-parse <spec>` | `jj log -r <rev> --no-graph -T commit_id` |
 | Abbreviated commit ID | `--short` | `--short` | `jj log -r <rev> -T change_id.short()` |
 | Symbolic branch name | `--abbrev-ref` | `--abbrev-ref` | N/A |
+| Shell-quoted output | `--sq` | `--sq` | N/A |
 | Work tree root | `--show-toplevel` | `--show-toplevel` | `jj root` |
 | JSON output | `--json` | No | No |
 

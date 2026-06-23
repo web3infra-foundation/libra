@@ -634,3 +634,27 @@ fn test_rev_parse_absolute_git_dir_is_canonical_absolute() {
     let both = run_libra_command(&["rev-parse", "--absolute-git-dir", "--git-dir"], p);
     assert!(!both.status.success(), "conflicting flags rejected");
 }
+
+#[test]
+fn test_rev_parse_sq_single_quotes_resolved_object() {
+    let repo = create_committed_repo_via_cli();
+
+    let plain = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&plain, "rev-parse HEAD");
+    let hash = String::from_utf8_lossy(&plain.stdout).trim().to_string();
+
+    // `--sq` single-quotes the resolved object name.
+    let sq = run_libra_command(&["rev-parse", "--sq", "HEAD"], repo.path());
+    assert_cli_success(&sq, "rev-parse --sq HEAD");
+    let quoted = String::from_utf8_lossy(&sq.stdout).trim().to_string();
+    assert_eq!(quoted, format!("'{hash}'"), "expected single-quoted hash");
+
+    // `--sq` does not quote the repository-query modes (matches Git).
+    let toplevel = run_libra_command(&["rev-parse", "--sq", "--show-toplevel"], repo.path());
+    assert_cli_success(&toplevel, "rev-parse --sq --show-toplevel");
+    let path = String::from_utf8_lossy(&toplevel.stdout).trim().to_string();
+    assert!(
+        !path.starts_with('\'') && !path.ends_with('\''),
+        "query modes must not be shell-quoted: {path:?}"
+    );
+}
