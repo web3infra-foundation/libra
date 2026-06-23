@@ -38,6 +38,7 @@ EXAMPLES:
     libra checkout main                    Switch to a branch (prefer: libra switch main)
     libra checkout feature-x               Switch to another branch (prefer: libra switch feature-x)
     libra checkout -b feature-x            Create + switch to a new branch (prefer: libra switch -c feature-x)
+    libra checkout --detach main           Detach HEAD at a branch's commit instead of switching
     libra checkout -- file.txt             Restore a path from the index (prefer: libra restore file.txt)
     libra checkout HEAD -- file.txt        Restore a path from HEAD into index + worktree
     libra --json checkout main             Structured compatibility output
@@ -61,6 +62,11 @@ pub struct CheckoutArgs {
     /// local modifications to tracked files. Untracked files are still preserved.
     #[clap(short = 'f', long = "force")]
     force: bool,
+
+    /// Detach HEAD at the named commit even when it is a branch (rather than
+    /// switching to the branch).
+    #[clap(short = 'd', long = "detach")]
+    detach: bool,
 
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
@@ -288,9 +294,11 @@ async fn run_checkout(
     let previous_commit = current_commit_string().await?;
 
     // Match Git behavior: checking out the current branch is a no-op and should
-    // not be blocked by unrelated local changes.
+    // not be blocked by unrelated local changes. `--detach` is the exception:
+    // `checkout --detach <current-branch>` still detaches HEAD at its commit.
     if let Some(ref target_branch) = args.branch
         && previous_branch.as_ref() == Some(target_branch)
+        && !args.detach
     {
         return Ok(CheckoutOutput {
             action: "already-on".to_string(),
@@ -358,6 +366,7 @@ async fn run_checkout(
         Err(err) => return Err(CheckoutError::DelegatedCli(CliError::from(err))),
     }
 
+    let detach = args.detach;
     match (args.branch, args.new_branch, args.force_new_branch) {
         (Some(target_branch), _, _) => {
             let is_branch = Branch::find_branch_result(&target_branch, None)
@@ -365,7 +374,8 @@ async fn run_checkout(
                 .map_err(|error| map_checkout_branch_store_error("resolve checkout target", error))?
                 .is_some();
             match target_commit {
-                Some(commit_id) if !is_branch => {
+                // `--detach` forces the detach path even for a branch name.
+                Some(commit_id) if !is_branch || detach => {
                     checkout_detached(
                         target_branch,
                         commit_id,

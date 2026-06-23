@@ -1024,3 +1024,31 @@ fn test_checkout_create_traces_branch_is_blocked() {
         report.message,
     );
 }
+
+#[test]
+fn test_checkout_detach_at_branch_commit() {
+    use super::{create_committed_repo_via_cli, parse_json_stdout, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `checkout --detach main` detaches HEAD at main's commit instead of
+    // switching to the branch (HEAD is already on main here).
+    let out = run_libra_command(&["--json", "checkout", "--detach", "main"], p);
+    assert!(
+        out.status.success(),
+        "checkout --detach: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["action"], "detach", "action is detach: {json}");
+    assert_eq!(json["data"]["detached"], true, "HEAD is detached: {json}");
+
+    // HEAD is now detached, not on a branch.
+    let cur = run_libra_command(&["branch", "--show-current"], p);
+    let cur_out = String::from_utf8_lossy(&cur.stdout);
+    assert!(
+        cur_out.contains("detached"),
+        "HEAD should be detached, got: {cur_out:?}"
+    );
+}

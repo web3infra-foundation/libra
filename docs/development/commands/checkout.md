@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial
+- 兼容级别：`partial`。visible branch compatibility surface plus `checkout <commit>` / `-d`/`--detach` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -41,14 +41,14 @@ flowchart TD
 - 2026-06-04 `c7e090d7`（`feat(checkout): support -B, --detach, and --orphan branch checkout modes (v0.17.1303)`）：功能演进：support -B, --detach, and --orphan branch checkout modes (v0.17.1303)；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-04 `092371f0`（`fix(checkout): use exists_result for --orphan name collision (catch unborn refs) (v0.17.1308)`）：实现修正：use exists_result for --orphan name collision (catch unborn refs) (v0.17.1308)；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-04 `5bac3d88`（`docs(checkout): document -B/--detach/--orphan/--ours/--theirs and pass compat guards (v0.17.1306)`）：文档与兼容口径：document -B/--detach/--orphan/--ours/--theirs and pass compat guards (v0.17.1306)；当前文档按该节点之后的实现状态校准。
-- 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。当前源码已公开 `[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`checkout <commit>` detached HEAD 与 `-- <pathspec>`。
+- 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。当前源码已公开 `[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`checkout <commit>` / `-d`/`--detach` detached HEAD 与 `-- <pathspec>`。
 
 ## 当前状态
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/checkout.md`。
 - Synopsis：`libra checkout [-b <new_branch>] [-B <new_branch>] [<branch>] [-- <pathspec>...]`。
-- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`-f, --force`、`-- <pathspec>...`。
+- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`-f, --force`、`-d, --detach`、`-- <pathspec>...`。`-d`/`--detach` 让分支名也走 detached 路径：`checkout --detach <branch>` 在该分支的提交处 detach HEAD（而非切换到分支），复用现有 `checkout_detached`；同时跳过 "already-on" 短路（`--detach <当前分支>` 仍会 detach）。
 - `-f`/`--force`：在工作树/索引与 HEAD 有差异时仍切换，丢弃对**已跟踪**文件的本地修改（由 `restore_to_commit` 覆盖写回目标内容）。**有意安全差异**：即使带 `-f` 也仍拒绝覆盖会被目标分支写入的**未跟踪**文件（独立调用 `switch::ensure_no_untracked_overwrite`，避免静默丢失未跟踪数据），返回 128。
 
 
@@ -56,7 +56,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | visible branch compatibility surface plus `checkout <commit>` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | visible branch compatibility surface plus `checkout <commit>` / `-d`/`--detach` detached HEAD, `-b`/`-B` branch creation, and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code; patch modes still partial | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Patch mode | 原始对照：`checkout -p`；相关参数/替代：不支持 (use libra restore)；当前说明：按全局 D15 延后/拒绝。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

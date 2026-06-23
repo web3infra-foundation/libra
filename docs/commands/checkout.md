@@ -29,6 +29,7 @@ Path restoration is only enabled by an explicit `--` separator. Without `--`, `l
 | | `<branch>` | positional (optional) | Target branch to switch to. Omit to show current branch. |
 | `-b` | | `<name>` | Create a new branch from the current HEAD and switch to it |
 | `-B` | | `<name>` | Force-create a branch from the current HEAD and switch to it; resets an existing branch to the current HEAD |
+| `-d` | `--detach` | | Detach HEAD at the named commit even when it is a branch (instead of switching to the branch) |
 | | `[<tree-ish>] -- <pathspec>...` | positional | Restore paths. Without `<tree-ish>`, restores the worktree from the index. With `<tree-ish>`, restores both index and worktree from that source. |
 
 ### Flag examples
@@ -224,7 +225,7 @@ When `libra checkout feature` finds `origin/feature` but no local `feature` bran
 | Auto-track remote | `git checkout feature` (creates tracking) | `libra checkout feature` (creates tracking + pulls) | N/A |
 | Restore files | `git checkout -- file` | `libra checkout -- file` (prefer `libra restore file`) | `jj restore` |
 | Restore files from revision | `git checkout HEAD -- file` | `libra checkout HEAD -- file` (prefer `libra restore --source HEAD -S -W file`) | `jj restore --from <revision>` |
-| Detach HEAD | `git checkout <commit>` | Not supported (use `libra switch --detach`) | `jj edit <rev>` |
+| Detach HEAD | `git checkout <commit>` / `git checkout --detach <branch>` | `libra checkout <commit>` / `libra checkout -d`/`--detach <branch>` | `jj edit <rev>` |
 | Structured output | No | `--json` / `--machine` for branch compatibility actions | `--template` |
 
 ## Error Handling

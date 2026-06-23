@@ -29,7 +29,7 @@
 | [`blame`](blame.md) | `partial` | numeric `-L` ranges, porcelain/line-porcelain (`-p`), `-e`/`--show-email`, and display flags `-l`/`-s`/`-t`/`--abbrev` supported; reverse/whitespace/incremental/copy-move detection remain incomplete |
 | [`branch`](branch.md) | `partial` | create/list/delete/rename/copy(`-c`/`-C`)/upstream set+unset/current/contains/points-at/merged/no-merged/sort(refname,version:refname)/ignore-case supported; description/custom-format/remaining-sort-keys not exposed |
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` plus `--batch-check` / `--batch` / `--batch-command` / `--batch-all-objects` (with optional `=<format>`) supported; `-e` JSON/machine output not exposed |
-| [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
+| [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus `-d`/`--detach` and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
 | [`cherry-pick`](cherry-pick.md) | `partial` | commit replay, `-n`, and `-x` supported; edit/mainline/signoff/sequencer/strategy flags incomplete |
 | [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `--exclude` / `<pathspec>...` supported; `-i` not exposed |
 | [`clone`](clone.md) | `partial` | `--depth`, `--single-branch`, and `--tags`/`--no-tags` (clone fetches all tags by default) supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |

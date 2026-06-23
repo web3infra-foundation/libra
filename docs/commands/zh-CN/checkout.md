@@ -27,6 +27,7 @@ libra checkout [<tree-ish>] -- <pathspec>...
 |------|------|-------|-------------|
 | | `<branch>` | 位置参数（可选） | 要切换到的目标分支。省略时显示当前分支。 |
 | `-b` | | `<name>` | 从当前 HEAD 创建新分支并切换到它 |
+| `-d` | `--detach` | | 即使目标是分支也在其提交处 detach HEAD（而非切换到分支） |
 | | `[<tree-ish>] -- <pathspec>...` | 位置参数 | 恢复路径。没有 `<tree-ish>` 时，从索引恢复工作树。带 `<tree-ish>` 时，从该来源同时恢复索引和工作树。 |
 
 ### 标志示例
@@ -213,7 +214,7 @@ Git 肌肉记忆根深蒂固。使用 `git checkout` 多年的开发者会本能
 | 自动跟踪远程 | `git checkout feature`（创建 tracking） | `libra checkout feature`（创建 tracking + pull） | N/A |
 | 恢复文件 | `git checkout -- file` | `libra checkout -- file`（优先 `libra restore file`） | `jj restore` |
 | 从修订恢复文件 | `git checkout HEAD -- file` | `libra checkout HEAD -- file`（优先 `libra restore --source HEAD -S -W file`） | `jj restore --from <revision>` |
-| Detach HEAD | `git checkout <commit>` | 不支持（使用 `libra switch --detach`） | `jj edit <rev>` |
+| Detach HEAD | `git checkout <commit>` / `git checkout --detach <branch>` | `libra checkout <commit>` / `libra checkout -d`/`--detach <branch>` | `jj edit <rev>` |
 | 结构化输出 | 无 | 分支兼容动作支持 `--json` / `--machine` | `--template` |
 
 ## 错误处理
