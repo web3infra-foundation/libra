@@ -101,6 +101,12 @@ pub struct MergeArgs {
     /// message), so this is accepted for Git parity and is a no-op.
     #[arg(long = "no-edit")]
     pub no_edit: bool,
+
+    /// Do not show a diffstat at the end of the merge. Accepted for Git parity
+    /// and is a no-op: Libra's merge never prints a diffstat. (Git enables the
+    /// diffstat by default via `--stat`, which Libra does not implement.)
+    #[arg(short = 'n', long = "no-stat")]
+    pub no_stat: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

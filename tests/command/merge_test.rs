@@ -999,3 +999,45 @@ fn test_merge_no_edit_accepts_default_message() {
         String::from_utf8_lossy(&log.stdout)
     );
 }
+
+#[test]
+fn test_merge_no_stat_short_n_and_long_are_accepted() {
+    // `-n`/`--no-stat` suppress Git's post-merge diffstat. Libra's merge never
+    // prints a diffstat, so both are accepted no-ops that produce a normal merge.
+    for flag in ["-n", "--no-stat"] {
+        let temp_repo = create_committed_repo_via_cli();
+        let temp_path = temp_repo.path();
+        assert_cli_success(
+            &run_libra_command(&["branch", "feature"], temp_path),
+            "create feature",
+        );
+        assert_cli_success(
+            &run_libra_command(&["checkout", "feature"], temp_path),
+            "checkout feature",
+        );
+        commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+        assert_cli_success(
+            &run_libra_command(&["checkout", "main"], temp_path),
+            "checkout main",
+        );
+        commit_file(temp_path, "main.txt", "main\n", "main change");
+
+        let output = run_libra_command(&["merge", "feature", flag], temp_path);
+        assert_cli_success(&output, &format!("merge feature {flag}"));
+        // No diffstat is printed (Libra never shows one); the merge still happens.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains(" | ")
+                && !stdout.contains("file changed")
+                && !stdout.contains("files changed"),
+            "merge {flag} prints no diffstat: {stdout}"
+        );
+        let log = run_libra_command(&["log", "--oneline", "-n", "1"], temp_path);
+        assert!(
+            String::from_utf8_lossy(&log.stdout)
+                .to_lowercase()
+                .contains("merge"),
+            "merge {flag} created a merge commit"
+        );
+    }
+}

@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -31,6 +31,7 @@ Libra 仍未实现 octopus merge、自定义策略、策略选项、交互式消
 | `--squash` | 生成合并后的索引/工作树但不创建提交、不移动 HEAD；随后用普通 `libra commit` 收尾。 |
 | `--no-commit` | 执行合并并暂存结果但停在提交之前；随后用 `libra merge --continue` 收尾。 |
 | `--no-edit` | 接受自动生成的合并消息而不启动编辑器。Libra 从不为 merge 打开编辑器，故此为对齐 Git 而接受的 no-op。 |
+| `-n`, `--no-stat` | 合并结束时不显示 diffstat。为对齐 Git 而接受的 no-op：Libra 的 merge 从不打印 diffstat。（Git 默认的 `--stat` diffstat 未实现。） |
 | `--continue` | 在冲突已解决并暂存后完成进行中的合并。 |
 | `--abort` | 恢复合并前的 HEAD、索引和工作树。 |
 | `--json` | 输出结构化成功信封。 |
@@ -129,6 +130,7 @@ Merge aborted.
 | 不提交 | `--no-commit` | `--no-commit` | N/A |
 | 提交消息 | `-m <msg>` | `-m <msg>` | N/A |
 | 不编辑 | `--no-edit`（no-op；从不编辑） | `--no-edit` | N/A |
+| 不显示 diffstat | `-n` / `--no-stat`（no-op；从不打印） | `-n` / `--no-stat` | N/A |
 | 自定义策略 | 不支持 | `--strategy`, `-X` | N/A |
 | 验证签名 | 不支持 | `--verify-signatures` | N/A |
 | JSON 输出 | `--json` / `--machine` | 不支持 | N/A |
