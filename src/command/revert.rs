@@ -41,6 +41,7 @@ EXAMPLES:
     libra revert abc1234                  Revert a specific commit
     libra revert -n HEAD                  Revert without auto-committing
     libra revert -m 1 <merge>             Revert a merge commit relative to parent 1
+    libra revert HEAD --no-edit           Accept the default revert message (no editor)
     libra revert --json HEAD              Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────
@@ -230,6 +231,13 @@ pub struct RevertArgs {
     /// revert commit message.
     #[clap(short = 's', long)]
     pub signoff: bool,
+
+    /// Accept the auto-generated revert message without launching an editor.
+    /// Libra never opens an editor for revert (it always uses the default
+    /// `Revert "<subject>"` message), so this is accepted for Git parity and is
+    /// a no-op; the `--edit` counterpart is not provided.
+    #[clap(long = "no-edit")]
+    pub no_edit: bool,
 }
 
 pub async fn execute(args: RevertArgs) {

@@ -60,7 +60,6 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -93,7 +92,6 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -127,7 +125,6 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -166,6 +163,7 @@ async fn test_basic_revert() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        no_edit: false,
     })
     .await;
 
@@ -239,7 +237,6 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -270,7 +267,6 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -289,6 +285,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        no_edit: false,
     })
     .await;
 
@@ -305,7 +302,6 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -349,7 +345,6 @@ async fn test_revert_root_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
-        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -375,6 +370,7 @@ async fn test_revert_root_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        no_edit: false,
     })
     .await;
 
@@ -679,6 +675,7 @@ async fn test_revert_errors() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        no_edit: false,
     })
     .await;
 
@@ -777,5 +774,33 @@ fn test_revert_mainline_out_of_range_errors_128() {
     assert!(
         stderr.contains("does not have a parent number 5"),
         "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn revert_no_edit_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("rev.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "rev.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    std::fs::write(p.join("rev.txt"), "change\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "rev.txt"], p), "stage change");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "the change", "--no-verify"], p),
+        "commit change",
+    );
+
+    // `--no-edit` is accepted (Libra never opens an editor for revert) and the
+    // revert is applied normally.
+    let revert = run_libra_command(&["revert", "HEAD", "--no-edit"], p);
+    assert_cli_success(&revert, "revert HEAD --no-edit");
+    assert_eq!(
+        std::fs::read_to_string(p.join("rev.txt")).unwrap(),
+        "base\n",
+        "revert restored the file content"
     );
 }
