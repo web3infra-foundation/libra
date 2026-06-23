@@ -23,6 +23,12 @@ libra blame <file> [<commit>] [-L <range>]
 | File | | 位置参数（必需） | 要 blame 的文件。必须存在于指定修订中。 |
 | Commit | | 位置参数（可选） | blame 的起始修订。默认为 `HEAD`。 |
 | Line range | `-L` | `-L <RANGE>` | 将 blame 限制到一个行范围。格式见下方。 |
+| 显示 email | `-e` | `--show-email` | 默认输出中以 `<email>` 显示作者邮箱代替作者名。 |
+| 完整 hash | `-l` | | 显示完整提交 hash 取代缩写。 |
+| 隐藏作者/日期 | `-s` | | 隐藏作者名与时间戳列（仅保留 hash + 行号）。 |
+| 原始时间戳 | `-t` | | 在日期列显示原始 author 时间戳（epoch 秒）取代格式化日期。 |
+| 缩写位数 | | `--abbrev <N>` | 缩写 hash 使用 N 位 hex（与 `-l` 同时给出时忽略）。 |
+| Porcelain | `-p` | `--porcelain` | 机器可读 porcelain 输出（每个提交一次元数据）。 |
 | JSON | | `--json` | 输出结构化 JSON。 |
 | Quiet | | `--quiet` | 验证输入但抑制所有 blame 输出。 |
 
@@ -141,9 +147,12 @@ Git 的 blame 默认使用 HEAD，并要求 `git blame --contents <file>` 才能
 | 行范围（数字） | `-L N,M` / `-L N,+C` / `-L N` | `-L <start>,<end>` | N/A |
 | 行范围（正则） | 不支持 | `-L :<funcname>` / `-L /regex/` | N/A |
 | Reverse blame | 不支持 | `--reverse` | N/A |
-| 显示 email | 不支持 | `-e` / `--show-email` | N/A |
-| 显示时间戳 | 默认包含 | `-t`（原始时间戳） | N/A |
-| Porcelain 格式 | 不支持 | `--porcelain` / `--line-porcelain` | N/A |
+| 显示 email | `-e` / `--show-email` | `-e` / `--show-email` | N/A |
+| 完整 hash | `-l` | `-l` | N/A |
+| 隐藏作者/日期 | `-s` | `-s` | N/A |
+| 显示时间戳 | `-t`（原始 epoch；默认格式化） | `-t`（原始时间戳） | N/A |
+| 缩写位数 | `--abbrev <N>` | `--abbrev=<N>` | N/A |
+| Porcelain 格式 | `-p` / `--porcelain` / `--line-porcelain` | `-p` / `--porcelain` / `--line-porcelain` | N/A |
 | 增量输出 | 不支持 | `--incremental` | N/A |
 | 评分阈值 | 不支持 | `-M` / `-C`（移动/复制检测） | N/A |
 | 忽略修订 | 不支持 | `--ignore-rev` / `--ignore-revs-file` | N/A |

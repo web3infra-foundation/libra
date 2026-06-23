@@ -586,6 +586,10 @@ async fn blame_runs_with_sha1() {
         porcelain: false,
         line_porcelain: false,
         show_email: false,
+        long: false,
+        suppress: false,
+        raw_timestamp: false,
+        abbrev: None,
     })
     .await;
 }
@@ -608,6 +612,10 @@ async fn blame_runs_with_sha256() {
         porcelain: false,
         line_porcelain: false,
         show_email: false,
+        long: false,
+        suppress: false,
+        raw_timestamp: false,
+        abbrev: None,
     })
     .await;
 }
@@ -627,5 +635,71 @@ async fn blame_rejects_sha1_length_on_sha256_repo() {
     assert!(
         res.is_err(),
         "expect get_target_commit to reject SHA-1 length hash in SHA-256 repo"
+    );
+}
+
+#[test]
+fn test_blame_display_flags_long_suppress_timestamp_abbrev() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("tracked.txt"), "line1\nline2\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "tracked.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "u", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    // -l: full 40-char (sha1) commit hash at the start of each line.
+    let long = run_libra_command(&["blame", "-l", "tracked.txt"], p);
+    assert!(long.status.success(), "blame -l ok");
+    let l = String::from_utf8_lossy(&long.stdout);
+    let first_tok = l.lines().next().unwrap().split_whitespace().next().unwrap();
+    assert!(
+        first_tok.len() >= 40,
+        "-l shows the full hash, got {first_tok:?}"
+    );
+
+    // --abbrev=12: 12-digit hash column.
+    let ab = run_libra_command(&["blame", "--abbrev=12", "tracked.txt"], p);
+    assert!(ab.status.success(), "blame --abbrev ok");
+    let a = String::from_utf8_lossy(&ab.stdout);
+    let ab_tok = a.lines().next().unwrap().split_whitespace().next().unwrap();
+    assert_eq!(
+        ab_tok.len(),
+        12,
+        "--abbrev=12 shows 12 digits, got {ab_tok:?}"
+    );
+
+    // -s: suppress the author/date columns (no parenthesised author block).
+    let sup = run_libra_command(&["blame", "-s", "tracked.txt"], p);
+    assert!(sup.status.success(), "blame -s ok");
+    let s = String::from_utf8_lossy(&sup.stdout);
+    let first = s.lines().next().unwrap();
+    assert!(!first.contains('('), "-s drops the author block: {first:?}");
+    assert!(
+        first.contains(") "),
+        "-s keeps the line-number marker: {first:?}"
+    );
+
+    // -t: raw epoch timestamp (a run of digits) in the date column.
+    let ts = run_libra_command(&["blame", "-t", "tracked.txt"], p);
+    assert!(ts.status.success(), "blame -t ok");
+    let t = String::from_utf8_lossy(&ts.stdout);
+    assert!(
+        t.lines().next().unwrap().contains('('),
+        "-t keeps the author block: {t:?}"
+    );
+
+    // -p: alias for --porcelain.
+    let porc = run_libra_command(&["blame", "-p", "tracked.txt"], p);
+    assert!(porc.status.success(), "blame -p ok");
+    assert!(
+        String::from_utf8_lossy(&porc.stdout).contains("author "),
+        "-p emits porcelain headers"
     );
 }

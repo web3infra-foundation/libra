@@ -41,6 +41,8 @@ EXAMPLES:
     libra blame src/main.rs abc1234        Blame a file at a specific commit
     libra blame -L 10,20 src/main.rs       Blame lines 10-20
     libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
+    libra blame -l src/main.rs             Show full commit hashes
+    libra blame -s src/main.rs             Suppress the author and date columns
     libra --json blame src/main.rs         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -59,7 +61,7 @@ pub struct BlameArgs {
     pub line_range: Option<String>,
 
     /// Emit the machine-readable porcelain format (commit metadata once per commit).
-    #[clap(long)]
+    #[clap(short = 'p', long)]
     pub porcelain: bool,
 
     /// Like --porcelain, but repeat the commit metadata header for every line.
@@ -69,6 +71,22 @@ pub struct BlameArgs {
     /// Show the author email instead of the author name in the default output.
     #[clap(short = 'e', long = "show-email")]
     pub show_email: bool,
+
+    /// Show the long (full) commit hash instead of the abbreviated one.
+    #[clap(short = 'l')]
+    pub long: bool,
+
+    /// Suppress the author name and timestamp columns from the default output.
+    #[clap(short = 's')]
+    pub suppress: bool,
+
+    /// Show the raw author timestamp (epoch seconds) instead of a formatted date.
+    #[clap(short = 't')]
+    pub raw_timestamp: bool,
+
+    /// Use N hex digits for the abbreviated commit hash (ignored when `-l` is set).
+    #[clap(long, value_name = "N")]
+    pub abbrev: Option<usize>,
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -80,6 +98,8 @@ pub struct BlameLine {
     pub author: String,
     pub author_email: String,
     pub date: String,
+    /// Raw author timestamp (epoch seconds); surfaced for `-t` and JSON callers.
+    pub timestamp: i64,
     pub content: String,
 }
 
@@ -203,6 +223,25 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
 
     let mut output = String::new();
     for blame in &result.lines {
+        // Hash column: `-l` shows the full hash; `--abbrev=<n>` shows n digits;
+        // otherwise the default short hash.
+        let hash_col = if args.long {
+            blame.hash.clone()
+        } else if let Some(n) = args.abbrev {
+            blame.hash.chars().take(n).collect::<String>()
+        } else {
+            blame.short_hash.clone()
+        };
+
+        // `-s` suppresses the author/timestamp columns entirely.
+        if args.suppress {
+            output.push_str(&format!(
+                "{} {}) {}\n",
+                hash_col, blame.line_number, blame.content
+            ));
+            continue;
+        }
+
         // `-e`/`--show-email` shows `<email>` (Git's form) in the author slot.
         let display_author = if args.show_email {
             format!("<{}>", blame.author_email)
@@ -215,19 +254,24 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         } else {
             format!("{display_author:15}")
         };
-        let date_formatted = blame
-            .date
-            .parse::<DateTime<chrono::FixedOffset>>()
-            .map(|dt| {
-                dt.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M:%S %z")
-                    .to_string()
-            })
-            .unwrap_or_else(|_| blame.date.clone());
+        // `-t` shows the raw epoch timestamp; otherwise the localized date.
+        let date_col = if args.raw_timestamp {
+            blame.timestamp.to_string()
+        } else {
+            blame
+                .date
+                .parse::<DateTime<chrono::FixedOffset>>()
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S %z")
+                        .to_string()
+                })
+                .unwrap_or_else(|_| blame.date.clone())
+        };
 
         output.push_str(&format!(
             "{} ({:19} {} {}) {}\n",
-            blame.short_hash, author_short, date_formatted, blame.line_number, blame.content
+            hash_col, author_short, date_col, blame.line_number, blame.content
         ));
     }
 
@@ -360,6 +404,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     author: line.author,
                     author_email: line.author_email,
                     date: format_blame_timestamp(line.timestamp),
+                    timestamp: line.timestamp,
                     content: line.content,
                 }
             })

@@ -24,6 +24,11 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Commit | | positional (optional) | The revision to start blame from. Defaults to `HEAD`. |
 | Line range | `-L` | `-L <RANGE>` | Restrict blame to a line range. See formats below. |
 | Show email | `-e` | `--show-email` | Show the author email (as `<email>`) instead of the author name in the default output. |
+| Long hash | `-l` | | Show the full commit hash instead of the abbreviated one. |
+| Suppress | `-s` | | Suppress the author name and timestamp columns (show only hash + line). |
+| Raw time | `-t` | | Show the raw author timestamp (epoch seconds) instead of a formatted date. |
+| Abbrev | | `--abbrev <N>` | Use N hex digits for the abbreviated commit hash (ignored with `-l`). |
+| Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (commit metadata once per commit). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
 
@@ -143,8 +148,11 @@ The commit argument is positional (second argument after the file path) rather t
 | Line range (regex) | Not supported | `-L :<funcname>` / `-L /regex/` | N/A |
 | Reverse blame | Not supported | `--reverse` | N/A |
 | Show email | `-e` / `--show-email` (default human output) | `-e` / `--show-email` | N/A |
-| Show timestamp | Included by default | `-t` (raw timestamp) | N/A |
-| Porcelain format | `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `--porcelain` / `--line-porcelain` | N/A |
+| Long hash | `-l` | `-l` | N/A |
+| Suppress author/date | `-s` | `-s` | N/A |
+| Show timestamp | `-t` (raw epoch; formatted by default) | `-t` (raw timestamp) | N/A |
+| Abbrev length | `--abbrev <N>` | `--abbrev=<N>` | N/A |
+| Porcelain format | `-p` / `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `-p` / `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
 | Score threshold | Not supported | `-M` / `-C` (move/copy detection) | N/A |
 | Ignore revisions | Not supported | `--ignore-rev` / `--ignore-revs-file` | N/A |
