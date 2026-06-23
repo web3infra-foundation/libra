@@ -942,3 +942,28 @@ fn test_add_pathspec_file_nul_requires_from_file() {
         "error should mention the required --pathspec-from-file, got: {stderr}"
     );
 }
+
+#[test]
+fn test_add_dry_run_short_n_and_d_alias() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("new.txt"), "x\n").unwrap();
+
+    // `-n` (Git's short for --dry-run) previews without staging.
+    let dry = run_libra_command(&["add", "-n", "new.txt"], p);
+    assert_cli_success(&dry, "add -n");
+    let status = run_libra_command(&["status", "--short"], p);
+    assert!(
+        !String::from_utf8_lossy(&status.stdout).contains("A  new.txt"),
+        "add -n does not stage the file"
+    );
+
+    // `-d` remains a working back-compat alias for --dry-run.
+    let dry_d = run_libra_command(&["add", "-d", "new.txt"], p);
+    assert_cli_success(&dry_d, "add -d (alias)");
+    let status2 = run_libra_command(&["status", "--short"], p);
+    assert!(
+        !String::from_utf8_lossy(&status2.stdout).contains("A  new.txt"),
+        "add -d also does not stage the file"
+    );
+}

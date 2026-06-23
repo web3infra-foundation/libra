@@ -96,8 +96,9 @@ pub struct AddArgs {
     #[clap(short = 'f', long)]
     pub force: bool,
 
-    /// dry run
-    #[clap(short, long)]
+    /// dry run: show what would be staged without changing the index.
+    /// `-n` matches Git; `-d` is kept as a Libra-compatible alias.
+    #[clap(short = 'n', long, visible_short_alias = 'd')]
     pub dry_run: bool,
 
     /// ignore errors

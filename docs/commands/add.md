@@ -78,7 +78,8 @@ libra add -f ignored_file.log
 ### `-n, --dry-run`
 
 Preview what would be staged without actually modifying the index. Output shows which
-files would be added, modified, or removed.
+files would be added, modified, or removed. `-n` matches Git; `-d` is also accepted
+as a Libra-compatible short alias.
 
 ```bash
 libra add -n file.txt

@@ -64,7 +64,7 @@ libra add -f ignored_file.log
 
 ### `-n, --dry-run`
 
-预览会暂存什么，但不实际修改索引。输出显示哪些文件会被添加、修改或移除。
+预览会暂存什么，但不实际修改索引。输出显示哪些文件会被添加、修改或移除。`-n` 对齐 Git；`-d` 也作为 Libra 兼容短别名被接受。
 
 ```bash
 libra add -n file.txt
