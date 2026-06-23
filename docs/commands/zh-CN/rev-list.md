@@ -20,6 +20,7 @@ libra rev-list [OPTIONS] [SPEC]
 | `--skip <N>` | 输出或计数前跳过前 `N` 个提交。 |
 | `--reverse` | 反转所选提交的输出顺序。先应用提交限制（`--max-count`/`--skip`），再反转结果。 |
 | `--all` | 以所有 ref（分支、远程跟踪分支和标签）和当前 HEAD 为遍历起点，叠加于任何显式 `<SPEC>`。 |
+| `--date-order` | 按提交者日期顺序（最新优先）显示提交。作为 Libra 既有默认顺序的 no-op 接受。与 Git 不同，Libra 不额外施加 topo「父提交不先于其子提交」约束（仅在提交者日期发生偏斜时可观察到差异）。 |
 | `--count` | 只打印过滤后的提交数量。 |
 | `--merges` | 只打印至少有两个父提交的 merge commit。 |
 | `--no-merges` | 排除至少有两个父提交的 merge commit。 |
@@ -38,6 +39,7 @@ libra rev-list --count HEAD
 libra rev-list -n 5 HEAD
 libra rev-list --reverse HEAD
 libra rev-list --all
+libra rev-list --date-order HEAD
 libra rev-list --skip 5 --max-count 10 HEAD
 libra rev-list --merges HEAD
 libra rev-list --no-merges HEAD

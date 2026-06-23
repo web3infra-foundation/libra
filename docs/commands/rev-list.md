@@ -20,6 +20,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 | `--skip <N>` | Skip the first `N` commits before output or counting. |
 | `--reverse` | Output the selected commits in reverse order. Commit limiting (`--max-count`/`--skip`) is applied first, then the result is reversed. |
 | `--all` | Seed the walk with every ref (branches, remote-tracking branches, and tags) and the current HEAD, in addition to any explicit `<SPEC>`. |
+| `--date-order` | Show commits in committer-date order (newest first). Accepted as a no-op for Libra's existing default ordering. Unlike Git, Libra does not add the topo "no parent before its children" constraint (only observable under committer-date skew). |
 | `--count` | Print only the number of commits after filters. |
 | `--since <DATE>`, `--after <DATE>` | Print commits whose committer timestamp is at or after `DATE`. |
 | `--until <DATE>`, `--before <DATE>` | Print commits whose committer timestamp is at or before `DATE`. |
@@ -54,6 +55,7 @@ libra rev-list --count HEAD
 libra rev-list -n 5 HEAD
 libra rev-list --reverse HEAD
 libra rev-list --all
+libra rev-list --date-order HEAD
 libra rev-list --skip 5 --max-count 10 HEAD
 libra rev-list --since 2026-01-01 HEAD
 libra rev-list --after "2 weeks ago" --before 2026-06-01 HEAD

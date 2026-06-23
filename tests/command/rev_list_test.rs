@@ -433,3 +433,20 @@ fn test_rev_list_all_includes_detached_head_commit() {
         String::from_utf8_lossy(&all.stdout)
     );
 }
+
+#[test]
+fn test_rev_list_date_order_matches_default_ordering() {
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
+    let p = repo.path();
+    // --date-order is accepted and produces Libra's default committer-date
+    // (newest-first) ordering.
+    let default = run_libra_command(&["rev-list", "HEAD"], p);
+    assert_cli_success(&default, "rev-list HEAD");
+    let dated = run_libra_command(&["rev-list", "--date-order", "HEAD"], p);
+    assert_cli_success(&dated, "rev-list --date-order HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout),
+        String::from_utf8_lossy(&dated.stdout),
+        "--date-order matches the default ordering"
+    );
+}

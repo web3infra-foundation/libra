@@ -57,6 +57,13 @@ pub struct RevListArgs {
     #[clap(long)]
     pub all: bool,
 
+    /// Show commits in committer-date order (newest first). This is Libra's
+    /// default ordering, so the flag is accepted for Git compatibility and
+    /// makes the ordering explicit. Libra does not additionally enforce Git's
+    /// topo constraint, which is only observable under committer-date skew.
+    #[clap(long)]
+    pub date_order: bool,
+
     /// Print only the number of commits after filters
     #[clap(long)]
     pub count: bool,
