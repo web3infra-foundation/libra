@@ -25,6 +25,8 @@ libra rev-parse [OPTIONS] [SPEC]
 | `--short` | 打印无歧义的缩写对象 ID。 |
 | `--abbrev-ref` | 打印符号分支名，而不是提交哈希。 |
 | `--show-toplevel` | 打印顶层工作树的绝对路径。 |
+| `--git-dir` | 打印 `.libra` 目录路径（Libra 的 `$GIT_DIR`）；在 Libra 中始终为绝对路径。 |
+| `--absolute-git-dir` | 同 `--git-dir`，但始终为规范化后的绝对路径。（Libra 中 `--git-dir` 已是绝对路径，故两者一致。） |
 | `<SPEC>` | 要解析的修订。省略时默认为 `HEAD`。 |
 
 ## 常用命令
@@ -35,6 +37,7 @@ libra rev-parse HEAD~1
 libra rev-parse --short HEAD
 libra rev-parse --abbrev-ref HEAD
 libra rev-parse --show-toplevel
+libra rev-parse --absolute-git-dir
 libra --json rev-parse --short HEAD
 ```
 
@@ -78,7 +81,7 @@ main
 }
 ```
 
-`mode` 是 `resolve`、`short`、`abbrev_ref` 或 `show_toplevel` 之一。
+`mode` 是 `resolve`、`short`、`abbrev_ref`、`show_toplevel`、`show_prefix`、`show_cdup`、`is_inside_work_tree`、`is_inside_git_dir`、`is_bare_repository`、`git_dir` 或 `absolute_git_dir` 之一。
 
 ## 参数对比：Libra vs Git vs jj
 

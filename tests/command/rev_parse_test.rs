@@ -606,3 +606,31 @@ fn test_rev_parse_is_inside_git_dir() {
     assert_cli_success(&out, "rev-parse --is-inside-git-dir from .libra");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
 }
+
+#[test]
+fn test_rev_parse_absolute_git_dir_is_canonical_absolute() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    let out = run_libra_command(&["rev-parse", "--absolute-git-dir"], p);
+    assert_cli_success(&out, "rev-parse --absolute-git-dir");
+    let abs = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        std::path::Path::new(&abs).is_absolute(),
+        "absolute path: {abs:?}"
+    );
+    assert!(abs.ends_with(".libra"), "points at .libra: {abs:?}");
+
+    // In Libra `--git-dir` is already absolute, so the two coincide.
+    let gd = run_libra_command(&["rev-parse", "--git-dir"], p);
+    assert_cli_success(&gd, "rev-parse --git-dir");
+    assert_eq!(
+        abs,
+        String::from_utf8_lossy(&gd.stdout).trim(),
+        "--absolute-git-dir matches --git-dir"
+    );
+
+    // Mutually exclusive with --git-dir.
+    let both = run_libra_command(&["rev-parse", "--absolute-git-dir", "--git-dir"], p);
+    assert!(!both.status.success(), "conflicting flags rejected");
+}

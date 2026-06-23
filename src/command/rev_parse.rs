@@ -38,6 +38,7 @@ EXAMPLES:
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
     libra rev-parse --is-inside-git-dir    Print true/false for .libra-directory context
+    libra rev-parse --absolute-git-dir  Print the canonicalized absolute .libra path
     libra rev-parse --json HEAD         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -58,28 +59,33 @@ pub struct RevParseArgs {
 
     /// Verify that the revision resolves to exactly one object; fail (exit 128) otherwise.
     /// With the global `-q`/`--quiet`, failure is silent with exit code 1.
-    #[clap(long, conflicts_with_all = ["show_toplevel", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir"])]
+    #[clap(long, conflicts_with_all = ["show_toplevel", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir"])]
     pub verify: bool,
 
     /// Use this revision when no SPEC is given (Git's `--default <arg>`).
-    #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir"])]
+    #[clap(long, value_name = "ARG", conflicts_with_all = ["show_toplevel", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir"])]
     pub default: Option<String>,
 
     /// Print "true" when run inside a working tree, "false" otherwise.
-    #[clap(long = "is-inside-work-tree", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_bare_repository", "git_dir"])]
+    #[clap(long = "is-inside-work-tree", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_bare_repository", "git_dir", "absolute_git_dir"])]
     pub is_inside_work_tree: bool,
 
     /// Print "true" when the current directory is inside the `.libra` directory, "false" otherwise.
-    #[clap(long = "is-inside-git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_inside_work_tree", "is_bare_repository", "git_dir"])]
+    #[clap(long = "is-inside-git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "is_inside_work_tree", "is_bare_repository", "git_dir", "absolute_git_dir"])]
     pub is_inside_git_dir: bool,
 
     /// Print "true" when the repository is bare, "false" otherwise.
-    #[clap(long = "is-bare-repository", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir"])]
+    #[clap(long = "is-bare-repository", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir", "absolute_git_dir"])]
     pub is_bare_repository: bool,
 
     /// Print the path to the `.libra` directory.
     #[clap(long = "git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
     pub git_dir: bool,
+
+    /// Print the canonicalized absolute path to the `.libra` directory (like
+    /// `--git-dir`, but always absolute).
+    #[clap(long = "absolute-git-dir", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec", "git_dir"])]
+    pub absolute_git_dir: bool,
 
     /// Print the path relative from the current directory to the repository root.
     #[clap(long = "show-cdup", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
@@ -203,6 +209,19 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
             mode: "git_dir",
             input: None,
             value: util::path_to_string(&dir),
+        });
+    }
+
+    if args.absolute_git_dir {
+        let dir = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
+        // `--git-dir` already yields an absolute path in Libra; canonicalize to
+        // guarantee Git's "canonicalized absolute path" contract, falling back
+        // to the resolved path if canonicalization fails.
+        let abs = std::fs::canonicalize(&dir).unwrap_or(dir);
+        return Ok(RevParseOutput {
+            mode: "absolute_git_dir",
+            input: None,
+            value: util::path_to_string(&abs),
         });
     }
 
@@ -586,6 +605,30 @@ mod tests {
             vec!["rev-parse", "--verify", "--is-inside-git-dir"],
             vec!["rev-parse", "--default", "HEAD", "--is-inside-git-dir"],
             vec!["rev-parse", "--is-inside-git-dir", "--git-dir"],
+        ] {
+            let err = RevParseArgs::try_parse_from(combo.clone())
+                .expect_err(&format!("{combo:?} should be rejected"));
+            assert!(
+                err.to_string().contains("cannot be used with"),
+                "expected a conflict error for {combo:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rev_parse_args_absolute_git_dir_conflicts_mirror_git_dir() {
+        // `--absolute-git-dir` must share `--git-dir`'s conflict set so invalid
+        // mode combinations are rejected rather than silently bypassed.
+        for combo in [
+            vec!["rev-parse", "--verify", "--absolute-git-dir"],
+            vec!["rev-parse", "--default", "HEAD", "--absolute-git-dir"],
+            vec!["rev-parse", "--is-inside-work-tree", "--absolute-git-dir"],
+            vec!["rev-parse", "--is-inside-git-dir", "--absolute-git-dir"],
+            vec!["rev-parse", "--is-bare-repository", "--absolute-git-dir"],
+            vec!["rev-parse", "--git-dir", "--absolute-git-dir"],
+            vec!["rev-parse", "--short", "--absolute-git-dir"],
+            vec!["rev-parse", "--abbrev-ref", "--absolute-git-dir"],
+            vec!["rev-parse", "--show-toplevel", "--absolute-git-dir"],
         ] {
             let err = RevParseArgs::try_parse_from(combo.clone())
                 .expect_err(&format!("{combo:?} should be rejected"));

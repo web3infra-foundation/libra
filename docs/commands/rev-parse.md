@@ -27,6 +27,8 @@ It also supports `--show-toplevel` to print the absolute repository root for a w
 | `--abbrev-ref` | Print the symbolic branch name instead of a commit hash. |
 | `--show-toplevel` | Print the absolute path to the top-level working tree. |
 | `--is-inside-git-dir` | Print `true` when the current directory is inside the `.libra` directory (Libra's `$GIT_DIR` equivalent), `false` otherwise. |
+| `--git-dir` | Print the path to the `.libra` directory (Libra's `$GIT_DIR`). In Libra this is always absolute. |
+| `--absolute-git-dir` | Like `--git-dir`, but always the canonicalized absolute path. (In Libra `--git-dir` is already absolute, so the two coincide.) |
 | `<SPEC>` | Revision to resolve. Defaults to `HEAD` when omitted. |
 
 ## Common Commands
@@ -38,6 +40,7 @@ libra rev-parse --short HEAD
 libra rev-parse --abbrev-ref HEAD
 libra rev-parse --show-toplevel
 libra rev-parse --is-inside-git-dir
+libra rev-parse --absolute-git-dir
 libra --json rev-parse --short HEAD
 ```
 
@@ -81,7 +84,7 @@ With `--show-toplevel`:
 }
 ```
 
-`mode` is one of `resolve`, `short`, `abbrev_ref`, or `show_toplevel`.
+`mode` is one of `resolve`, `short`, `abbrev_ref`, `show_toplevel`, `show_prefix`, `show_cdup`, `is_inside_work_tree`, `is_inside_git_dir`, `is_bare_repository`, `git_dir`, or `absolute_git_dir`.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
