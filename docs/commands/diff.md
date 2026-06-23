@@ -9,7 +9,7 @@ libra diff [<pathspec>...]
 libra diff --staged [<pathspec>...]
 libra diff --old <commit> --new <commit> [<pathspec>...]
 libra diff [--name-only | --name-status | --numstat | --stat | --shortstat | --summary]
-           [-s | --no-patch] [--exit-code]
+           [-s | --no-patch] [--exit-code] [-z]
 libra diff [--algorithm <name>] [--output <file>]
 ```
 
@@ -17,7 +17,7 @@ libra diff [--algorithm <name>] [--output <file>]
 
 `libra diff` shows changes between different states of the repository. By default it compares the index against the working tree (unstaged changes). With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
 
-The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--shortstat`, `--summary`). A status-only check is possible with `-s`/`--no-patch` and `--exit-code`.
+The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--shortstat`, `--summary`). A status-only check is possible with `-s`/`--no-patch` and `--exit-code`, and `-z`/`--null` makes the name/numstat outputs NUL-terminated for safe scripting.
 
 Pathspec arguments filter the diff to only show changes in matching files or directories.
 
@@ -39,6 +39,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Summary | | `--summary` | Show a condensed summary of created and deleted files (no line for plain content edits). Libra's diff does not detect renames (shown as delete + create) or surface mode-only changes. |
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
 | Exit code | | `--exit-code` | Still print the diff, but exit with code 1 when there are differences (0 otherwise). Unlike `--quiet`, the diff is not suppressed. |
+| NUL output | `-z` | `--null` | NUL-terminate `--name-only`/`--name-status`/`--numstat` records (and split the `--name-status` status and path into separate NUL fields); other modes are unaffected. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -138,6 +139,7 @@ Supported output modes:
 - `--summary` (condensed create/delete summary; renames show as delete + create, mode-only changes are not surfaced)
 - `-s` / `--no-patch` suppresses the patch body (for status-only checks)
 - `--exit-code` still prints the diff but exits `1` when there are differences
+- `-z` / `--null` NUL-terminates `--name-only`/`--name-status`/`--numstat` records (status and path become separate NUL fields under `--name-status`)
 - `--quiet` suppresses stdout and uses exit `1` to signal that differences exist
 
 `--output <file>` writes human-readable output to a file. In `--quiet` mode the file is still written, but differences still return exit `1`. In `--json` mode this flag is ignored and output always goes to stdout.
@@ -223,6 +225,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Summary | `--summary` | `--summary` | `--summary` |
 | Suppress patch | `-s` / `--no-patch` | `-s` / `--no-patch` | N/A |
 | Exit code | `--exit-code` | `--exit-code` | N/A |
+| NUL-terminated output | `-z` / `--null` | `-z` | N/A |
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
 | Binary diff | Not supported | `--binary` | N/A |
 | Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |

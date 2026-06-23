@@ -1063,3 +1063,36 @@ fn test_diff_shortstat_exit_code_and_no_patch() {
         "--json --exit-code still emits the JSON payload"
     );
 }
+
+#[test]
+fn test_diff_z_nul_terminates_name_outputs() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("tracked.txt"), "tracked\nchanged\n").unwrap();
+
+    // --name-only -z: each path NUL-terminated, no trailing newline.
+    let no = run_libra_command(&["diff", "--name-only", "-z"], p);
+    assert!(no.status.success(), "name-only -z ok");
+    assert_eq!(
+        no.stdout, b"tracked.txt\0",
+        "name-only -z framing: {:?}",
+        no.stdout
+    );
+
+    // --name-status -z: status and path as separate NUL fields.
+    let ns = run_libra_command(&["diff", "--name-status", "-z"], p);
+    assert!(ns.status.success(), "name-status -z ok");
+    assert_eq!(
+        ns.stdout, b"M\0tracked.txt\0",
+        "name-status -z framing: {:?}",
+        ns.stdout
+    );
+
+    // Without -z, the same query is newline-terminated (sanity check).
+    let plain = run_libra_command(&["diff", "--name-only"], p);
+    assert_eq!(
+        plain.stdout, b"tracked.txt\n",
+        "name-only plain framing: {:?}",
+        plain.stdout
+    );
+}

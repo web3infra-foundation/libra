@@ -44,6 +44,7 @@ EXAMPLES:
     libra diff --stat src/                  Show diff statistics under src/
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
+    libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra --json diff --staged              Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -114,6 +115,11 @@ pub struct DiffArgs {
     /// status-only check.
     #[clap(short = 's', long = "no-patch")]
     pub no_patch: bool,
+
+    /// NUL-terminate output records (for `--name-only`/`--name-status`/`--numstat`);
+    /// `--name-status` then emits the status and path as separate NUL fields.
+    #[clap(short = 'z', long = "null")]
+    pub null: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -649,27 +655,31 @@ fn render_diff_output(
 
     // --output writes are an explicit side-effect and must be honored even
     // when --quiet is set (quiet only suppresses stdout, not file writes).
+    // `-z` NUL-terminates each record; `--name-status` then separates the
+    // status and path with a NUL instead of a tab.
     let rendered = if args.name_only {
-        result
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
+        join_diff_records(result.files.iter().map(|file| file.path.clone()), args.null)
     } else if args.name_status {
-        result
-            .files
-            .iter()
-            .map(|file| format!("{}\t{}", diff_status_letter(&file.status), file.path))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let field_sep = if args.null { '\0' } else { '\t' };
+        join_diff_records(
+            result.files.iter().map(|file| {
+                format!(
+                    "{}{}{}",
+                    diff_status_letter(&file.status),
+                    field_sep,
+                    file.path
+                )
+            }),
+            args.null,
+        )
     } else if args.numstat {
-        result
-            .files
-            .iter()
-            .map(|file| format!("{}\t{}\t{}", file.insertions, file.deletions, file.path))
-            .collect::<Vec<_>>()
-            .join("\n")
+        join_diff_records(
+            result
+                .files
+                .iter()
+                .map(|file| format!("{}\t{}\t{}", file.insertions, file.deletions, file.path)),
+            args.null,
+        )
     } else if args.stat {
         format_diff_stat_output(result)
     } else if args.shortstat {
@@ -719,9 +729,26 @@ fn render_diff_output(
     } else {
         maybe_colorize_diff(&rendered, io::stdout().is_terminal())
     };
-    pager.write_str(&format!("{rendered}\n"))?;
+    // `-z` records already carry their own NUL terminators, so do not append a
+    // trailing newline in that case.
+    let z_records = args.null && (args.name_only || args.name_status || args.numstat);
+    if z_records {
+        pager.write_str(&rendered)?;
+    } else {
+        pager.write_str(&format!("{rendered}\n"))?;
+    }
     pager.finish()?;
     diff_exit_result(args, result)
+}
+
+/// Join name/numstat records: NUL-terminate each record under `-z`, otherwise
+/// newline-separate them (the trailing newline is added by the caller).
+fn join_diff_records(records: impl Iterator<Item = String>, null: bool) -> String {
+    if null {
+        records.map(|r| format!("{r}\0")).collect()
+    } else {
+        records.collect::<Vec<_>>().join("\n")
+    }
 }
 
 /// `--exit-code`: exit 1 when the diff is non-empty, 0 otherwise. The diff
@@ -801,6 +828,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         shortstat: false,
         exit_code: false,
         no_patch: false,
+        null: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

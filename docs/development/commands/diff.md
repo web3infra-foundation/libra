@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/shortstat/summary/output/algorithm、`--exit-code`/`-s`(`--no-patch`) 与位置性两点范围 `A..B`（`diff A..B`）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、word/binary diff、whitespace 和 external diff 尚未公开。
+- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/shortstat/summary/output/algorithm、`--exit-code`/`-s`(`--no-patch`)/`-z`(`--null`) 与位置性两点范围 `A..B`（`diff A..B`）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、word/binary diff、whitespace 和 external diff 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --shortstat | --name-only | --name-status | --summary] [-s | --no-patch] [--exit-code] [<pathspec>...]`。
-- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`、`--shortstat`、`--summary`、`--exit-code`、`-s`/`--no-patch`。`--shortstat` 只输出 `--stat` 的汇总行（零项省略）；`--exit-code` 仍打印 diff 但有差异时退出码为 1（区别于 `--quiet` 的静默）；`-s`/`--no-patch` 抑制 patch 主体（与 `--exit-code` 组合做状态检查）。
+- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --shortstat | --name-only | --name-status | --summary] [-s | --no-patch] [--exit-code] [-z] [<pathspec>...]`。
+- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`、`--shortstat`、`--summary`、`--exit-code`、`-s`/`--no-patch`、`-z`/`--null`。`--shortstat` 只输出 `--stat` 的汇总行（零项省略）；`--exit-code` 仍打印 diff 但有差异时退出码为 1（区别于 `--quiet` 的静默）；`-s`/`--no-patch` 抑制 patch 主体（与 `--exit-code` 组合做状态检查）；`-z`/`--null` 对 `--name-only`/`--name-status`/`--numstat` 用 NUL 终止每条记录（且 `--name-status` 的状态与路径以 NUL 分隔、无尾随换行；由 `join_diff_records` 实现），其他模式不受影响。
 - 位置性两点范围 `diff A..B`：未给 `--old`/`--new`/`--staged` 且首个位置参数是两点范围、且两侧均能解析为提交时，由 `normalize_diff_range` 重写为 `--old A --new B`（`A..` 对工作树，`..B` 以 HEAD 为 old）；任一侧无法解析为提交则原样作为 pathspec（含 `..` 的真实路径不受影响）。三点 `A...B` 暂不处理。
 
 
