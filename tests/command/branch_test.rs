@@ -545,6 +545,8 @@ async fn test_branch() {
             unset_upstream: None,
             show_current: false,
             rename: vec![],
+            copy: vec![],
+            copy_force: vec![],
             remotes: false,
             all: false,
             contains: vec![],
@@ -586,6 +588,8 @@ async fn test_branch() {
             unset_upstream: None,
             show_current: false,
             rename: vec![],
+            copy: vec![],
+            copy_force: vec![],
             remotes: false,
             all: false,
             contains: vec![],
@@ -617,6 +621,8 @@ async fn test_branch() {
         unset_upstream: None,
         show_current: true,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -676,6 +682,8 @@ async fn test_create_branch_from_remote() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -736,6 +744,8 @@ async fn test_create_branch_from_remote_tracking_ref() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -952,6 +962,8 @@ async fn test_branch_rename() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -982,6 +994,8 @@ async fn test_branch_rename() {
         unset_upstream: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1080,6 +1094,8 @@ async fn test_rename_current_branch() {
         unset_upstream: None,
         show_current: false,
         rename: vec![feature_new.clone()],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1154,6 +1170,8 @@ async fn test_rename_to_existing_branch() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1176,6 +1194,8 @@ async fn test_rename_to_existing_branch() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1199,6 +1219,8 @@ async fn test_rename_to_existing_branch() {
         unset_upstream: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1266,6 +1288,8 @@ async fn test_list_all_branches() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1299,6 +1323,8 @@ async fn test_list_all_branches() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: true,
         contains: vec![],
@@ -1371,6 +1397,8 @@ async fn test_branch_delete_safe() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1438,6 +1466,8 @@ async fn test_branch_delete_safe() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1506,6 +1536,8 @@ async fn test_branch_delete_safe() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1597,6 +1629,8 @@ async fn test_branch_contains_commit_filter() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
@@ -1990,5 +2024,61 @@ fn branch_sort_orders_list_by_key() {
             .status
             .success(),
         "unknown sort key must be rejected"
+    );
+}
+
+#[test]
+fn branch_copy_duplicates_branch_with_config() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "feat"], p), "branch feat");
+    // Give `feat` an upstream config so the copy can carry it over.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.feat.remote", "origin"], p),
+        "config remote",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.feat.merge", "refs/heads/main"], p),
+        "config merge",
+    );
+
+    // -c copies feat -> feat2, keeping feat.
+    assert_cli_success(
+        &run_libra_command(&["branch", "-c", "feat", "feat2"], p),
+        "branch -c",
+    );
+    let list = run_libra_command(&["branch"], p);
+    let names = String::from_utf8_lossy(&list.stdout).into_owned();
+    assert!(names.contains("feat2"), "copy must exist: {names:?}");
+    assert!(names.contains("feat"), "source must remain: {names:?}");
+
+    // The upstream config is copied to feat2.
+    let cfg = run_libra_command(&["config", "get", "branch.feat2.remote"], p);
+    assert_cli_success(&cfg, "config get feat2.remote");
+    assert!(
+        String::from_utf8_lossy(&cfg.stdout).contains("origin"),
+        "copied branch must inherit the upstream config"
+    );
+
+    // Copying onto an existing branch without -C is an error.
+    let dup = run_libra_command(&["branch", "-c", "feat", "feat2"], p);
+    assert!(
+        !dup.status.success(),
+        "-c onto an existing branch must fail"
+    );
+
+    // -C overwrites the existing destination.
+    assert_cli_success(
+        &run_libra_command(&["branch", "-C", "main", "feat2"], p),
+        "branch -C overwrites",
+    );
+
+    // Even -C refuses to overwrite the checked-out branch (HEAD is on main).
+    let onto_current = run_libra_command(&["branch", "-C", "feat", "main"], p);
+    assert!(
+        !onto_current.status.success(),
+        "-C onto the current branch must be rejected"
     );
 }

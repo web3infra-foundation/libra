@@ -27,7 +27,7 @@
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
 | [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` and `start --first-parent` supported; `replay` (see [docs/development/comma... |
 | [`blame`](blame.md) | `partial` | numeric `-L` ranges, porcelain/line-porcelain, and `-e`/`--show-email` supported; reverse/whitespace/incremental/copy-move detection remain incomplete |
-| [`branch`](branch.md) | `partial` | create/list/delete/rename/upstream set+unset/current/contains/points-at/merged/no-merged/sort(refname,version:refname)/ignore-case supported; copy/description/custom-format/remaining-sort-keys not exposed |
+| [`branch`](branch.md) | `partial` | create/list/delete/rename/copy(`-c`/`-C`)/upstream set+unset/current/contains/points-at/merged/no-merged/sort(refname,version:refname)/ignore-case supported; description/custom-format/remaining-sort-keys not exposed |
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` plus `--batch-check` / `--batch` / `--batch-command` / `--batch-all-objects` (with optional `=<format>`) supported; `-e` JSON/machine output not exposed |
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore... |
 | [`cherry-pick`](cherry-pick.md) | `partial` | commit replay, `-n`, and `-x` supported; edit/mainline/signoff/sequencer/strategy flags incomplete |

@@ -64,6 +64,7 @@ EXAMPLES:
     libra branch feature-x main           Create a branch from another branch
     libra branch -d topic                 Delete a fully merged branch
     libra branch -D topic                 Force-delete a branch
+    libra branch -c topic topic-backup    Copy a branch, keeping the original
     libra branch -u origin/main           Set upstream for the current branch
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
@@ -112,6 +113,10 @@ pub enum BranchOutput {
     /// state references.
     #[serde(rename = "rename")]
     Rename { old_name: String, new_name: String },
+    /// `-c`/`-C` succeeded. The source (`old_name`) is preserved; `new_name` is
+    /// the created copy.
+    #[serde(rename = "copy")]
+    Copy { old_name: String, new_name: String },
     /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
@@ -135,6 +140,7 @@ impl BranchOutput {
             Self::Create { .. }
                 | Self::Delete { .. }
                 | Self::Rename { .. }
+                | Self::Copy { .. }
                 | Self::SetUpstream { .. }
                 | Self::UnsetUpstream { .. }
         )
@@ -203,6 +209,16 @@ pub struct BranchArgs {
     /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
     #[clap(short = 'm', long = "move", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
+
+    /// Copy a branch (and its upstream config) to a new name, keeping the
+    /// original. With one argument, copies the current branch. Fails if the
+    /// destination already exists (use -C to overwrite).
+    #[clap(short = 'c', long = "copy", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub copy: Vec<String>,
+
+    /// Like -c, but overwrite the destination branch if it already exists.
+    #[clap(short = 'C', long = "copy-force", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub copy_force: Vec<String>,
 
     /// show remote branches
     #[clap(short, long, group = "query")]
@@ -299,6 +315,9 @@ enum BranchError {
     #[error("HEAD is detached")]
     DetachedHead,
 
+    #[error("cannot force-copy onto the currently checked-out branch '{0}'")]
+    CopyOntoCurrentBranch(String),
+
     #[error("not a valid object name: '{0}'")]
     InvalidCommit(String),
 
@@ -386,6 +405,11 @@ impl From<BranchError> for CliError {
             BranchError::DetachedHead => CliError::fatal("HEAD is detached")
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("checkout a branch first"),
+            BranchError::CopyOntoCurrentBranch(name) => CliError::fatal(format!(
+                "cannot force-copy onto the currently checked-out branch '{name}'"
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("switch to a different branch first, or copy to a new name"),
             BranchError::InvalidCommit(target) => {
                 CliError::fatal(format!("not a valid object name: '{target}'"))
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -957,6 +981,76 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
     Ok(BranchOutput::Rename { old_name, new_name })
 }
 
+/// Copy a branch to a new name, keeping the original (`git branch -c`/`-C`).
+/// With one argument the current branch is the source. The new branch is
+/// created at the source's commit and the source's upstream config
+/// (`branch.<old>.remote`/`.merge`) is copied. `force` (`-C`) overwrites an
+/// existing destination; otherwise a clashing destination is an error. HEAD is
+/// never moved (the source remains intact).
+async fn copy_branch_impl(args: &[String], force: bool) -> Result<BranchOutput, BranchError> {
+    let (old_name, new_name) = match args.len() {
+        1 => match Head::current().await {
+            Head::Branch(name) => (name, args[0].clone()),
+            Head::Detached(_) => return Err(detached_head_branch_error()),
+        },
+        2 => (args[0].clone(), args[1].clone()),
+        _ => return Err(BranchError::RenameTooManyArgs),
+    };
+
+    if !is_valid_git_branch_name(&new_name) {
+        return Err(BranchError::InvalidName(new_name));
+    }
+    if branch::is_locked_branch(&new_name) {
+        return Err(BranchError::Locked(new_name));
+    }
+
+    let old_branch = require_existing_local_branch(&old_name).await?;
+
+    let destination_exists = Branch::find_branch_result(&new_name, None)
+        .await
+        .map_err(map_branch_store_error)?
+        .is_some();
+    if !force && destination_exists {
+        return Err(BranchError::AlreadyExists(new_name));
+    }
+    // Even with -C, refuse to overwrite the checked-out branch: its ref would
+    // move but HEAD / the working tree would not, leaving an inconsistent state
+    // (Git likewise refuses to force-update the current branch).
+    if force
+        && let Head::Branch(current) = Head::current().await
+        && current == new_name
+    {
+        return Err(BranchError::CopyOntoCurrentBranch(new_name));
+    }
+
+    let commit_hash = old_branch.commit.to_string();
+    Branch::update_branch(&new_name, &commit_hash, None)
+        .await
+        .map_err(|e| BranchError::CreateFailed {
+            branch: new_name.clone(),
+            detail: e.to_string(),
+        })?;
+
+    // Copy the source branch's upstream configuration, if any, to the new
+    // branch (mirroring `git branch -c`). The raw stored values are copied
+    // verbatim so the `refs/heads/` prefix on `branch.<old>.merge` is preserved.
+    let db = get_db_conn_instance().await;
+    for suffix in ["remote", "merge"] {
+        let src_key = format!("branch.{old_name}.{suffix}");
+        if let Some(entry) = ConfigKv::get_with_conn(&db, &src_key)
+            .await
+            .map_err(|e| branch_config_read_error(format!("config '{src_key}'"), e))?
+        {
+            let dst_key = format!("branch.{new_name}.{suffix}");
+            ConfigKv::set_with_conn(&db, &dst_key, &entry.value, false)
+                .await
+                .map_err(|e| branch_config_write_error(&dst_key, e))?;
+        }
+    }
+
+    Ok(BranchOutput::Copy { old_name, new_name })
+}
+
 /// Body of `libra branch -l` / `-r` / `-a` (with optional commit filters).
 ///
 /// Functional scope:
@@ -1134,6 +1228,10 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
         Ok(BranchOutput::UnsetUpstream { branch })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
+    } else if !args.copy.is_empty() {
+        copy_branch_impl(&args.copy, false).await
+    } else if !args.copy_force.is_empty() {
+        copy_branch_impl(&args.copy_force, true).await
     } else {
         collect_branch_output(args).await
     }
@@ -1216,6 +1314,9 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         }
         BranchOutput::Rename { old_name, new_name } => {
             println!("Renamed branch '{old_name}' to '{new_name}'");
+        }
+        BranchOutput::Copy { old_name, new_name } => {
+            println!("Copied branch '{old_name}' to '{new_name}'");
         }
         BranchOutput::SetUpstream { branch, upstream } => {
             println!("Branch '{branch}' set up to track remote branch '{upstream}'");
@@ -1340,6 +1441,8 @@ pub async fn list_branches(
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: matches!(list_mode, BranchListMode::Remote),
         all: matches!(list_mode, BranchListMode::All),
         contains: commits_contains.to_vec(),

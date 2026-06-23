@@ -12,6 +12,7 @@ libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--poin
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
+libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
 libra branch --unset-upstream [<branch>]
 libra branch --show-current
@@ -38,6 +39,8 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--unset-upstream` | `[branch]` | Remove upstream tracking for the current branch or the named branch |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
+| `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its upstream config) to a new name, keeping the source; fails if the destination exists |
+| `-C` | `--copy-force` | `<old> <new>` or `<new>` | Like `-c`, but overwrite the destination if it exists |
 | `-r` | `--remotes` | | Show remote-tracking branches only |
 | `-a` | `--all` | | Show local and remote-tracking branches |
 | | `--contains` | `[commit]` (default HEAD) | Only list branches containing the commit. Alias: `--with` |
@@ -90,6 +93,9 @@ libra branch -m new-name
 # Rename any branch
 libra branch -m old-name new-name
 
+# Copy a branch (keeping the original)
+libra branch -c old-name new-name
+
 # Set upstream tracking
 libra branch -u origin/main
 
@@ -123,6 +129,7 @@ libra branch --json --show-current      # Structured JSON output for agents
 - List: prints the branch list with `*` marking the current branch
 - Safe delete: `Deleted branch feature (was abc123...)`
 - Rename: `Renamed branch 'old' to 'new'`
+- Copy: `Copied branch 'old' to 'new'`
 - Unset upstream: `Branch 'main' no longer tracks an upstream branch`
 - `--show-current`: prints the current branch name, or `HEAD detached at <hash>` when detached
 
@@ -214,6 +221,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Delete (safe) | `git branch -d <name>` | `libra branch -d <name>` | `jj branch delete <name>` |
 | Delete (force) | `git branch -D <name>` | `libra branch -D <name>` | `jj branch delete <name>` (always force) |
 | Rename | `git branch -m <old> <new>` | `libra branch -m <old> <new>` | Not supported |
+| Copy | `git branch -c <old> <new>` | `libra branch -c <old> <new>` (`-C` to force) | Not supported |
 | Set upstream | `git branch -u <upstream>` | `libra branch -u <upstream>` | N/A (no upstream concept) |
 | Unset upstream | `git branch --unset-upstream [branch]` | `libra branch --unset-upstream [branch]` | N/A |
 | Show current | `git branch --show-current` | `libra branch --show-current` | `jj log -r @` |

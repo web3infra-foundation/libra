@@ -2175,6 +2175,8 @@ async fn test_log_all_includes_branches() {
         unset_upstream: None,
         show_current: false,
         rename: vec![],
+        copy: vec![],
+        copy_force: vec![],
         remotes: false,
         all: false,
         contains: vec![],
