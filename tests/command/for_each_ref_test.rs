@@ -888,3 +888,36 @@ async fn test_for_each_ref_objectname_short_n() {
     let big = field("64");
     assert_eq!(big, full, "short=64 yields the full oid for sha1");
 }
+
+#[test]
+fn test_for_each_ref_exclude_filter() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for b in ["feature-a", "feature-b", "release-x"] {
+        assert_cli_success(&run_libra_command(&["branch", b], p), "branch");
+    }
+
+    // Without --exclude, all heads are listed.
+    let all = run_libra_command(&["for-each-ref", "--heads"], p);
+    assert_cli_success(&all, "for-each-ref --heads");
+    let all_s = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        all_s.contains("feature-a") && all_s.contains("release-x"),
+        "all heads listed: {all_s}"
+    );
+
+    // --exclude drops refs whose name matches the pattern (applied after includes).
+    let ex = run_libra_command(&["for-each-ref", "--heads", "--exclude", "feature"], p);
+    assert_cli_success(&ex, "for-each-ref --exclude");
+    let ex_s = String::from_utf8_lossy(&ex.stdout);
+    assert!(
+        !ex_s.contains("feature-a") && !ex_s.contains("feature-b"),
+        "feature refs excluded: {ex_s}"
+    );
+    assert!(
+        ex_s.contains("release-x") && ex_s.contains("main"),
+        "non-matching refs kept: {ex_s}"
+    );
+}

@@ -37,6 +37,7 @@ EXAMPLES:
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
     libra for-each-ref --no-merged=main List refs not yet merged into main
+    libra for-each-ref --exclude=wip refs/heads/  Skip refs whose name matches the pattern
     libra for-each-ref --count=10       Limit output to 10 refs";
 
 #[derive(Parser, Debug)]
@@ -90,6 +91,11 @@ pub struct ForEachRefArgs {
     /// Show only refs whose commit is NOT merged into COMMIT.
     #[clap(long = "no-merged", value_name = "COMMIT")]
     pub no_merged: Option<String>,
+
+    /// Do not list refs matching PATTERN (repeatable; applied after the
+    /// positional include patterns).
+    #[clap(long = "exclude", value_name = "PATTERN")]
+    pub exclude: Vec<String>,
 
     /// Refname patterns to match
     #[clap(value_name = "PATTERN")]
@@ -234,6 +240,17 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         entries.retain(|entry| {
             _args
                 .patterns
+                .iter()
+                .any(|pattern| matches_ref_pattern(&entry.refname, pattern))
+        });
+    }
+
+    // `--exclude <pattern>` drops refs matching any exclude pattern (applied
+    // after the include patterns, matching Git).
+    if !_args.exclude.is_empty() {
+        entries.retain(|entry| {
+            !_args
+                .exclude
                 .iter()
                 .any(|pattern| matches_ref_pattern(&entry.refname, pattern))
         });
