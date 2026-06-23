@@ -661,6 +661,7 @@ async fn setup_standard_repo(
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -717,6 +718,7 @@ async fn setup_standard_repo(
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -773,6 +775,7 @@ async fn setup_standard_repo(
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -829,6 +832,7 @@ async fn setup_standard_repo(
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 

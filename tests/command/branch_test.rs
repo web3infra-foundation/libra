@@ -557,6 +557,7 @@ async fn test_branch() {
             sort: None,
             ignore_case: false,
             column: None,
+            verbose: 0,
         };
         execute(args).await;
 
@@ -601,6 +602,7 @@ async fn test_branch() {
             sort: None,
             ignore_case: false,
             column: None,
+            verbose: 0,
         };
         execute(args).await;
         let second_branch = Branch::find_branch_result(&second_branch_name, None)
@@ -635,6 +637,7 @@ async fn test_branch() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -697,6 +700,7 @@ async fn test_create_branch_from_remote() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -760,6 +764,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -979,6 +984,7 @@ async fn test_branch_rename() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1012,6 +1018,7 @@ async fn test_branch_rename() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1113,6 +1120,7 @@ async fn test_rename_current_branch() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1190,6 +1198,7 @@ async fn test_rename_to_existing_branch() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1215,6 +1224,7 @@ async fn test_rename_to_existing_branch() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1241,6 +1251,7 @@ async fn test_rename_to_existing_branch() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1311,6 +1322,7 @@ async fn test_list_all_branches() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await;
 
@@ -1347,6 +1359,7 @@ async fn test_list_all_branches() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -1422,6 +1435,7 @@ async fn test_branch_delete_safe() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -1492,6 +1506,7 @@ async fn test_branch_delete_safe() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -1563,6 +1578,7 @@ async fn test_branch_delete_safe() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -1657,6 +1673,7 @@ async fn test_branch_contains_commit_filter() {
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     })
     .await;
 
@@ -2134,6 +2151,48 @@ fn branch_column_lays_out_in_columns() {
         assert!(
             col_out.contains(b),
             "column output contains {b}: {col_out:?}"
+        );
+    }
+}
+
+#[test]
+fn branch_verbose_shows_sha_and_subject() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "create feature branch",
+    );
+
+    // Plain listing is name-only.
+    let plain = run_libra_command(&["branch"], p);
+    assert_cli_success(&plain, "branch");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+
+    // `-v` appends the short sha and the commit subject to each branch line.
+    let verbose = run_libra_command(&["branch", "-v"], p);
+    assert_cli_success(&verbose, "branch -v");
+    let v_out = String::from_utf8_lossy(&verbose.stdout);
+
+    // The current-branch line under -v carries more than just the name.
+    let plain_main = plain_out
+        .lines()
+        .find(|l| l.contains("* "))
+        .expect("current branch line");
+    let v_main = v_out
+        .lines()
+        .find(|l| l.contains("* "))
+        .expect("current branch line (-v)");
+    assert!(
+        v_main.len() > plain_main.len(),
+        "-v line is longer than the plain line: plain={plain_main:?} verbose={v_main:?}"
+    );
+    // Every branch line under -v has at least 3 whitespace-separated fields
+    // (marker+name, sha, subject...).
+    for line in v_out.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            line.split_whitespace().count() >= 3,
+            "verbose line has sha + subject: {line:?}"
         );
     }
 }

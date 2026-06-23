@@ -69,6 +69,7 @@ EXAMPLES:
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
     libra branch --column                 List branches laid out in columns
+    libra branch -v                       List branches with tip sha and subject
     libra branch --json --show-current    Structured JSON output for agents";
 
 /// Tagged-union output type for `libra branch`.
@@ -267,6 +268,12 @@ pub struct BranchArgs {
     /// stdout is a terminal), `never`. Bare `--column` means `always`.
     #[clap(long, num_args = 0..=1, default_missing_value = "always", value_name = "MODE")]
     pub column: Option<String>,
+
+    /// Show the sha1 and commit subject line for each branch (`-v`). Repeat
+    /// (`-vv`) for more verbosity; Git's `-vv` upstream-tracking detail is not
+    /// yet shown, so `-v` and `-vv` currently render the same.
+    #[clap(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 /// Fire-and-forget entry: prints the rendered error to stderr but does not
 /// signal exit code.
@@ -291,7 +298,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
         super::tag::resolve_column_enabled(mode)?;
     }
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output, args.column.as_deref())?;
+    render_branch_output(&result, output, args.column.as_deref(), args.verbose)?;
     if result.mutated_repo_state() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
     }
@@ -1280,6 +1287,31 @@ fn format_branch_columns(entries: &[String], width: usize) -> String {
     out
 }
 
+/// Build the `-v` suffix (` <short-sha> <subject>`) for a branch's tip commit.
+/// The short sha is always shown (Git lists it regardless); the subject is
+/// best-effort and omitted if the commit object cannot be loaded.
+fn branch_verbose_suffix(commit_hash: &str) -> String {
+    let short = short_display_hash(commit_hash);
+    let subject = commit_hash
+        .parse::<ObjectHash>()
+        .ok()
+        .and_then(|hash| load_object::<Commit>(&hash).ok())
+        .map(|commit| {
+            crate::common_utils::parse_commit_msg(&commit.message)
+                .0
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    if subject.is_empty() {
+        format!(" {short}")
+    } else {
+        format!(" {short} {subject}")
+    }
+}
+
 /// Render [`BranchOutput`] for the chosen output mode.
 ///
 /// Functional scope:
@@ -1292,6 +1324,7 @@ fn render_branch_output(
     result: &BranchOutput,
     output: &OutputConfig,
     column: Option<&str>,
+    verbose: u8,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
@@ -1339,8 +1372,10 @@ fn render_branch_output(
                 });
             }
 
+            // `-v` (per-branch sha + subject) takes precedence over `--column`
+            // (which is a names-only dense layout).
             let column_enabled = match column {
-                Some(mode) => super::tag::resolve_column_enabled(mode)?,
+                Some(mode) => super::tag::resolve_column_enabled(mode)? && verbose == 0,
                 None => false,
             };
             if column_enabled {
@@ -1359,10 +1394,15 @@ fn render_branch_output(
                 print!("{}", format_branch_columns(&entries, width));
             } else {
                 for branch in sorted {
-                    if branch.current {
-                        println!("* {}", branch.display_name.green());
+                    let suffix = if verbose >= 1 {
+                        branch_verbose_suffix(&branch.commit)
                     } else {
-                        println!("  {}", branch.display_name);
+                        String::new()
+                    };
+                    if branch.current {
+                        println!("* {}{suffix}", branch.display_name.green());
+                    } else {
+                        println!("  {}{suffix}", branch.display_name);
                     }
                 }
             }
@@ -1527,9 +1567,15 @@ pub async fn list_branches(
         sort: None,
         ignore_case: false,
         column: None,
+        verbose: 0,
     };
     let result = collect_branch_output(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, &OutputConfig::default(), args.column.as_deref())
+    render_branch_output(
+        &result,
+        &OutputConfig::default(),
+        args.column.as_deref(),
+        args.verbose,
+    )
 }
 
 /// Filter given branches by whether they contain or don't contain certain commits.

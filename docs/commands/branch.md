@@ -8,7 +8,7 @@ Create, delete, rename, inspect, or list branches.
 
 ```
 libra branch [<new_branch>] [<commit_hash>]
-libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case] [--column[=<mode>]]
+libra branch -l [-r | -a] [--contains <commit>] [--no-contains <commit>] [--points-at <object>] [--merged [<commit>]] [--no-merged [<commit>]] [--sort <key>] [--ignore-case] [--column[=<mode>]] [-v | --verbose]
 libra branch -d <name>
 libra branch -D <name>
 libra branch -m [<old>] <new>
@@ -51,6 +51,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--sort` | `<key>` | Sort the list by `refname` or `version:refname` (`v:refname`); a leading `-` reverses (use `--sort=-refname` for the dash form) |
 | | `--ignore-case` | | Sort branch names case-insensitively where applicable |
 | | `--column[=<mode>]` | `always` / `auto` / `never` | Lay the branch list out in columns instead of one per line (bare `--column` means `always`; `auto` only when stdout is a terminal). Column mode shows plain, uncolored names. |
+| `-v` | `--verbose` | | List each branch with its tip's short sha and commit subject. Repeatable (`-vv`); Git's `-vv` upstream-tracking detail is not yet shown, so `-v` and `-vv` render the same. Takes precedence over `--column`. |
 
 ### Flag examples
 
@@ -67,6 +68,9 @@ libra branch -l
 
 # List all branches (local + remote)
 libra branch -l -a
+
+# List branches with their tip sha and commit subject
+libra branch -v
 
 # List branches containing the latest release tag
 libra branch --contains v2.0
@@ -233,6 +237,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
 | Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname) | `jj branch list` (revset order) |
 | Column layout | `git branch --column[=<mode>]` | `libra branch --column[=<mode>]` | N/A |
+| Verbose listing | `git branch -v` / `-vv` | `libra branch -v` (sha + subject; `-vv` same, no upstream yet) | N/A |
 | Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |
 | Structured output | No | `--json` / `--machine` | `--template` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" | No |
