@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/reflog.md`。
-- Synopsis：`libra reflog [show] [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat]` ｜ `libra reflog delete <selectors>...` ｜ `libra reflog exists <ref_name>`。省略子命令时（裸 `libra reflog`）默认等价于 `reflog show HEAD`（与 Git 一致；`command` 字段为 `Option<Subcommands>`，None 时回退 `default_reflog_command`）。
-- 公开参数/子命令包括：`show [<ref_name>]`（`--pretty <format>`、`--since <date>`、`--until <date>`、`--grep <pattern>`、`--author <pattern>`、`-n, --number <N>`、`-p, --patch`、`--stat`）、`delete <selectors>...`、`exists <ref_name>`、`expire`（`--all`、`--expire <time>`、`--expire-unreachable <time>`、`--rewrite`、`--updateref`、`--stale-fix`、`-n/--dry-run`、`-v/--verbose`、`<refs>...`）。
+- Synopsis：`libra reflog [show] [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat] [--no-abbrev]` ｜ `libra reflog delete <selectors>...` ｜ `libra reflog exists <ref_name>`。省略子命令时（裸 `libra reflog`）默认等价于 `reflog show HEAD`（与 Git 一致；`command` 字段为 `Option<Subcommands>`，None 时回退 `default_reflog_command`）。show 的过滤/格式参数须接在 `show` 之后（裸 `reflog --no-abbrev` 不被接受，需 `reflog show --no-abbrev`），与其它 show 参数（`-n`/`--grep` 等）一致。
+- 公开参数/子命令包括：`show [<ref_name>]`（`--pretty <format>`、`--since <date>`、`--until <date>`、`--grep <pattern>`、`--author <pattern>`、`-n, --number <N>`、`-p, --patch`、`--stat`、`--no-abbrev`（打印完整对象名而非 7 位缩写；经 `ReflogShowOptions`→`ReflogFormatter.no_abbrev` 串到唯一缩写点 `&log.new_oid[..7]`，对所有 `--pretty` 格式生效））、`delete <selectors>...`、`exists <ref_name>`、`expire`（`--all`、`--expire <time>`、`--expire-unreachable <time>`、`--rewrite`、`--updateref`、`--stale-fix`、`-n/--dry-run`、`-v/--verbose`、`<refs>...`）。
 
 
 ## 还未实现的功能

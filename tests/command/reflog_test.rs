@@ -664,3 +664,31 @@ fn test_reflog_expire_json_envelope_and_prunes() {
         "after a real prune nothing should remain to prune"
     );
 }
+
+#[test]
+fn test_reflog_no_abbrev_shows_full_hash() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Default reflog abbreviates the object name to 7 chars.
+    let abbrev = run_libra_command(&["reflog"], p);
+    assert_cli_success(&abbrev, "reflog");
+    let ab_out = String::from_utf8_lossy(&abbrev.stdout);
+    let ab_hash = ab_out.split_whitespace().next().expect("abbreviated hash");
+    assert_eq!(ab_hash.len(), 7, "default abbreviates to 7: {ab_out:?}");
+
+    // --no-abbrev prints the full object name (40 hex for sha1, 64 for sha256).
+    let full = run_libra_command(&["reflog", "show", "--no-abbrev"], p);
+    assert_cli_success(&full, "reflog --no-abbrev");
+    let full_out = String::from_utf8_lossy(&full.stdout);
+    let full_hash = full_out.split_whitespace().next().expect("full hash");
+    assert!(
+        full_hash.len() == 40 || full_hash.len() == 64,
+        "--no-abbrev shows the full object name (sha1=40/sha256=64): {full_out:?}"
+    );
+    assert!(
+        full_hash.len() > ab_hash.len(),
+        "full hash is longer than the abbreviation"
+    );
+    assert!(full_hash.starts_with(ab_hash), "abbrev is a prefix of full");
+}

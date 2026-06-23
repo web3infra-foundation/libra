@@ -5,7 +5,7 @@ Manage the log of reference changes (HEAD, branches).
 ## Synopsis
 
 ```
-libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat]
+libra reflog show [<ref_name>] [--pretty <format>] [--since <date>] [--until <date>] [--grep <pattern>] [--author <pattern>] [-n <N>] [-p/--patch] [--stat] [--no-abbrev]
 libra reflog delete <selector>...
 libra reflog exists <ref_name>
 ```
@@ -35,6 +35,7 @@ Display reflog entries for a reference.
 | Limit | `-n` | `--number` | Maximum number of entries to display. |
 | Patch | `-p` | `--patch` | Show the diff introduced by the commit referenced in each reflog entry. |
 | Stat | | `--stat` | Show diffstat (files changed, insertions, deletions) for each reflog entry. |
+| No abbrev | | `--no-abbrev` | Print full object names instead of the abbreviated 7-char prefix (applies to every `--pretty` format). |
 
 ```bash
 # Show HEAD reflog (default)
@@ -339,6 +340,7 @@ Git stores reflogs as append-only text files under `.git/logs/`. This is simple 
 | Limit entries | `-n <N>` | `-n <N>` (via log options) | `-n <N>` |
 | Show patch | `-p` / `--patch` | `-p` (via log options) | `--patch` on `op show` |
 | Show stat | `--stat` | `--stat` (via log options) | `--stat` on `op show` |
+| Full object names | `--no-abbrev` | `--no-abbrev` | N/A |
 | Delete entries | `reflog delete <selector>...` | `reflog delete <ref@{N}>` | N/A (operation log is append-only) |
 | Check existence | `reflog exists <ref>` | `reflog exists <ref>` | N/A |
 | Expire old entries | `reflog expire` (time / reachability / `--stale-fix`) | `reflog expire` | N/A (GC handles cleanup) |

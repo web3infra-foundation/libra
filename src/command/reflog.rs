@@ -46,6 +46,7 @@ EXAMPLES:
     libra reflog show                          Show HEAD reflog entries
     libra reflog show main --number 20         Show the last 20 entries for refs/heads/main
     libra reflog show --grep 'commit (amend)'  Filter HEAD reflog by message pattern
+    libra reflog show --no-abbrev              Show entries with full object names
     libra reflog exists refs/heads/feature-x   Probe whether a ref has reflog entries
     libra reflog delete HEAD@{2}               Remove a single reflog selector
     libra reflog expire --all --dry-run        Preview which entries would be pruned
@@ -72,6 +73,7 @@ fn default_reflog_command() -> Subcommands {
         number: None,
         patch: false,
         stat: false,
+        no_abbrev: false,
     }
 }
 
@@ -105,6 +107,9 @@ enum Subcommands {
         /// Show diffstat for each reflog entry
         #[arg(long)]
         stat: bool,
+        /// Print full object names instead of the abbreviated 7-char prefix
+        #[arg(long = "no-abbrev")]
+        no_abbrev: bool,
     },
     /// clear the reflog record of the specified branch.
     Delete {
@@ -168,6 +173,7 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
             number,
             patch,
             stat,
+            no_abbrev,
         } => {
             let options = ReflogShowOptions {
                 pretty,
@@ -178,6 +184,7 @@ pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<
                 number,
                 patch,
                 stat,
+                no_abbrev,
             };
             handle_show(&ref_name, options, output).await
         }
@@ -233,6 +240,7 @@ struct ReflogShowOptions {
     number: Option<usize>,
     patch: bool,
     stat: bool,
+    no_abbrev: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -363,6 +371,7 @@ async fn handle_show(
         kind: options.pretty,
         patch: options.patch,
         stat: options.stat,
+        no_abbrev: options.no_abbrev,
     };
 
     let mut pager = Pager::with_config(output)?;
@@ -905,6 +914,8 @@ struct ReflogFormatter<'a> {
     kind: FormatterKind,
     patch: bool,
     stat: bool,
+    /// `--no-abbrev`: print the full object name instead of the 7-char prefix.
+    no_abbrev: bool,
 }
 
 impl Display for ReflogFormatter<'_> {
@@ -913,7 +924,13 @@ impl Display for ReflogFormatter<'_> {
             .iter()
             .map(|(idx, log)| {
                 let head = format!("HEAD@{{{idx}}}");
-                let new_oid = &log.new_oid[..7];
+                let new_oid = if self.no_abbrev {
+                    log.new_oid.as_str()
+                } else {
+                    // Abbreviate to 7 hex chars; `get` avoids a panic if the
+                    // stored id is somehow shorter than 7 bytes.
+                    log.new_oid.get(..7).unwrap_or(log.new_oid.as_str())
+                };
 
                 let commit = find_commit(&log.new_oid);
                 let full_msg = format!("{}: {}", log.action, log.message);
@@ -1161,6 +1178,7 @@ mod tests {
             number: _,
             patch: _,
             stat: _,
+            no_abbrev: _,
         }) = args.command
         {
             assert_eq!(ref_name, "HEAD");
