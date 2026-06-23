@@ -34,6 +34,7 @@ async fn test_remote_add_creates_entry() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -54,6 +55,7 @@ async fn test_remote_add_duplicate_name_returns_error() {
         RemoteCmds::Add {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
+            fetch: false,
         },
         &OutputConfig::default(),
     )
@@ -64,6 +66,7 @@ async fn test_remote_add_duplicate_name_returns_error() {
         RemoteCmds::Add {
             name: "origin".into(),
             url: "https://example.com/another.git".into(),
+            fetch: false,
         },
         &OutputConfig::default(),
     )
@@ -89,6 +92,7 @@ async fn test_remote_remove_deletes_entry() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -112,6 +116,7 @@ async fn test_remote_remove_deletes_vault_ssh_keys() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -156,6 +161,7 @@ async fn test_remote_rename_updates_branch_tracking() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -213,6 +219,7 @@ async fn test_remote_rename_cascades_vault_ssh_keys() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -274,6 +281,7 @@ async fn test_remote_rename_refuses_existing_target_vault_ssh_namespace() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -415,11 +423,13 @@ async fn test_remote_rename_conflict_returns_error() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
     remote::execute(RemoteCmds::Add {
         name: "upstream".into(),
         url: "https://example.com/upstream.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -439,6 +449,7 @@ async fn test_remote_set_url_add_appends_fetch_url() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -474,6 +485,7 @@ async fn test_remote_set_url_delete_removes_matching_url() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -517,6 +529,7 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 
@@ -564,6 +577,7 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://one.example/repo.git".into(),
+        fetch: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -1265,6 +1279,7 @@ async fn test_remote_set_url_delete_no_match_returns_error() {
         RemoteCmds::Add {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
+            fetch: false,
         },
         &OutputConfig::default(),
     )
@@ -1387,6 +1402,7 @@ async fn test_remote_remove_works_after_deleting_last_url() {
         RemoteCmds::Add {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
+            fetch: false,
         },
         &OutputConfig::default(),
     )
@@ -1693,6 +1709,7 @@ async fn add_origin() {
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
+        fetch: false,
     })
     .await;
 }
@@ -2148,4 +2165,35 @@ fn remote_update_resolves_and_fetches_configured_remotes() {
         !attempt.status.success(),
         "updating an unreachable remote must fail at the fetch step"
     );
+}
+
+#[test]
+fn remote_add_fetch_flag_registers_then_attempts_fetch() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `-f` registers the remote and then fetches. With an unreachable URL the
+    // fetch fails fast, but the remote remains registered.
+    let with_fetch =
+        run_libra_command(&["remote", "add", "-f", "origin", "not-a-valid-url-xyz"], p);
+    let listed = run_libra_command(&["remote", "-v"], p);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("origin"),
+        "remote is registered after `add -f` even when the fetch fails"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&with_fetch.stdout),
+        String::from_utf8_lossy(&with_fetch.stderr)
+    );
+    assert!(
+        combined.contains("not-a-valid-url-xyz") || combined.to_lowercase().contains("repository"),
+        "`add -f` attempted a fetch from the new remote: {combined:?}"
+    );
+
+    // Without `-f`, `add` registers the remote with no fetch attempt (succeeds).
+    let plain = run_libra_command(&["remote", "add", "other", "https://example.com/x.git"], p);
+    assert_cli_success(&plain, "`remote add` without -f registers without fetching");
 }

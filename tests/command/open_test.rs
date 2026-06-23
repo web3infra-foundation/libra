@@ -30,6 +30,7 @@ async fn test_open_remote_origin() {
         RemoteCmds::Add {
             name: "origin".into(),
             url: "git@github.com:web3infra-foundation/libra.git".into(),
+            fetch: false,
         },
         &output,
     )

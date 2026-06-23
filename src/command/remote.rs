@@ -77,6 +77,8 @@ EXAMPLES:
     libra remote -v                                List remotes with fetch/push URLs
     libra remote add origin git@example.com:org/repo.git
                                                    Register a new remote
+    libra remote add -f origin git@example.com:org/repo.git
+                                                   Register a remote and fetch from it
     libra remote rename origin upstream            Rename an existing remote
     libra remote remove upstream                   Drop a remote and its tracking refs
     libra remote get-url --all origin              Print every URL configured for origin
@@ -99,6 +101,9 @@ pub enum RemoteCmds {
         name: String,
         /// The URL of the remote
         url: String,
+        /// Immediately fetch from the new remote after adding it.
+        #[clap(short = 'f', long = "fetch")]
+        fetch: bool,
     },
     /// Remove a remote
     Remove {
@@ -502,7 +507,7 @@ async fn run_remote(
     output: &OutputConfig,
 ) -> Result<RemoteOutput, RemoteError> {
     match command {
-        RemoteCmds::Add { name, url } => run_add_remote(name, url).await,
+        RemoteCmds::Add { name, url, fetch } => run_add_remote(name, url, fetch, output).await,
         RemoteCmds::Remove { name } => run_remove_remote(name).await,
         RemoteCmds::Rename { old, new } => run_rename_remote(old, new).await,
         RemoteCmds::List => run_list_remotes(true).await,
@@ -539,7 +544,12 @@ async fn run_remote(
     }
 }
 
-async fn run_add_remote(name: String, url: String) -> Result<RemoteOutput, RemoteError> {
+async fn run_add_remote(
+    name: String,
+    url: String,
+    fetch: bool,
+    output: &OutputConfig,
+) -> Result<RemoteOutput, RemoteError> {
     if remote_exists(&name).await? {
         return Err(RemoteError::AlreadyExists { name });
     }
@@ -549,6 +559,12 @@ async fn run_add_remote(name: String, url: String) -> Result<RemoteOutput, Remot
         .map_err(|error| RemoteError::ConfigWrite {
             detail: error.to_string(),
         })?;
+
+    // `-f`/`--fetch`: pull from the new remote right after registering it. The
+    // remote stays registered even if the fetch fails.
+    if fetch {
+        fetch_remote_by_name(&name, output).await?;
+    }
 
     Ok(RemoteOutput::Add { name, url })
 }
@@ -785,16 +801,25 @@ async fn run_remote_update(
     let mut updated = Vec::new();
     for name in remotes {
         ensure_remote_exists(&name).await?;
-        let remote_config = ConfigKv::remote_config(&name)
-            .await
-            .map_err(|error| RemoteError::ConfigRead {
-                detail: error.to_string(),
-            })?
-            .ok_or_else(|| RemoteError::NoUrlConfigured { name: name.clone() })?;
-        fetch::fetch_repository_safe(remote_config, None, false, None, None, output).await?;
+        fetch_remote_by_name(&name, output).await?;
         updated.push(name);
     }
     Ok(RemoteOutput::Update { remotes: updated })
+}
+
+/// Fetch from a configured remote by name. Shared by `remote update` and
+/// `remote add -f`.
+async fn fetch_remote_by_name(name: &str, output: &OutputConfig) -> Result<(), RemoteError> {
+    let remote_config = ConfigKv::remote_config(name)
+        .await
+        .map_err(|error| RemoteError::ConfigRead {
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| RemoteError::NoUrlConfigured {
+            name: name.to_string(),
+        })?;
+    fetch::fetch_repository_safe(remote_config, None, false, None, None, output).await?;
+    Ok(())
 }
 
 async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, RemoteError> {

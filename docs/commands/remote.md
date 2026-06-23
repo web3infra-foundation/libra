@@ -8,7 +8,7 @@ Manage configured remotes: list, add, remove, rename, inspect and mutate URLs, a
 libra remote <subcommand> [OPTIONS] [ARGS]
 libra remote show
 libra remote -v
-libra remote add <name> <url>
+libra remote add [-f | --fetch] <name> <url>
 libra remote remove <name>
 libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
@@ -332,6 +332,7 @@ for both fetch and push, matching Git's behavior.
 | List names | `libra remote show` | `git remote` | `jj git remote list` |
 | List with URLs | `libra remote -v` | `git remote -v` | `jj git remote list` (always verbose) |
 | Add remote | `libra remote add <n> <u>` | `git remote add <n> <u>` | `jj git remote add <n> <u>` |
+| Add remote + fetch | `libra remote add -f <n> <u>` | `git remote add -f <n> <u>` | N/A |
 | Remove remote | `libra remote remove <n>` | `git remote remove <n>` | `jj git remote remove <n>` |
 | Rename remote | `libra remote rename <o> <n>` | `git remote rename <o> <n>` | `jj git remote rename <o> <n>` |
 | Get URL | `libra remote get-url <n>` | `git remote get-url <n>` | N/A |
