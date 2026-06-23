@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 tree inspection、子目录相对输出、`--full-name`、`--full-tree` 和 `--format`（支持 `%(objectmode)`/`%(objecttype)`/`%(objectname)`/`%(objectsize)`/`%(path)` 原子与 `%x09`/`%x0a` 转义）已公开；Git 的 `REV:path` tree-ish 语法仍未公开。
+- 兼容级别：`partial`。基础 tree inspection、子目录相对输出、`--full-name`、`--full-tree`、`REV:path` tree-ish 语法和 `--format`（支持 `%(objectmode)`/`%(objecttype)`/`%(objectname)`/`%(objectsize)`/`%(path)` 原子与 `%x09`/`%x0a` 转义）已公开；完整 Git pathspec magic 仍未公开。
 
 
 ## 设计方案
@@ -58,7 +58,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | ✅ 已实现 | 自定义格式 `--format=<FORMAT>` | 支持 `%(objectmode)`/`%(objecttype)`/`%(objectname)`/`%(objectsize)`/`%(path)` 原子与 `%x09`/`%x0a` 转义；未知原子按字面保留（宽松）。与 `--name-only`/`--name-status`/`--object-only`/`-l` 互斥。带单元测试。 |
-| 兼容差异项 | 不支持 REV:path syntax | 当前状态：LBR-UNSUPPORTED-001；Git/相关参数：128。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | REV:path syntax | `REV:path` 解析 REV 的根树后导航到 `path` 处的子树（`resolve_treeish_to_tree` 在首个 `:` 处切分，复用 `find_tree_entry` 逐组件下行；空 path（`REV:`）列出根树）。目标必须是树，blob path 报 `not a tree object`（`LBR-CLI-003`/CliInvalidTarget），缺失 path 报 path-not-found。带集成测试（`test_ls_tree_rev_path_navigates_into_subtree`、`ls_tree_rev_path_blob_target_errors_as_not_a_tree`）。 |
 
 ## 维护要求
 

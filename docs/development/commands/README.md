@@ -54,7 +54,7 @@
 | [`log`](log.md) | `partial` | common log surface plus `--range`/`--all`/`--reverse`/`--follow`/`-L`; positional ranges and exact line history remain partial |
 | [`ls-files`](ls-files.md) | `partial` | default cached listing plus modified/deleted/stage/untracked filters, `.libraignore`-aware `--others --exclude-standard`, pathspecs, `--error-unmatch`, `-z`, status tags `-t` (H/R/C/?/M), unmerged-only `-u`/`--unmerged`, `--full-name` (accepted no-op; Libra always prints repo-root-relative paths), and JSON/machine output supported |
 | [`ls-remote`](ls-remote.md) | `partial` | heads/tags/refs filtering, patterns, get-url, sort, and exit-code supported; symref not exposed |
-| [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, JSON, common output flags, and partial `--format` atom support exposed; `REV:path` syntax is not exposed |
+| [`ls-tree`](ls-tree.md) | `partial` | Commit/tree listing, recursive listing, current-directory-relative path prefix filters, `--full-name`, `--full-tree`, `REV:path` tree-ish syntax, JSON, common output flags, and partial `--format` atom support exposed; full Git pathspec magic remains incomplete |
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; commit-graph and prefetch tasks implemented with documented Git semantic differences |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | [`mv`](mv.md) | `partial` | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |

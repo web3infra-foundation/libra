@@ -31,6 +31,7 @@ use crate::{
 pub const LS_TREE_EXAMPLES: &str = "\
 EXAMPLES:
     libra ls-tree HEAD                         List entries in HEAD's root tree
+    libra ls-tree HEAD:src                     List the src subtree via REV:path
     libra ls-tree -r HEAD src                  Recursively list entries under src
     libra ls-tree -l HEAD README.md            Include blob sizes
     libra ls-tree --name-only HEAD src         Print paths only
@@ -154,7 +155,7 @@ pub async fn execute(args: LsTreeArgs) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Returns structured CLI errors for unsupported `REV:path` tree-ish syntax,
+/// Returns structured CLI errors for `REV:path` targets that are not trees,
 /// invalid revisions, corrupt tree objects, path filters that do not match, and
 /// stdout write failures.
 pub async fn execute_safe(args: LsTreeArgs, output: &OutputConfig) -> CliResult<()> {
@@ -193,14 +194,6 @@ async fn resolve_ls_tree(args: &LsTreeArgs) -> CliResult<LsTreeOutput> {
 }
 
 fn validate_args(args: &LsTreeArgs) -> CliResult<()> {
-    if args.treeish.contains(':') {
-        return Err(CliError::command_usage(
-            "`ls-tree` does not support REV:path tree-ish syntax in this release",
-        )
-        .with_stable_code(StableErrorCode::Unsupported)
-        .with_hint("pass the revision as TREE-ISH and the path as a separate argument."));
-    }
-
     if let Some(width) = args.abbrev
         && width < 4
     {
@@ -214,6 +207,29 @@ fn validate_args(args: &LsTreeArgs) -> CliResult<()> {
 }
 
 async fn resolve_treeish_to_tree(treeish: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
+    // `REV:path` resolves REV's root tree and then navigates to the (sub)tree at
+    // `path`, matching `git ls-tree REV:path`. The first `:` is the separator;
+    // an empty path (`REV:`) lists REV's root tree.
+    if let Some((rev, path)) = treeish.split_once(':') {
+        let root = resolve_plain_treeish_to_tree(rev, storage).await?;
+        if path.is_empty() {
+            return Ok(root);
+        }
+        let (entry, subtree_id) = find_tree_entry(root, path)?;
+        if entry.mode != TreeItemMode::Tree {
+            return Err(CliError::failure(format!("not a tree object: '{treeish}'"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("REV:path must name a directory (tree); use `cat-file` for blobs."));
+        }
+        return Ok(subtree_id);
+    }
+    resolve_plain_treeish_to_tree(treeish, storage).await
+}
+
+async fn resolve_plain_treeish_to_tree(
+    treeish: &str,
+    storage: &ClientStorage,
+) -> CliResult<ObjectHash> {
     match util::get_commit_base_typed(treeish).await {
         Ok(commit_id) => {
             let commit: Commit = load_object(&commit_id).map_err(|error| {

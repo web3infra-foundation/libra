@@ -480,13 +480,20 @@ fn ls_tree_blob_treeish_fails() {
 
 #[test]
 #[serial]
-fn ls_tree_rev_path_syntax_is_rejected() {
+fn ls_tree_rev_path_blob_target_errors_as_not_a_tree() {
     let repo = setup_ls_tree_repo();
 
+    // `REV:path` is supported, but it must name a tree; targeting a blob is a
+    // clear "not a tree object" error (see the navigation test for the
+    // supported subtree cases).
     let output = run_libra_command(&["ls-tree", "HEAD:README.md"], repo.path());
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("REV:path"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a tree object"),
+        "a blob REV:path should report not-a-tree: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -529,11 +536,13 @@ fn ls_tree_rejects_conflicting_output_modes() {
 fn ls_tree_json_error_uses_structured_envelope() {
     let repo = setup_ls_tree_repo();
 
+    // `REV:path` is supported; pointing it at a blob is a structured
+    // not-a-tree error (LBR-CLI-003), exercising the JSON error envelope.
     let output = run_libra_command(&["--json", "ls-tree", "HEAD:README.md"], repo.path());
 
     assert!(!output.status.success());
     let (_human, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(report.error_code, "LBR-UNSUPPORTED-001");
+    assert_eq!(report.error_code, "LBR-CLI-003");
 }
 
 #[test]
@@ -560,4 +569,50 @@ fn ls_tree_help_lists_examples_banner() {
     assert_cli_success(&output, "ls-tree --help should succeed");
 
     assert!(stdout_string(&output).contains("EXAMPLES:"));
+}
+
+#[test]
+fn test_ls_tree_rev_path_navigates_into_subtree() {
+    let repo = setup_ls_tree_repo();
+    let p = repo.path();
+
+    // HEAD:src lists src's children with names relative to src.
+    let out = run_libra_command(&["ls-tree", "HEAD:src"], p);
+    assert_cli_success(&out, "ls-tree HEAD:src");
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(s.contains("\tlib.rs"), "src child lib.rs: {s:?}");
+    assert!(s.contains("\tnested"), "src child nested: {s:?}");
+    assert!(!s.contains("src/"), "paths must be relative to src: {s:?}");
+    assert!(!s.contains("README.md"), "only src contents listed: {s:?}");
+
+    // HEAD:src/nested lists the deeper subtree.
+    let out2 = run_libra_command(&["ls-tree", "HEAD:src/nested"], p);
+    assert_cli_success(&out2, "ls-tree HEAD:src/nested");
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("\tdeep.txt"),
+        "nested child deep.txt"
+    );
+
+    // HEAD: lists the root tree.
+    let out3 = run_libra_command(&["ls-tree", "HEAD:"], p);
+    assert_cli_success(&out3, "ls-tree HEAD:");
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("\tREADME.md"),
+        "root tree has README.md"
+    );
+
+    // REV:path pointing at a blob is an error (not a tree).
+    assert!(
+        !run_libra_command(&["ls-tree", "HEAD:README.md"], p)
+            .status
+            .success(),
+        "a blob path is not a tree"
+    );
+    // REV:path pointing at a missing path is an error.
+    assert!(
+        !run_libra_command(&["ls-tree", "HEAD:nope"], p)
+            .status
+            .success(),
+        "a missing path errors"
+    );
 }

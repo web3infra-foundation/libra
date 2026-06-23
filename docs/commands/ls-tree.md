@@ -16,8 +16,9 @@ paths and output are relative to that subdirectory by default. It is read-only:
 it does not update refs, the index, the worktree, or object storage.
 
 The current compatibility slice supports ordinary path prefix filters,
-`--full-name`, and `--full-tree`. Full Git pathspec matching, `REV:path`
-tree-ish syntax, and `--format` are deferred.
+`--full-name`, `--full-tree`, `REV:path` tree-ish syntax (resolve a revision
+and navigate into a subtree, e.g. `HEAD:src`), and `--format`. Full Git
+pathspec magic is deferred.
 
 ## Options
 
@@ -41,6 +42,8 @@ tree-ish syntax, and `--format` are deferred.
 
 ```bash
 libra ls-tree HEAD
+libra ls-tree HEAD:src
+libra ls-tree HEAD:src/nested
 libra ls-tree -r HEAD src
 libra ls-tree -l HEAD README.md
 libra ls-tree --name-only HEAD src
@@ -111,6 +114,6 @@ entries include the `size` field:
 | Scenario | StableErrorCode | Exit |
 |----------|-----------------|------|
 | Invalid or missing tree-ish | `LBR-CLI-003` | 129 |
-| Unsupported `REV:path` syntax | `LBR-UNSUPPORTED-001` | 128 |
+| `REV:path` targets a blob (not a tree) | `LBR-CLI-003` | 128 |
 | Failed to read objects | `LBR-IO-001` | 128 |
 | Corrupt stored refs/objects | `LBR-REPO-002` | 128 |
