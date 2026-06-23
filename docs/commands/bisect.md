@@ -5,7 +5,7 @@ Use binary search to find the commit that introduced a bug.
 ## Synopsis
 
 ```
-libra bisect start [<bad>] [--good <commit>]
+libra bisect start [<bad>] [--good <commit>] [--first-parent]
 libra bisect bad [<rev>]
 libra bisect good [<rev>]
 libra bisect reset [<rev>]
@@ -35,6 +35,7 @@ Begin a new bisect session. Saves the current HEAD and branch for later restorat
 |-----------------|-------------|
 | `<bad>` | Optional commit to immediately mark as bad. If omitted, use `bisect bad` later. |
 | `--good` / `-g` | Optional commit to immediately mark as good. If omitted, use `bisect good` later. |
+| `--first-parent` | Follow only the first parent of merge commits, restricting the bisect to mainline history (a merged-in side branch contributes no testable commits). |
 
 ```bash
 # Start with no initial markers
@@ -45,6 +46,9 @@ libra bisect start HEAD --good v1.0
 
 # Start with a specific bad commit
 libra bisect start abc1234 --good def5678
+
+# Bisect only the first-parent (mainline) history, ignoring merged side branches
+libra bisect start HEAD --good v1.0 --first-parent
 ```
 
 ### Subcommand: `bad`
@@ -321,9 +325,9 @@ The full command line is passed through verbatim, so `libra bisect run cargo tes
 
 Manual marking (`bisect good` / `bisect bad`) remains the recommended path for AI agents that evaluate results in-process and prefer explicit control over each step.
 
-### Why no `--first-parent`?
+### First-parent bisecting
 
-Git's `git bisect --first-parent` restricts the search to first-parent commits only, which is useful in workflows with many merge commits. Libra's bisect traverses the full commit graph using BFS, which is simpler and correct for all topologies. First-parent restriction is primarily useful for large projects with a strict merge-commit workflow; Libra's target use case of trunk-based development typically has a more linear history where this optimization is unnecessary.
+By default Libra's bisect traverses the full commit graph using BFS, which is correct for all topologies. `bisect start --first-parent` mirrors `git bisect --first-parent`: it follows only the first parent of merge commits, so a merged-in side branch contributes no testable commits. This narrows the search to the mainline in workflows with many merge commits. The flag is recorded in the bisect session state, so subsequent `good`/`bad`/`skip` steps stay on the first-parent history until `bisect reset`.
 
 ### Why SQLite state persistence?
 
@@ -348,7 +352,7 @@ Sometimes the user wants to end the bisect session but go to a different commit 
 | Custom terms | Not supported (deferred — see compatibility/declined.md D7) | `bisect terms` / `--term-old` / `--term-new` | N/A |
 | Replay session | Not supported (deferred — see compatibility/declined.md D6) | `bisect replay <logfile>` | N/A |
 | Visualize (GUI) | Not supported | `bisect visualize` | N/A |
-| First-parent only | Not supported | `--first-parent` | N/A |
+| First-parent only | `bisect start --first-parent` | `--first-parent` | N/A |
 | Multiple good commits | Via repeated `bisect good` | Positional args to `start` | N/A |
 | State storage | SQLite (`bisect_state` table) | Flat files (`.git/BISECT_*`) | N/A |
 

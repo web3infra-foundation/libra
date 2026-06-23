@@ -146,6 +146,7 @@ async fn test_bisect_start_creates_state() {
     let args = Bisect::Start {
         bad: None,
         good: None,
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -179,6 +180,7 @@ async fn test_bisect_start_with_bad_and_good() {
     let args = Bisect::Start {
         bad: Some(bad.clone()),
         good: Some(good.clone()),
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -209,6 +211,7 @@ async fn test_bisect_mark_bad_then_good() {
     let args = Bisect::Start {
         bad: None,
         good: None,
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -257,6 +260,7 @@ async fn test_bisect_find_first_bad_commit() {
     let args = Bisect::Start {
         bad: Some(bad),
         good: Some(good),
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -309,6 +313,7 @@ async fn test_bisect_reset() {
     let args = Bisect::Start {
         bad: None,
         good: None,
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -356,6 +361,7 @@ async fn test_bisect_reset_surfaces_corrupt_original_branch_storage() {
         Bisect::Start {
             bad: None,
             good: None,
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -393,6 +399,7 @@ async fn test_bisect_skip() {
     let args = Bisect::Start {
         bad: Some(bad),
         good: Some(good),
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -430,6 +437,7 @@ async fn test_bisect_log() {
     let args = Bisect::Start {
         bad: Some(hashes[0].clone()),
         good: Some(hashes[2].clone()),
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -455,6 +463,7 @@ async fn test_bisect_start_already_in_progress_fails() {
     let args = Bisect::Start {
         bad: None,
         good: None,
+        first_parent: false,
     };
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
@@ -462,6 +471,7 @@ async fn test_bisect_start_already_in_progress_fails() {
     let args = Bisect::Start {
         bad: None,
         good: None,
+        first_parent: false,
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
@@ -591,6 +601,7 @@ async fn test_bisect_view_inside_active_session() {
         Bisect::Start {
             bad: Some(hashes[0].clone()),
             good: Some(hashes[4].clone()),
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -622,6 +633,7 @@ async fn test_bisect_json_view_outputs_clean_envelope() {
         Bisect::Start {
             bad: Some(hashes[0].clone()),
             good: Some(hashes[4].clone()),
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -691,6 +703,7 @@ async fn test_bisect_run_without_bounds_does_not_spawn_command() {
         Bisect::Start {
             bad: None,
             good: None,
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -735,6 +748,7 @@ async fn test_bisect_run_propagates_fatal_exit_code() {
         Bisect::Start {
             bad: Some(hashes[0].clone()),
             good: Some(hashes[4].clone()),
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -773,6 +787,7 @@ async fn test_bisect_machine_run_outputs_single_json_line() {
         Bisect::Start {
             bad: Some(hashes[0].clone()),
             good: Some(hashes[4].clone()),
+            first_parent: false,
         },
         &OutputConfig::default(),
     )
@@ -805,4 +820,125 @@ async fn test_bisect_machine_run_outputs_single_json_line() {
     assert_eq!(json["data"]["action"], "run");
     assert_eq!(json["data"]["steps"].as_u64(), Some(2));
     assert!(json["data"]["first_bad"].as_str().is_some());
+}
+
+/// `bisect start --first-parent` must restrict the candidate set to the
+/// first-parent (mainline) history, so a merged-in side branch contributes no
+/// testable commits. Verified by comparing the reported `remaining` candidate
+/// count against a normal (all-parents) bisect over the same merge history.
+#[test]
+fn bisect_first_parent_shrinks_candidate_set() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    // Keep the isolated HOME OUTSIDE the repo: anything under `p` would be an
+    // untracked file that bisect's clean-tree guard rejects.
+    let home_dir = tempdir().unwrap();
+    let home = home_dir.path().to_path_buf();
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_libra"))
+            .args(args)
+            .current_dir(p)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("LIBRA_COMMITTER_NAME", "Tester")
+            .env("LIBRA_COMMITTER_EMAIL", "t@t.test")
+            .output()
+            .expect("run libra")
+    };
+    let commit_file = |name: &str, msg: &str| {
+        std::fs::write(p.join(name), format!("{name}\n")).unwrap();
+        assert!(run(&["add", name]).status.success(), "add {name}");
+        let out = run(&["commit", "-m", msg, "--no-verify"]);
+        assert!(
+            out.status.success(),
+            "commit {msg}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let head = || -> String {
+        String::from_utf8_lossy(&run(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string()
+    };
+
+    assert!(run(&["init"]).status.success(), "init");
+    assert!(
+        run(&["config", "user.name", "Tester"]).status.success(),
+        "config name"
+    );
+    assert!(
+        run(&["config", "user.email", "t@t.test"]).status.success(),
+        "config email"
+    );
+
+    // First commit also tracks the auto-created `.libraignore`, otherwise it
+    // lingers as an untracked file and trips bisect's clean-tree guard.
+    std::fs::write(p.join("base.txt"), "base\n").unwrap();
+    assert!(
+        run(&["add", ".libraignore", "base.txt"]).status.success(),
+        "add base"
+    );
+    assert!(
+        run(&["commit", "-m", "c0", "--no-verify"]).status.success(),
+        "commit c0"
+    );
+    let good = head();
+
+    // Side branch with several commits (these become extra candidates only in
+    // the all-parents walk).
+    assert!(run(&["branch", "side"]).status.success(), "branch side");
+    assert!(run(&["switch", "side"]).status.success(), "switch side");
+    for i in 0..5 {
+        commit_file(&format!("side{i}.txt"), &format!("s{i}"));
+    }
+
+    // Mainline advances, then merges the side branch (real merge commit).
+    assert!(run(&["switch", "main"]).status.success(), "switch main");
+    commit_file("main1.txt", "m1");
+    let merge = run(&["merge", "side", "--no-ff", "-m", "merge side"]);
+    assert!(
+        merge.status.success(),
+        "merge: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    commit_file("main2.txt", "m2");
+    let bad = head();
+
+    let remaining = |first_parent: bool| -> i64 {
+        let mut args = vec![
+            "--json",
+            "bisect",
+            "start",
+            bad.as_str(),
+            "-g",
+            good.as_str(),
+        ];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        let out = run(&args);
+        assert!(
+            out.status.success(),
+            "bisect start: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("bisect start json");
+        let rem = json["data"]["remaining"].as_i64().expect("remaining field");
+        assert!(run(&["bisect", "reset"]).status.success(), "bisect reset");
+        rem
+    };
+
+    let full = remaining(false);
+    let first_parent = remaining(true);
+    assert!(
+        first_parent < full,
+        "first-parent must shrink the candidate set: first_parent={first_parent}, full={full}"
+    );
 }

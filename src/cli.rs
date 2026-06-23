@@ -544,6 +544,11 @@ pub enum Bisect {
         bad: Option<String>,
         #[arg(long, short, help = "Good commit to mark")]
         good: Option<String>,
+        #[arg(
+            long = "first-parent",
+            help = "Follow only the first parent of merge commits while bisecting"
+        )]
+        first_parent: bool,
     },
     #[command(about = "Mark the current or given commit as bad")]
     Bad {

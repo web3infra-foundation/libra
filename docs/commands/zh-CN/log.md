@@ -372,7 +372,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 反向顺序 | `git log --reverse` | `jj log --reversed` | `libra log --reverse` |
 | 追踪重命名 | `git log --follow <file>` | N/A | `libra log --follow <file>` |
 | 仅 merge commits | `git log --merges` | N/A | N/A |
-| 仅 first parent | `git log --first-parent` | N/A | N/A |
+| 仅 first parent | `git log --first-parent` | N/A | `libra log --first-parent` |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
 

@@ -79,6 +79,9 @@ pub struct BisectState {
     pub steps: Option<usize>,
     /// Whether bisect has found the culprit (session ended but state preserved for reset)
     pub completed: bool,
+    /// When true, follow only the first parent of merge commits while
+    /// enumerating testable commits (`bisect start --first-parent`).
+    pub first_parent: bool,
 }
 
 impl BisectState {
@@ -157,7 +160,8 @@ impl BisectState {
                     current      TEXT,
                     skipped      TEXT,
                     steps        INTEGER,
-                    completed    INTEGER NOT NULL DEFAULT 0
+                    completed    INTEGER NOT NULL DEFAULT 0,
+                    first_parent INTEGER NOT NULL DEFAULT 0
                 );
             "#
             .to_string(),
@@ -200,6 +204,42 @@ impl BisectState {
                         let err_str = e.to_string();
                         if !err_str.contains("duplicate column name") {
                             return Err(format!("failed to add completed column: {e}"));
+                        }
+                        // Column already exists (added by concurrent process) - continue
+                    }
+                }
+            }
+        }
+
+        // Check if first_parent column exists (migration for older tables without it)
+        let check_first_parent_stmt = Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+                SELECT COUNT(*)
+                FROM pragma_table_info('bisect_state')
+                WHERE name='first_parent';
+            "#
+            .to_string(),
+        );
+
+        if let Some(result) = db
+            .query_one(check_first_parent_stmt)
+            .await
+            .map_err(|e| format!("failed to check bisect_state columns: {e}"))?
+        {
+            let count: i64 = result.try_get_by_index(0).unwrap_or(0);
+            if count == 0 {
+                let alter_stmt = Statement::from_string(
+                    DbBackend::Sqlite,
+                    "ALTER TABLE bisect_state ADD COLUMN first_parent INTEGER NOT NULL DEFAULT 0;"
+                        .to_string(),
+                );
+                match db.execute(alter_stmt).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if !err_str.contains("duplicate column name") {
+                            return Err(format!("failed to add first_parent column: {e}"));
                         }
                         // Column already exists (added by concurrent process) - continue
                     }
@@ -262,8 +302,8 @@ impl BisectState {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r#"
-                INSERT INTO bisect_state (orig_head, orig_head_name, bad, good, current, skipped, steps, completed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO bisect_state (orig_head, orig_head_name, bad, good, current, skipped, steps, completed, first_parent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
             [
                 state.orig_head.to_string().into(),
@@ -288,6 +328,7 @@ impl BisectState {
                     .map(|v| v.into())
                     .unwrap_or(Value::BigInt(None)),
                 (state.completed as i64).into(),
+                (state.first_parent as i64).into(),
             ],
         );
 
@@ -304,7 +345,7 @@ impl BisectState {
     async fn load_from_db<C: ConnectionTrait>(db: &C) -> Result<Option<BisectState>, String> {
         let stmt = Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT orig_head, orig_head_name, bad, good, current, skipped, steps, completed FROM bisect_state LIMIT 1;".to_string(),
+            "SELECT orig_head, orig_head_name, bad, good, current, skipped, steps, completed, first_parent FROM bisect_state LIMIT 1;".to_string(),
         );
 
         if let Some(result) = db
@@ -324,6 +365,7 @@ impl BisectState {
             let skipped_json: Option<String> = result.try_get_by_index(5).ok();
             let steps: Option<i64> = result.try_get_by_index(6).ok();
             let completed: i64 = result.try_get_by_index(7).unwrap_or(0);
+            let first_parent: i64 = result.try_get_by_index(8).unwrap_or(0);
 
             let orig_head = ObjectHash::from_str(&orig_head_str)
                 .map_err(|e| format!("invalid orig_head hash: {e}"))?;
@@ -348,6 +390,7 @@ impl BisectState {
                 skipped,
                 steps: steps.map(|s| s as usize),
                 completed: completed != 0,
+                first_parent: first_parent != 0,
             }));
         }
 
@@ -374,6 +417,7 @@ EXAMPLES:
     libra bisect start                         Begin a session; mark bad/good in subsequent steps
     libra bisect start <bad>                   Begin a session with the bad commit pre-marked
     libra bisect start <bad> --good <good>     Begin a session with both bounds pre-marked
+    libra bisect start <bad> --first-parent    Bisect only the first-parent (mainline) history
     libra bisect bad                           Mark the current HEAD as bad
     libra bisect good                          Mark the current HEAD as good
     libra bisect skip                          Skip the current commit and continue
@@ -522,7 +566,11 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
 
 async fn run_bisect(bisect_cmd: Bisect) -> CliResult<BisectOutput> {
     match bisect_cmd {
-        Bisect::Start { bad, good } => run_bisect_start(bad, good).await,
+        Bisect::Start {
+            bad,
+            good,
+            first_parent,
+        } => run_bisect_start(bad, good, first_parent).await,
         Bisect::Bad { rev } => run_bisect_bad(rev).await,
         Bisect::Good { rev } => run_bisect_good(rev).await,
         Bisect::Reset { rev } => run_bisect_reset(rev).await,
@@ -792,7 +840,11 @@ async fn is_bare_repository() -> CliResult<bool> {
 /// tests/command/bisect_test.rs:115;
 /// tests::test_bisect_start_already_in_progress_fails in
 /// tests/command/bisect_test.rs:370.
-async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResult<BisectOutput> {
+async fn run_bisect_start(
+    bad: Option<String>,
+    good: Option<String>,
+    first_parent: bool,
+) -> CliResult<BisectOutput> {
     // Bare repositories have no working tree - bisect requires checkout operations
     if is_bare_repository().await? {
         return Err(CliError::fatal("bisect cannot be run in a bare repository")
@@ -854,6 +906,7 @@ async fn run_bisect_start(bad: Option<String>, good: Option<String>) -> CliResul
         skipped: vec![],
         steps: None,
         completed: false,
+        first_parent,
     };
 
     // If both bad and good are provided, validate bounds before saving state
@@ -1710,7 +1763,8 @@ async fn find_next_bisect_point(state: &BisectState) -> Result<BisectNext, Strin
     }
 
     // Get all ancestors of bad that are not ancestors of any good commit
-    let testable = get_testable_commits(&bad, &state.good, &state.skipped).await?;
+    let testable =
+        get_testable_commits(&bad, &state.good, &state.skipped, state.first_parent).await?;
 
     if testable.is_empty() {
         // Check if this is because all candidates were skipped
@@ -1723,7 +1777,8 @@ async fn find_next_bisect_point(state: &BisectState) -> Result<BisectNext, Strin
             );
         }
         // There are skipped commits - check if without skip filter we'd have candidates
-        let testable_without_skip = get_testable_commits(&bad, &state.good, &[]).await?;
+        let testable_without_skip =
+            get_testable_commits(&bad, &state.good, &[], state.first_parent).await?;
         if testable_without_skip.is_empty() {
             // Still empty without skip filter = invalid bounds
             return Err(
@@ -1761,6 +1816,7 @@ async fn get_testable_commits(
     bad: &ObjectHash,
     good: &[ObjectHash],
     skipped: &[ObjectHash],
+    first_parent: bool,
 ) -> Result<Vec<ObjectHash>, String> {
     // Build set of good ancestors
     let good_ancestors: HashSet<ObjectHash> = get_all_ancestors(good).await?;
@@ -1797,9 +1853,16 @@ async fn get_testable_commits(
         // Add to testable list
         testable.push(commit_hash);
 
-        // Add parents to queue
-        for parent in &commit.parent_commit_ids {
-            queue.push_back(*parent);
+        // Add parents to queue. With `--first-parent`, follow only the first
+        // parent of merge commits so bisecting stays on the mainline history.
+        if first_parent {
+            if let Some(parent) = commit.parent_commit_ids.first() {
+                queue.push_back(*parent);
+            }
+        } else {
+            for parent in &commit.parent_commit_ids {
+                queue.push_back(*parent);
+            }
         }
     }
 
@@ -1850,6 +1913,7 @@ async fn count_commits_to_test(state: &BisectState) -> Result<usize, String> {
         return Err("No good commits set".to_string());
     }
 
-    let testable = get_testable_commits(&bad, &state.good, &state.skipped).await?;
+    let testable =
+        get_testable_commits(&bad, &state.good, &state.skipped, state.first_parent).await?;
     Ok(testable.len())
 }

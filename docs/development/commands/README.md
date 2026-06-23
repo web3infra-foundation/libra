@@ -25,7 +25,7 @@
 | [`archive`](archive.md) | `partial` | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix`, `--list`, `-v`/`--verbose`, and `TREEISH <path>...` supported |
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
-| [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` supported; `replay` (see [docs/development/comma... |
+| [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` and `start --first-parent` supported; `replay` (see [docs/development/comma... |
 | [`blame`](blame.md) | `partial` | numeric `-L` ranges, porcelain/line-porcelain, and `-e`/`--show-email` supported; reverse/whitespace/incremental/copy-move detection remain incomplete |
 | [`branch`](branch.md) | `partial` | create/list/delete/rename/upstream set+unset/current/contains/points-at/merged/no-merged/sort(refname,version:refname)/ignore-case supported; copy/description/custom-format/remaining-sort-keys not exposed |
 | [`cat-file`](cat-file.md) | `partial` | `-t` / `-s` / `-p` / `-e` plus `--batch-check` / `--batch` / `--batch-command` / `--batch-all-objects` (with optional `=<format>`) supported; `-e` JSON/machine output not exposed |
