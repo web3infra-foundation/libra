@@ -37,6 +37,8 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | Word regexp | `-w` | `--word-regexp` | Match only lines where the pattern forms a complete word (surrounded by word boundaries). |
 | Invert match | `-v` | `--invert-match` | Select non-matching lines instead of matching lines. |
 | Byte offset | `-b` | `--byte-offset` | Show the 0-based byte offset of the first match on each line. |
+| Max count | `-m` | `--max-count <NUM>` | Stop after NUM matching lines per file. |
+| Only matching | `-o` | `--only-matching` | Print only the matched parts of a line, one match per output line (context lines are suppressed). |
 | Pathspec | | positional (trailing) | Restrict search to files matching the given paths. |
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
@@ -375,9 +377,11 @@ jj does not have a built-in grep command. Users are expected to use external too
 | Pathspec | Trailing positional | Trailing positional | N/A |
 | Revision search | `--tree <REVISION>` | `<revision>` (positional) | N/A |
 | Index search | `--cached` | `--cached` | N/A |
-| Context lines | Not supported | `-C` / `-A` / `-B` | N/A |
-| Extended regexp | Not supported | `-E` / `--extended-regexp` | N/A |
-| Perl regexp | Not supported | `-P` / `--perl-regexp` | N/A |
+| Context lines | `-A` / `-B` / `-C` | `-C` / `-A` / `-B` | N/A |
+| Extended regexp | `-E` / `--extended-regexp` | `-E` / `--extended-regexp` | N/A |
+| Perl regexp | Rejected (exit 129) | `-P` / `--perl-regexp` | N/A |
+| Max count | `-m` / `--max-count` | `-m` / `--max-count` | N/A |
+| Only matching | `-o` / `--only-matching` | `-o` / `--only-matching` | N/A |
 | Show function | Not supported | `-p` / `--show-function` | N/A |
 | Max depth | Not supported | `--max-depth` | N/A |
 | Threads | Not supported | `--threads` | N/A |

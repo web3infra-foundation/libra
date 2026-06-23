@@ -49,6 +49,8 @@ EXAMPLES:
     libra grep -n 'TODO' src/             Show 1-based line numbers, restricted to src/
     libra grep -c 'unsafe' src/           Per-file match counts
     libra grep -l 'unwrap()' src/         Just the filenames that have matches
+    libra grep -m 3 'TODO' src/           Stop after 3 matches per file
+    libra grep -o 'v[0-9]*' CHANGELOG     Print only the matched substrings
     libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
     libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
     libra grep --tree HEAD~5 'TODO'       Search files inside a historical revision
@@ -175,6 +177,15 @@ pub struct GrepArgs {
     /// Output a NUL byte after the file name (and line number) instead of ':', for machine consumption.
     #[clap(short = 'z', long = "null")]
     null: bool,
+
+    /// Stop after NUM matching lines per file.
+    #[clap(short = 'm', long = "max-count", value_name = "NUM")]
+    max_count: Option<usize>,
+
+    /// Print only the matched (non-empty) parts of a matching line, one match
+    /// per output line (context lines are suppressed).
+    #[clap(short = 'o', long = "only-matching")]
+    only_matching: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -378,7 +389,23 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
             continue;
         }
 
-        let file_matches = search_in_content(&content, &matcher, args);
+        let mut file_matches = search_in_content(&content, &matcher, args);
+        // `-m`/`--max-count`: keep only the first NUM real matches per file
+        // (any trailing context up to the next match comes along).
+        if let Some(max) = args.max_count {
+            let mut seen = 0usize;
+            let mut truncated = Vec::with_capacity(file_matches.len());
+            for entry in file_matches {
+                if !entry.3 {
+                    if seen >= max {
+                        break;
+                    }
+                    seen += 1;
+                }
+                truncated.push(entry);
+            }
+            file_matches = truncated;
+        }
         let all_patterns_match = all_matchers.as_ref().is_none_or(|matchers| {
             matchers.iter().all(|pattern_matcher| {
                 content
@@ -408,6 +435,27 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                     path: search_file.path.display().to_string(),
                     count: actual_match_count,
                 });
+            } else if args.only_matching {
+                // `-o`: emit each matched substring on its own line; context
+                // lines are dropped (they have no match to extract).
+                for (line_num, line, _byte_off, is_ctx) in file_matches {
+                    if is_ctx {
+                        continue;
+                    }
+                    for m in matcher.find_iter(&line) {
+                        matches.push(GrepMatch {
+                            path: search_file.path.display().to_string(),
+                            line_number: line_num,
+                            line: m.as_str().to_string(),
+                            // `byte_off` from `search_in_content` is the first
+                            // match's within-line offset; under `-o` each match
+                            // reports its own within-line offset (`m.start()`),
+                            // consistent with Libra's existing within-line `-b`.
+                            byte_offset: args.byte_offset.then_some(m.start()),
+                            is_context: false,
+                        });
+                    }
+                }
             } else {
                 for (line_num, line, byte_off, is_ctx) in file_matches {
                     matches.push(GrepMatch {

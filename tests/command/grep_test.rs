@@ -910,3 +910,65 @@ async fn test_grep_no_match_emits_no_output() {
         "no-match grep should exit non-zero"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_grep_max_count_and_only_matching() {
+    let repo = tempdir().expect("repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("f.txt", "foo foo\nbar foo\nfoo end\nplain line\n").expect("write");
+    add_and_commit("add f", vec!["f.txt".to_string()]).await;
+
+    // -m 2: stop after 2 matching lines in the file.
+    let capped = run_libra_command(&["--json=compact", "grep", "-m", "2", "foo"], repo.path());
+    assert_cli_success(&capped, "grep -m 2");
+    let cj = parse_json_stdout(&capped);
+    let cm = cj["data"]["matches"].as_array().expect("matches array");
+    assert_eq!(cm.len(), 2, "-m 2 caps at 2 matching lines: {cm:?}");
+
+    // -o: emit each matched substring (line 1 has two "foo"s) -> 2+1+1 = 4.
+    let only = run_libra_command(&["--json=compact", "grep", "-o", "foo"], repo.path());
+    assert_cli_success(&only, "grep -o");
+    let oj = parse_json_stdout(&only);
+    let om = oj["data"]["matches"].as_array().expect("matches array");
+    assert_eq!(
+        om.len(),
+        4,
+        "-o emits one entry per match occurrence: {om:?}"
+    );
+    assert!(
+        om.iter().all(|m| m["line"] == "foo"),
+        "-o emits only the matched substring: {om:?}"
+    );
+
+    // -m 1 -o: cap at the first matching line, then expand its matches (2).
+    let both = run_libra_command(
+        &["--json=compact", "grep", "-m", "1", "-o", "foo"],
+        repo.path(),
+    );
+    assert_cli_success(&both, "grep -m 1 -o");
+    let bj = parse_json_stdout(&both);
+    let bm = bj["data"]["matches"].as_array().expect("matches array");
+    assert_eq!(
+        bm.len(),
+        2,
+        "-m 1 keeps line 1 only, -o expands its 2 matches: {bm:?}"
+    );
+
+    // -o -b: each match reports its OWN within-line byte offset.
+    // Matches in order: line1 "foo foo" -> 0, 4; line2 "bar foo" -> 4; line3 "foo end" -> 0.
+    let ob = run_libra_command(&["--json=compact", "grep", "-o", "-b", "foo"], repo.path());
+    assert_cli_success(&ob, "grep -o -b");
+    let obj = parse_json_stdout(&ob);
+    let obm = obj["data"]["matches"].as_array().expect("matches array");
+    assert_eq!(obm[0]["byte_offset"], 0, "line1 match1 offset 0: {obm:?}");
+    assert_eq!(obm[1]["byte_offset"], 4, "line1 match2 offset 4: {obm:?}");
+    // line2 "bar foo": the match's within-line offset is 4. The earlier buggy
+    // `byte_off + m.start()` would have reported 8 here (byte_off=4, m.start()=4).
+    assert_eq!(
+        obm[2]["byte_offset"], 4,
+        "line2 match offset 4 (not 8): {obm:?}"
+    );
+}

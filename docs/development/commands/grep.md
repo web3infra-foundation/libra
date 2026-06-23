@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制已支持；`--untracked`、`--no-index`、`--heading`/`--break`、`-z`/`--null` 仍未公开。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching` 已支持；`--untracked`、`--no-index` 仍未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -51,7 +51,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/grep.md`。
 - Synopsis：`libra grep [<options>] [<pattern>] [<pathspec>...]`。
-- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached`、`--heading`/`--no-heading`、`--break`/`--no-break`、`-z, --null` 等。
+- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached`、`--heading`/`--no-heading`、`--break`/`--no-break`、`-z, --null`、`-m, --max-count <NUM>`、`-o, --only-matching` 等。`-m`/`--max-count` 在 `search_in_content` 之后按文件截断到前 NUM 个真实匹配行（连同其后续上下文）；`-o`/`--only-matching` 用 `matcher.find_iter` 把每个匹配行展开为逐个匹配子串（每个匹配一行，上下文行被丢弃；`-b` 时输出每个匹配的行内字节偏移 `m.start()`，与 Libra 既有的行内 `-b`（首个匹配的行内偏移）一致）。
 
 
 ## 还未实现的功能
