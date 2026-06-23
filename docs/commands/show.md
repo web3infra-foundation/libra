@@ -28,6 +28,9 @@ list their entries and blobs print their text content (or a binary summary).
 | `<OBJECT>` | | Object name (commit, tag, tree, blob) or `<object>:<path>`. Defaults to `HEAD`. |
 | `--no-patch` | `-s` | Skip patch output and only show object metadata. |
 | `--oneline` | | Shorthand for `--pretty=oneline` -- prints hash and subject on one line. |
+| `--pretty <FORMAT>` | | Format the commit header with a preset (`oneline`) or a `%`-placeholder template (`format:`/`tformat:`/bare). |
+| `--format <FORMAT>` | | Alias for `--pretty=<FORMAT>` (Git's `--format`). Mutually exclusive with `--pretty`. |
+| `--abbrev-commit` | | Abbreviate the commit object name in the default header to a 7-character prefix. |
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
@@ -180,14 +183,14 @@ implementations across branches or time, without mutating the working tree.
 Libra preserves this syntax for full Git compatibility and because it maps
 naturally to the internal tree-walk operation that Libra already performs.
 
-### Why no `--format`?
+### `--pretty` / `--format` and structured JSON
 
-Git's `--format` / `--pretty=format:` machinery is powerful but complex, with
-dozens of `%`-placeholders and conditional formatting. Libra instead provides
-structured JSON output (`--json`) which gives programmatic consumers every field
-in a well-typed schema. Human users get a sensible default presentation. This
-avoids the maintenance burden of a format mini-language while giving agents a
-strictly better interface (typed JSON fields vs. string parsing).
+`--pretty=<fmt>` and its alias `--format=<fmt>` render the commit header with the
+`oneline` preset or a `%`-placeholder template (`format:`/`tformat:`/bare), sharing
+`libra log`'s formatter. The named presets `short` / `full` / `fuller` / `raw` are
+not yet rendered distinctly. For programmatic consumers, `--json` remains the
+recommended interface: it gives every field in a well-typed, type-discriminated
+schema (typed fields vs. string parsing), avoiding format-string fragility.
 
 ### Why type-aware JSON schema?
 
@@ -209,7 +212,8 @@ but I expected it" bugs in agent tooling.
 | `--oneline` | Yes | Yes | N/A (use `jj log --template`) |
 | `--name-only` | Yes | Yes | N/A |
 | `--stat` | Yes | Yes | N/A (`jj diff --stat -r REV`) |
-| `--format` / `--pretty=format:` | No (use `--json`) | Yes | No (use templates) |
+| `--pretty` / `--format` | Yes (`oneline` + `%`-templates; presets pending) | Yes | No (use templates) |
+| `--abbrev-commit` | Yes | Yes | N/A |
 | `--quiet` | Yes (validates only) | No | N/A |
 | JSON output | `--json` with typed schema | No | No |
 | Pathspec filter | Yes (trailing `<PATHS>...`) | Yes | No (use `jj diff --from/--to`) |

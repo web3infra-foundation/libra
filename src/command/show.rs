@@ -44,6 +44,8 @@ EXAMPLES:
     libra show HEAD:src/main.rs             Show a file from a specific revision
     libra show --stat HEAD~1                Show only diff statistics
     libra show --name-status HEAD           Show changed files with A/M/D status
+    libra show --format='%h %s' HEAD        Custom header format (alias for --pretty)
+    libra show --abbrev-commit HEAD         Abbreviate the commit hash in the header
     libra --json show HEAD                  Structured JSON output for agents";
 
 /// Shows commits, tags, trees, or blobs.
@@ -66,6 +68,16 @@ pub struct ShowArgs {
     /// (`oneline` / `format:<tmpl>` / `tformat:<tmpl>` / custom template).
     #[clap(long, value_name = "FORMAT")]
     pub pretty: Option<String>,
+
+    /// Alias for `--pretty=<format>` (Git's `--format`). Accepts the same preset
+    /// names and `%`-placeholder templates as `--pretty`.
+    #[clap(long, value_name = "FORMAT", conflicts_with = "pretty")]
+    pub format: Option<String>,
+
+    /// Abbreviate the commit object name in the default header instead of
+    /// printing the full 40-character hash.
+    #[clap(long)]
+    pub abbrev_commit: bool,
 
     /// Show only changed file names.
     #[clap(long)]
@@ -546,7 +558,8 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
 
 /// Renders the commit header using the selected format.
 fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
-    if let Some(pretty) = &args.pretty {
+    // `--format` is Git's alias for `--pretty` (mutually exclusive in clap).
+    if let Some(pretty) = args.pretty.as_ref().or(args.format.as_ref()) {
         // `--pretty=<fmt>` renders the commit header through the shared log
         // formatter (oneline / format:<tmpl> / tformat:<tmpl> / custom template).
         let formatter = CommitFormatter::new(parse_pretty_format(pretty.clone()));
@@ -566,12 +579,15 @@ fn display_commit_info(output: &mut String, commit: &Commit, args: &ShowArgs) {
         let first_line = msg.lines().next().unwrap_or("");
         output.push_str(&format!("{} {}\n", short_hash.yellow(), first_line));
     } else {
-        // Full format matches the default `show` header layout.
-        output.push_str(&format!(
-            "{} {}\n",
-            "commit".yellow(),
-            commit.id.to_string().yellow()
-        ));
+        // Full format matches the default `show` header layout. `--abbrev-commit`
+        // shortens the object name to a 7-character prefix.
+        let full = commit.id.to_string();
+        let hash = if args.abbrev_commit {
+            &full[..7.min(full.len())]
+        } else {
+            full.as_str()
+        };
+        output.push_str(&format!("{} {}\n", "commit".yellow(), hash.yellow()));
         output.push_str(&format!(
             "Author: {} <{}>\n",
             commit.author.name.trim(),

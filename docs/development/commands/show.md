@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。object/commit display、`--name-only`、`--name-status`、`--stat`、`--oneline`、`--pretty=<fmt>` 和 path filters 已支持；`--pretty` 复用 log 的 `CommitFormatter`（`oneline`/`format:<tmpl>`/`tformat:<tmpl>`/自定义模板），命名预设 short/full/fuller/raw 尚未单独渲染。
+- 兼容级别：`partial`。object/commit display、`--name-only`、`--name-status`、`--stat`、`--oneline`、`--pretty=<fmt>`、`--format=<fmt>`（`--pretty` 的别名）、`--abbrev-commit` 和 path filters 已支持；`--pretty` 复用 log 的 `CommitFormatter`（`oneline`/`format:<tmpl>`/`tformat:<tmpl>`/自定义模板），命名预设 short/full/fuller/raw 尚未单独渲染。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,14 +46,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show.md`。
 - Synopsis：`libra show [OPTIONS] [OBJECT] [PATHS]...`。
-- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--name-only`、`--name-status`、`--stat`、`[PATHS]...`。`--pretty=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）。
+- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--format <FORMAT>`、`--abbrev-commit`、`--name-only`、`--name-status`、`--stat`、`[PATHS]...`。`--pretty=<fmt>`/`--format=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）；`--abbrev-commit` 把默认 header 的 `commit <hash>` 缩写为 7 位。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git 参数缺口 | `--pretty`/`--format`、`--raw`、`--summary`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| ✅ 已实现 | `--pretty`/`--format`（别名）、`--abbrev-commit` 已公开（复用 log 的 `CommitFormatter`/`parse_pretty_format`；`--abbrev-commit` 缩写默认 header 的 commit 哈希）。带集成测试（`show_format_aliases_pretty_and_abbrev_commit_shortens_hash`）。 |
+| Git 参数缺口 | 命名 pretty 预设（short/full/fuller/raw）、`--raw`、`--summary`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

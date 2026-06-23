@@ -75,7 +75,7 @@
 | [`rm`](rm.md) | `partial` | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file... |
 | [`sandbox`](sandbox.md) | `intentionally-different` | Libra AI sandbox diagnostics extension, not a Git command |
 | [`shortlog`](shortlog.md) | `partial` | author summary, email, count sorting, time filters, single revision, committer grouping, `--group=author\|committer\|trailer:<key>`, no-merges, top/min-count/reverse, and author filter supported; format/stdin/wrap width not exposed |
-| [`show`](show.md) | `partial` | object/commit display and common name/stat flags supported; extended pretty/raw/name-status formats not exposed |
+| [`show`](show.md) | `partial` | object/commit display, common name/stat flags, `--pretty` / `--format`, and `--abbrev-commit` supported; named pretty presets (short/full/fuller/raw) and raw/summary formats not separately rendered |
 | [`show-ref`](show-ref.md) | `supported` | branch/tag/HEAD listing, scope filters, hash/abbrev/dereference/verify/exists/head reset aliases, and `--exclude-existing[=<pattern>]` stdin filter supported |
 | [`stash`](stash.md) | `partial` | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see ... |
 | [`status`](status.md) | `supported` | 见命令文档。 |

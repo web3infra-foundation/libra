@@ -249,6 +249,8 @@ async fn test_show_non_quiet_uses_forced_pager() {
         no_patch: true,
         oneline: false,
         pretty: None,
+        format: None,
+        abbrev_commit: false,
         name_only: false,
         name_status: false,
         stat: false,
@@ -298,6 +300,8 @@ async fn test_show_quiet_still_validates_patch_generation() {
         no_patch: false,
         oneline: false,
         pretty: None,
+        format: None,
+        abbrev_commit: false,
         name_only: false,
         name_status: false,
         stat: false,
@@ -348,6 +352,8 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         no_patch: false,
         oneline: false,
         pretty: None,
+        format: None,
+        abbrev_commit: false,
         name_only: false,
         name_status: false,
         stat: true,
@@ -807,6 +813,8 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         no_patch: false,
         oneline: false,
         pretty: None,
+        format: None,
+        abbrev_commit: false,
         name_only: false,
         name_status: false,
         stat: false,
@@ -848,6 +856,8 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         no_patch: false,
         oneline: false,
         pretty: None,
+        format: None,
+        abbrev_commit: false,
         name_only: false,
         name_status: false,
         stat: false,
@@ -990,5 +1000,48 @@ fn test_show_name_status_reports_added() {
     assert!(
         stdout.contains("A\ttracked.txt"),
         "base commit adds tracked.txt with status A, got: {stdout}"
+    );
+}
+
+#[test]
+fn show_format_aliases_pretty_and_abbrev_commit_shortens_hash() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let full_hash = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // --format aliases --pretty.
+    let fmt = run_libra_command(&["show", "--no-patch", "--format=%s", "HEAD"], p);
+    assert_cli_success(&fmt, "show --format=%s");
+    let pretty = run_libra_command(&["show", "--no-patch", "--pretty=%s", "HEAD"], p);
+    assert_cli_success(&pretty, "show --pretty=%s");
+    assert_eq!(
+        String::from_utf8_lossy(&fmt.stdout),
+        String::from_utf8_lossy(&pretty.stdout),
+        "--format must alias --pretty"
+    );
+    assert!(
+        String::from_utf8_lossy(&fmt.stdout).contains("base"),
+        "subject rendered: {}",
+        String::from_utf8_lossy(&fmt.stdout)
+    );
+    // --format conflicts with --pretty.
+    let both = run_libra_command(&["show", "--format=%s", "--pretty=%s", "HEAD"], p);
+    assert!(!both.status.success(), "--format conflicts with --pretty");
+
+    // --abbrev-commit shortens the default header's commit hash.
+    let abbrev = run_libra_command(&["show", "--no-patch", "--abbrev-commit", "HEAD"], p);
+    assert_cli_success(&abbrev, "show --abbrev-commit");
+    let abbrev_s = String::from_utf8_lossy(&abbrev.stdout).into_owned();
+    assert!(
+        abbrev_s.contains(&format!("commit {}", &full_hash[..7])),
+        "abbreviated header present: {abbrev_s:?}"
+    );
+    assert!(
+        !abbrev_s.contains(&full_hash),
+        "full 40-char hash must not appear: {abbrev_s:?}"
     );
 }
