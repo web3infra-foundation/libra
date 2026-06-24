@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra tag` 的目标是创建、列出、过滤和删除标签。实现需要支持 force、`-n` 展示、annotated tag message、`-a`/`--annotate`、`--points-at` 过滤和轻量标签路径，同时把签名与验证等后续能力列为缺口。
+`libra tag` 的目标是创建、列出、过滤、删除、签名和验证标签。实现需要支持 force、`-n` 展示、annotated tag message（经 `-m`/`-F`）、`--points-at` 过滤、轻量标签路径，以及 vault-PGP 的 `-s`/`--sign`（`--no-sign` 撤销）与 `-v`/`--verify`；尚未公开的是 `-e` 编辑器消息录入与 Git GPG 互操作。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。轻量标签、message-based annotated tags、`-a`/`--annotate`、`-F`/`--file`（从文件或 stdin 读取 annotated 消息）、force/delete/list/`-n`、`--points-at <object>`、`--contains <commit>`/`--no-contains <commit>`、列表模式下的 `<pattern>` glob 过滤（`tag -l 'v1.*'`）、`-s`/`--sign`（vault-PGP 签名）、`-v`/`--verify`（vault-PGP 验签）、`--merged <commit>`/`--no-merged <commit>`、`--sort=<key>`、`--column[=always|auto|never]`（dense column-major 布局，宽度取 `COLUMNS` 或 80，与 `-n` 互斥）已支持；`-e` 编辑器消息录入尚未公开。
+- 兼容级别：`partial`。轻量标签、message-based annotated tags（经 `-m`/`-F`）、`-F`/`--file`（从文件或 stdin 读取 annotated 消息）、force/delete/list/`-n`、`--points-at <object>`、`--contains <commit>`/`--no-contains <commit>`、列表模式下的 `<pattern>` glob 过滤（`tag -l 'v1.*'`）、`-s`/`--sign`（vault-PGP 签名）、`--no-sign`（撤销先前的 `-s`/`--sign`，命令行最后出现者生效；标签默认不签名，故单独使用时为 no-op）、`-v`/`--verify`（vault-PGP 验签）、`--merged <commit>`/`--no-merged <commit>`、`--sort=<key>`、`--column[=always|auto|never]`（dense column-major 布局，宽度取 `COLUMNS` 或 80，与 `-n` 互斥）已支持；`-e` 编辑器消息录入尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/tag.md`。
 - Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE> | -F <FILE>] [-n <N_LINES>] [--points-at <object>] [--contains <commit>] [--no-contains <commit>] [--merged <commit>] [--no-merged <commit>] [--sort <key>] [--column[=<mode>]] [NAME]`。
-- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`-a, --annotate`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`--merged <commit>`、`--no-merged <commit>`、`--sort <key>`、`--column[=<mode>]`（`always`/`auto`/`never`，缺省 `always`，dense column-major，与 `-n` 互斥，未知 mode 报 `LBR-CLI-002`）、`-s, --sign`、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
+- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`--merged <commit>`、`--no-merged <commit>`、`--sort <key>`、`--column[=<mode>]`（`always`/`auto`/`never`，缺省 `always`，dense column-major，与 `-n` 互斥，未知 mode 报 `LBR-CLI-002`）、`-s, --sign`、`--no-sign`（经 clap `overrides_with` 与 `--sign` 互为最后一个生效；`sign` 字段读出 last-wins 结果，`no_sign` 不直接读取）、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
 - `-F, --file <FILE>`（与 `-m` 互斥）：从文件读取 annotated 标签消息（`-` 表示从 stdin 读取），由 `resolve_tag_message` 解析，提供后即创建 annotated 标签。读文件失败报 `TagError::MessageFileRead`→`LBR-IO-001`（`IoReadFailed`）。签名（`-s`）当前仍要求 `-m`（因此与 `-F` 不组合）。
 - `-s, --sign`（要求 `-m`，因 Libra 不为标签正文打开编辑器）：用 vault PGP 密钥对规范化的未签名标签内容（`object/type/tag/tagger/\n\n/message`）签名，并把 armored 签名块（`vault::signature_to_armored`）追加到标签消息后，对齐 Git 的 signed-tag 布局；tagger 仅构建一次以保证被签名字节与落库对象一致。无 unseal key 时报 `CreateTagError::VaultSign`→`TagError::VaultSign`。
 - `-v, --verify <name>`：`internal::tag::verify` 在签名标记处切分标签消息、重建未签名内容、`vault::armored_to_signature_hex` 还原签名后调用 `vault::pgp_verify`（libvault `pki/keys/verify`）。好签名打印 `Good signature for tag '<name>'`（exit 0）；坏签名 `TagError::BadSignature`（exit 1）；未签名/非 annotated/未找到/无密钥经 `map_verify_tag_error` 报错。

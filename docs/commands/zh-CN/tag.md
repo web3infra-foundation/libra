@@ -30,6 +30,9 @@ libra tag -d <name>
 | `-f` | `--force` | | 覆盖已有标签 |
 | `-n` | `--n-lines` | `<lines>` | 列出时显示的附注行数（0 = 只显示名称） |
 | | `--column` | `[mode]` | 以多列布局列出标签。模式 `always`/`auto`/`never`（缺省 = `always`）。不能与 `-n` 同用。 |
+| `-s` | `--sign` | | 用 vault PGP 密钥为附注标签签名（需要 `-m`；不与 Git GPG 互操作）。 |
+| | `--no-sign` | | 不签名标签，撤销先前的 `-s`/`--sign`（命令行最后出现者生效）。标签默认不签名，故单独使用时为 no-op。 |
+| `-v` | `--verify` | | 验证具名附注标签的 vault PGP 签名。 |
 
 ### 标志示例
 
@@ -148,17 +151,19 @@ libra tag --json v1.0                 # 面向代理的结构化 JSON 输出
 
 ## 设计理由
 
-### 为什么没有 --sign/-s？
+### 为什么用 vault PGP 而不是 Git GPG 签名？
 
-Git 的 `--sign` 标志使用 GPG 生成嵌入在标签对象中的内联 PGP 签名。Libra 省略此功能有几个原因：
+Git 的 `--sign` 用 GPG 生成嵌入标签对象的内联 PGP 签名。Libra **支持** `-s`/`--sign`，但通过 **vault PGP 密钥**而非每个开发者本地的 GPG keyring：
 
 - **GPG 密钥管理脆弱**：开发者经常丢失密钥、让密钥过期，或误配置 gpg-agent，导致签名工作流损坏。在 CI/CD 环境中，安全管理 GPG keyring 是运维负担。
 - **基于 Vault 的签名是预期路径**：Libra 架构围绕基于 vault 的签名模型设计（见 `libra init` 上的 `--vault`），加密操作委托给安全密钥存储，而不是要求每个开发者维护本地 GPG 密钥。这种方式集中信任并简化密钥轮换。
 - **通过 SQLite 保证标签完整性**：因为标签引用位于事务数据库而不是 loose 文件中，GPG 签名原本要缓解的篡改表面已经降低。未经授权的引用修改需要数据库访问，而不只是文件系统写入。
 
-### 为什么没有 --verify？
+`--no-sign` 撤销先前的 `-s`/`--sign`（最后出现者生效）；标签默认不签名，故单独使用时为 no-op。由于 Libra 的签名是 vault PGP 而非 Git GPG，签名不与 `git tag -v` 互操作。
 
-没有 `--sign` 时，就没有可验证的内联签名。未来验证将在 vault/trust 层处理，而不是通过逐标签 GPG 检查。这避免了 Git 中 `git tag -v` 因签名者公钥不在本地 keyring 而令人困惑地失败的情况。
+### --verify
+
+`-v`/`--verify` 验证具名附注标签的 vault PGP 签名。验证走 vault/trust 层，而不是逐标签 GPG 检查，避免了 Git 中 `git tag -v` 因签名者公钥不在本地 keyring 而令人困惑地失败的情况。
 
 ### 为什么区分轻量标签和附注标签？
 
@@ -176,8 +181,8 @@ Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标
 | 多列布局 | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]`（always/auto/never） | N/A |
 | 删除 | `git tag -d <name>` | `libra tag -d <name>` | `jj tag delete <name>` |
 | 强制覆盖 | `git tag -f <name>` | `libra tag -f <name>` | `jj tag create <name>`（总是覆盖） |
-| 签名标签 | `git tag -s <name>` | 不支持（计划基于 vault） | N/A |
-| 验证标签 | `git tag -v <name>` | 不支持（计划基于 vault） | N/A |
+| 签名标签 | `git tag -s <name>` | `libra tag -s -m "msg" <name>`（vault PGP；`--no-sign` 撤销） | N/A |
+| 验证标签 | `git tag -v <name>` | `libra tag -v <name>`（vault PGP） | N/A |
 | 结构化输出 | 无 | `--json` / `--machine` | `--template` |
 
 ## 错误处理

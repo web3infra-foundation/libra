@@ -847,6 +847,7 @@ async fn test_force_tag() {
         sort: None,
         column: None,
         sign: false,
+        no_sign: false,
         verify: false,
     })
     .await;
@@ -975,6 +976,7 @@ async fn test_delete_tag() {
         sort: None,
         column: None,
         sign: false,
+        no_sign: false,
         verify: false,
     })
     .await;
@@ -1040,6 +1042,7 @@ async fn test_annotation_lines_tag() {
         sort: None,
         column: None,
         sign: false,
+        no_sign: false,
         verify: false,
     })
     .await;
@@ -1092,6 +1095,7 @@ async fn test_annotation_lines_tag() {
         sort: None,
         column: None,
         sign: false,
+        no_sign: false,
         verify: false,
     })
     .await;
@@ -1502,4 +1506,25 @@ fn tag_column_lays_out_in_column_major_order() {
     // --column cannot be combined with -n.
     let conflict = run_libra_command(&["tag", "--column", "-n", "1"], p);
     assert!(!conflict.status.success(), "--column conflicts with -n");
+}
+
+#[test]
+fn tag_no_sign_countermands_sign() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `--no-sign` alone creates an unsigned tag (the default).
+    let out = run_libra_command(&["tag", "--no-sign", "v-nosign"], p);
+    assert_cli_success(&out, "tag --no-sign v-nosign");
+
+    // `-s --no-sign` (last wins) countermands `-s`: an UNSIGNED annotated tag is
+    // created, so there is no vault-signing attempt/error.
+    let out2 = run_libra_command(&["tag", "-s", "--no-sign", "-m", "msg", "v-override"], p);
+    assert_cli_success(&out2, "tag -s --no-sign -m msg v-override");
+
+    let tags = run_libra_command(&["tag"], p);
+    let listed = String::from_utf8_lossy(&tags.stdout);
+    assert!(
+        listed.contains("v-nosign") && listed.contains("v-override"),
+        "both tags created: {listed}"
+    );
 }

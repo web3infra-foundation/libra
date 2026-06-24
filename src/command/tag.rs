@@ -98,8 +98,19 @@ pub struct TagArgs {
 
     /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
     /// since Libra does not open an editor for the tag body).
-    #[clap(short = 's', long = "sign", requires = "message")]
+    #[clap(
+        short = 's',
+        long = "sign",
+        requires = "message",
+        overrides_with = "no_sign"
+    )]
     pub sign: bool,
+
+    /// Do not sign the tag, countermanding an earlier `-s`/`--sign` (last one on
+    /// the command line wins), matching `git tag --no-sign`. Tags are unsigned
+    /// by default, so on its own this is a no-op.
+    #[clap(long = "no-sign", overrides_with = "sign")]
+    pub no_sign: bool,
 
     /// Verify the PGP signature of the named annotated tag.
     #[clap(short = 'v', long = "verify", group = "action")]

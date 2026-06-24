@@ -32,6 +32,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | `-n` | `--n-lines` | `<lines>` | Number of annotation lines to display when listing (0 = names only) |
 | | `--points-at` | `<object>` | List only tags pointing at the given object (peeled to its commit); implies list mode |
 | `-s` | `--sign` | | Sign the annotated tag with a vault PGP key (requires `-m`; not Git GPG-interoperable) |
+| | `--no-sign` | | Do not sign the tag, countermanding an earlier `-s`/`--sign` (last one on the command line wins). Tags are unsigned by default, so on its own this is a no-op. |
 | `-v` | `--verify` | `<name>` | Verify a tag's vault PGP signature (exit 0 good, exit 1 bad) |
 | | `--contains` | `<commit>` | List only tags whose tip has `<commit>` as an ancestor |
 | | `--no-contains` | `<commit>` | List only tags whose tip does not have `<commit>` as an ancestor |
