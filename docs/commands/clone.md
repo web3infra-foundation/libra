@@ -135,6 +135,15 @@ override an earlier `--no-tags` (last flag wins).
 libra clone --no-tags git@github.com:user/repo.git
 ```
 
+### `--no-progress`
+
+Suppress the fetch progress meter (the "Receiving objects" spinner) during the
+clone, matching `git clone --no-progress`. Other output is unaffected.
+
+```bash
+libra clone --no-progress git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash

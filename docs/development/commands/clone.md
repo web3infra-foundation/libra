@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/clone.md`。
 - Synopsis：`libra clone [OPTIONS] <REMOTE_REPO> [LOCAL_PATH]`。
-- 公开参数/子命令包括：`<REMOTE_REPO>` (required)、`[LOCAL_PATH]`、`-b, --branch <BRANCH>`、`--single-branch`、`--bare`、`--depth <N>`。
+- 公开参数/子命令包括：`<REMOTE_REPO>` (required)、`[LOCAL_PATH]`、`-b, --branch <BRANCH>`、`--single-branch`、`--bare`、`--depth <N>`、`--tags`/`--no-tags`、`--no-progress`。`--no-progress` 经 `fetch::apply_no_progress` 把传给 clone fetch（`fetch::fetch_repository_safe`）的 child output 的 `progress` 强制为 `ProgressMode::None`，抑制 “Receiving objects” 进度条，对齐 `git clone --no-progress`。CloneArgs 无 `Default` 派生，故 `no_progress: false` 被加入全部 full-literal 构造点（src + test）。
 
 
 ## 还未实现的功能

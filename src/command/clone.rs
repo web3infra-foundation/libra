@@ -121,6 +121,11 @@ pub struct CloneArgs {
     /// fetches also skip tags (matches `git clone --no-tags`).
     #[clap(long = "no-tags", overrides_with = "tags")]
     pub no_tags: bool,
+
+    /// Do not show the fetch progress meter (the "Receiving objects" spinner)
+    /// during the clone, matching `git clone --no-progress`.
+    #[clap(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -2816,7 +2821,11 @@ async fn clone_into_destination(
         eprintln!("Fetching objects ...");
     }
 
+    // `--no-progress` suppresses the fetch's "Receiving objects" meter during
+    // the clone, matching `git clone --no-progress`.
     let child_output = output.child_output_config();
+    let child_output =
+        fetch::apply_no_progress(&child_output, args.no_progress).unwrap_or(child_output);
     let remote_config = RemoteConfig {
         name: "origin".to_string(),
         url: remote_url.to_string(),
@@ -3370,6 +3379,7 @@ mod tests {
     /// single unsupported flag it cares about.
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
+            no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
             branch: None,
@@ -3579,6 +3589,7 @@ mod tests {
         let source = cloud_source();
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
+            no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
             branch: None,
@@ -3675,6 +3686,7 @@ mod tests {
             selector_kind: CloudPublishCheckoutSelectorKind::Ref,
         };
         let args = CloneArgs {
+            no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
                 .to_string(),
             local_path: None,
@@ -3740,6 +3752,7 @@ mod tests {
         let source = cloud_source();
         let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
         let args = CloneArgs {
+            no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
             branch: None,
@@ -3802,6 +3815,7 @@ mod tests {
             .await
             .expect("metadata should overwrite in-memory remote");
         let args = CloneArgs {
+            no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
             branch: None,

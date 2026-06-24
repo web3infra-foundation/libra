@@ -89,6 +89,14 @@ libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
 ```
 
+### `--no-progress`
+
+在克隆期间抑制 fetch 进度条（“Receiving objects” spinner），对齐 `git clone --no-progress`。其它输出不受影响。
+
+```bash
+libra clone --no-progress git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash

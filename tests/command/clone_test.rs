@@ -181,6 +181,7 @@ async fn test_clone_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -214,6 +215,7 @@ async fn test_clone_bare_repository() {
     let repo_dir = temp_path.path().join("bare-clone.git");
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_dir.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -262,6 +264,7 @@ async fn test_clone_branch_single_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -294,6 +297,7 @@ async fn test_clone_default_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
@@ -326,6 +330,7 @@ async fn test_clone_default_branch_single_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
@@ -360,6 +365,7 @@ async fn test_clone_to_existing_empty_dir() {
     fs::create_dir(&repo_path).unwrap();
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -397,6 +403,7 @@ async fn test_clone_to_existing_dir() {
     fs::write(&dummy_file, "test").unwrap();
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -430,6 +437,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
     fs::write(&conflict_path, "test").unwrap();
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -462,6 +470,7 @@ async fn test_clone_with_depth() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
@@ -494,6 +503,7 @@ async fn test_clone_with_depth_and_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
@@ -510,4 +520,22 @@ async fn test_clone_with_depth_and_branch() {
         Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("should be branch"),
     };
+}
+
+#[test]
+fn clone_no_progress_flag_is_accepted() {
+    let temp = tempdir().unwrap();
+    // `--no-progress` parses and reaches the runtime (the fetch progress
+    // suppression is covered by fetch's `apply_no_progress` unit test, which
+    // clone reuses). With a bogus source it fails connecting, NOT at clap.
+    let output = crate::command::run_libra_command(
+        &["clone", "--no-progress", "/nonexistent/libra/repo", "dest"],
+        temp.path(),
+    );
+    assert!(!output.status.success(), "clone of a bogus source fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-progress is accepted by the parser: {stderr}"
+    );
 }
