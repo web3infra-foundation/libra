@@ -49,6 +49,7 @@ separate `lfs push` step.
 | `--force-if-includes` | Accepted for `git push` compatibility; **no-op** (the lease check uses the tracking-ref OID only). | `libra push --force-with-lease --force-if-includes origin main` |
 | `--thin` / `--no-thin` | Accepted for compatibility; **no-op** (the pack encoder always produces a self-contained pack). | `libra push --thin origin main` |
 | `--no-verify` | Bypass the `pre-push` hook. Accepted for compatibility; **no-op** (Libra's push runs no client-side `pre-push` hook, so there is nothing to bypass). | `libra push --no-verify origin main` |
+| `--no-progress` | Suppress the progress meter (the "Compressing objects" / "Writing objects" reporters) on stderr, matching `git push --no-progress`. | `libra push --no-progress origin main` |
 | `--porcelain` | Machine-readable output: a `To <url>` header then `<flag>\t<from>:<to>\t<summary>` per ref. Conflicts with `--json`/`--machine`. | `libra push --porcelain origin main` |
 | `-n`, `--dry-run` | Perform negotiation and object collection but skip the actual upload. Reports what would be pushed. | `libra push --dry-run` |
 | `--tags` | Push all local `refs/tags/*` refs. Existing identical remote tags are skipped. | `libra push --tags origin` |
@@ -405,6 +406,7 @@ or configure a separate LFS tool.
 | Porcelain output | `libra push --porcelain` | `git push --porcelain` | N/A |
 | Thin pack | Accepted, no-op | `git push --thin` | N/A |
 | Skip pre-push hook | Accepted, no-op | `git push --no-verify` | N/A |
+| Suppress progress | `libra push --no-progress` | `git push --no-progress` | N/A |
 | Atomic / signed / push-option / follow-tags | Not yet supported | `git push --atomic` / `--signed` / `-o` / `--follow-tags` | N/A |
 | Dry-run | `libra push --dry-run` | `git push --dry-run` | `jj git push --dry-run` |
 | Refspec mapping | `libra push origin src:dst` | `git push origin src:dst` | N/A |

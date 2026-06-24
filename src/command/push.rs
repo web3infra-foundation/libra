@@ -172,6 +172,11 @@ pub struct PushArgs {
     /// nothing to bypass.
     #[clap(long = "no-verify")]
     pub no_verify: bool,
+
+    /// Do not show the progress meter (the "Compressing objects" / "Writing
+    /// objects" reporters) on stderr, matching `git push --no-progress`.
+    #[clap(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 impl PushArgs {
@@ -197,6 +202,7 @@ impl PushArgs {
             tags: false,
             mirror: false,
             no_verify: false,
+            no_progress: false,
         }
     }
 }
@@ -1138,7 +1144,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             .await
             .map_err(|e| PushError::PackEncoding(e.to_string()))?;
 
-        let progress_output = progress_output_config(output);
+        let progress_output = progress_output_config(output, args.no_progress);
         let progress = ProgressReporter::new(
             "Compressing objects",
             Some(objs.len() as u64),
@@ -2206,9 +2212,11 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn progress_output_config(output: &OutputConfig) -> OutputConfig {
+fn progress_output_config(output: &OutputConfig, no_progress: bool) -> OutputConfig {
     let mut config = output.clone();
-    if config.is_json() {
+    // `--no-progress` (or JSON mode) forces the "Compressing/Writing objects"
+    // reporters off, matching `git push --no-progress`.
+    if config.is_json() || no_progress {
         config.progress = ProgressMode::None;
         config.progress_preference = crate::utils::output::ProgressPreference::None;
     }
@@ -3287,6 +3295,7 @@ mod test {
             tags: false,
             mirror: false,
             no_verify: false,
+            no_progress: false,
         };
         assert!(matches!(
             validate_push_args(&args),

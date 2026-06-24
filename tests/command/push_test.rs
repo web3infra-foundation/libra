@@ -1942,3 +1942,22 @@ fn push_no_verify_flag_is_accepted() {
         "--no-verify is accepted by the parser: {stderr}"
     );
 }
+
+#[test]
+fn push_no_progress_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-progress` parses and reaches the runtime (the "Compressing/Writing
+    // objects" suppression is wired through `progress_output_config`). With no
+    // configured remote it fails at the push-destination check, NOT at clap.
+    let output = run_libra_command(&["push", "--no-progress"], repo.path());
+    assert!(!output.status.success(), "push without a remote fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-progress is accepted by the parser: {stderr}"
+    );
+    assert!(
+        stderr.contains("no configured push destination"),
+        "--no-progress reaches the push-destination runtime check: {stderr}"
+    );
+}
