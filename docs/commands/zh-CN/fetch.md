@@ -29,6 +29,7 @@ Fetch 支持 SSH、HTTPS、本地文件和 `git://` 传输。配置了 `vault.ss
 | `--progress none` | 在 JSON 模式下抑制 stderr 上的 NDJSON 进度事件。 | `libra --json fetch origin --progress none` |
 | `--quiet` | 抑制人类可读输出。 | `libra fetch --quiet` |
 | `--no-auto-gc` | fetch 后不运行 repack/gc。为对齐 Git 而接受的 no-op：Libra 的 fetch 从不触发自动 gc，故无可禁用。 | `libra fetch origin --no-auto-gc` |
+| `--no-progress` | 不在 stderr 显示进度条（“Receiving objects” spinner / 远端进度），对齐 `git fetch --no-progress`。 | `libra fetch origin --no-progress` |
 
 ## 常用命令
 

@@ -1672,3 +1672,18 @@ fn fetch_no_auto_gc_flag_is_accepted() {
         "--no-auto-gc is accepted by the parser: {stderr}"
     );
 }
+
+#[test]
+fn fetch_no_progress_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-progress` parses and reaches the runtime (suppressing the progress
+    // meter is exercised by the unit test `apply_no_progress_*`); with no remote
+    // it fails at remote resolution, NOT at clap.
+    let output = run_libra_command(&["fetch", "--no-progress"], repo.path());
+    assert!(!output.status.success(), "fetch without a remote fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-progress is accepted by the parser: {stderr}"
+    );
+}

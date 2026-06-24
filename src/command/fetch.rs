@@ -51,7 +51,9 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, ProgressMode, ProgressReporter, emit_json_data},
+        output::{
+            OutputConfig, ProgressMode, ProgressPreference, ProgressReporter, emit_json_data,
+        },
         path, util,
         util::try_get_storage_path,
     },
@@ -560,6 +562,11 @@ pub struct FetchArgs {
     /// is nothing to disable.
     #[clap(long = "no-auto-gc")]
     pub no_auto_gc: bool,
+
+    /// Do not show the progress meter (the "Receiving objects" spinner /
+    /// remote progress) on stderr, matching `git fetch --no-progress`.
+    #[clap(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 /// How tags are handled for a fetch, resolved per-remote from CLI flags then
@@ -904,6 +911,21 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
     lines.join("\n")
 }
 
+/// Force progress reporting off when `--no-progress` is set (mirroring
+/// `git fetch --no-progress`), preserving every other output setting. Returns
+/// `Some(modified)` when something changed, or `None` when progress was already
+/// off — letting the caller keep borrowing the original `OutputConfig`.
+fn apply_no_progress(output: &OutputConfig, no_progress: bool) -> Option<OutputConfig> {
+    if no_progress && !matches!(output.progress, ProgressMode::None) {
+        let mut suppressed = output.clone();
+        suppressed.progress = ProgressMode::None;
+        suppressed.progress_preference = ProgressPreference::None;
+        Some(suppressed)
+    } else {
+        None
+    }
+}
+
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
     tracing::debug!("`fetch` args: {:?}", args);
 
@@ -920,7 +942,14 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         tags,
         no_tags,
         no_auto_gc: _,
+        no_progress,
     } = args;
+
+    // `--no-progress` forces progress reporting off (the "Receiving objects"
+    // spinner and any NDJSON progress events), mirroring `git fetch
+    // --no-progress`. All other output settings are preserved.
+    let suppressed_output = apply_no_progress(output, no_progress);
+    let output = suppressed_output.as_ref().unwrap_or(output);
 
     // Resolve the CLI tag intent: `--tags` -> All, `--no-tags` -> NoTags, neither
     // -> None (let each remote fall back to `remote.<name>.tagOpt` then the Git
@@ -2653,14 +2682,39 @@ mod tests {
 
     use super::{
         FetchError, PackCompletionTracker, RemoteProgressBuffer, RemoteSpecErrorKind,
-        SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
+        SSH_KEY_TEMP_FILE_MAX_AGE, apply_no_progress, cleanup_expired_vault_ssh_temp_files_in,
         ensure_vault_ssh_tmp_dir, parse_pack_entry_data_offset, read_be_u32, read_fetch_stream,
         redact_url_credentials,
     };
     use crate::{
         internal::protocol::FetchStream,
-        utils::{output::OutputConfig, test::ScopedEnvVar},
+        utils::{
+            output::{OutputConfig, ProgressMode, ProgressPreference},
+            test::ScopedEnvVar,
+        },
     };
+
+    /// `--no-progress` forces progress reporting off while leaving progress on
+    /// when the flag is absent (and short-circuits when it is already off).
+    #[test]
+    fn apply_no_progress_forces_progress_mode_off() {
+        let mut text = OutputConfig::default();
+        text.progress = ProgressMode::Text;
+        let suppressed = apply_no_progress(&text, true).expect("Text + no_progress changes output");
+        assert!(matches!(suppressed.progress, ProgressMode::None));
+        assert!(matches!(
+            suppressed.progress_preference,
+            ProgressPreference::None
+        ));
+
+        // Without --no-progress the original config is kept (None returned).
+        assert!(apply_no_progress(&text, false).is_none());
+
+        // Already-off progress needs no change.
+        let mut off = OutputConfig::default();
+        off.progress = ProgressMode::None;
+        assert!(apply_no_progress(&off, true).is_none());
+    }
 
     #[test]
     fn resolve_remote_default_branch_prefers_symref_then_oid_then_heuristic() {
