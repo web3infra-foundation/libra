@@ -478,9 +478,16 @@ pub enum Stash {
         #[arg(
             short = 'u',
             long = "include-untracked",
-            help = "Include untracked files in the stash"
+            help = "Include untracked files in the stash",
+            overrides_with = "no_include_untracked"
         )]
         include_untracked: bool,
+        #[arg(
+            long = "no-include-untracked",
+            help = "Do not include untracked files (the default); countermands an earlier -u/--include-untracked (last one wins)",
+            overrides_with = "include_untracked"
+        )]
+        no_include_untracked: bool,
         #[arg(
             short = 'a',
             long = "all",

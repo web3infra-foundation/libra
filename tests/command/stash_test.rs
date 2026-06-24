@@ -1155,3 +1155,20 @@ fn stash_push_dash_k_is_keep_index_alias() {
         "the staged file remains tracked after stash push -k"
     );
 }
+
+#[test]
+fn stash_no_include_untracked_countermands_u() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("tracked.txt"), "modified\n").unwrap();
+    std::fs::write(p.join("untracked.txt"), "new\n").unwrap();
+
+    // `-u --no-include-untracked` (last wins) countermands `-u`, so the untracked
+    // file is NOT stashed and remains in the working tree.
+    let out = run_libra_command(&["stash", "push", "-u", "--no-include-untracked"], p);
+    assert_cli_success(&out, "stash push -u --no-include-untracked");
+    assert!(
+        p.join("untracked.txt").exists(),
+        "untracked.txt not stashed (--no-include-untracked countermands -u)"
+    );
+}

@@ -33,6 +33,7 @@ Save your local modifications to a new stash and clean the working directory.
 |--------|-------|------|-------------|
 | Message | `-m` | `--message` | Optional descriptive message for the stash entry. If omitted, a default "WIP on `<branch>`: `<short-hash>` ..." message is generated. |
 | Include untracked | `-u` | `--include-untracked` | Include visible untracked files in the stash and remove them from the worktree. Ignored files remain in place. |
+| No include untracked | | `--no-include-untracked` | Do not include untracked files (the default), countermanding an earlier `-u`/`--include-untracked` (last one wins). Untracked files are excluded by default, so on its own this is a no-op. |
 | Include all | `-a` | `--all` | Include visible untracked and ignored files in the stash, then remove them from the worktree. |
 | Keep index | `-k` | `--keep-index` | Keep staged changes in the index and restore the worktree to the staged content, removing only unstaged deltas. |
 
@@ -391,6 +392,7 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 | Message | `-m <message>` | `-m <message>` | N/A |
 | Keep index | `--keep-index` | `--keep-index` / `--no-keep-index` | N/A |
 | Include untracked | `-u` / `--include-untracked` | `-u` / `--include-untracked` | N/A |
+| No include untracked | `--no-include-untracked` (countermands `-u`) | `--no-include-untracked` | N/A |
 | Include all (ignored too) | `-a` / `--all` | `-a` / `--all` | N/A |
 | Pathspec (partial stash) | Not supported | `-- <pathspec>...` | N/A |
 | Pop | `stash pop [ref]` | `stash pop [--index] [<stash>]` | N/A |

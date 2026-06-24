@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`），`push` 支持 `-u` / `--include-untracked`、`-a` / `--all` 与 `-k` / `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），同时把 patch 级差异（`-p` / `--patch`）以及 create/store 等 plumbing 子命令延后（详见“还未实现的功能”）。
+`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`），`push` 支持 `-u` / `--include-untracked`（`--no-include-untracked` 经 clap `overrides_with` 撤销，最后出现者生效；默认排除未跟踪故单独为 no-op）、`-a` / `--all` 与 `-k` / `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），同时把 patch 级差异（`-p` / `--patch`）以及 create/store 等 plumbing 子命令延后（详见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/stash.md`。
 - Synopsis：`libra stash (push [-m <message>] | pop [<stash>] | list | apply [<stash>] | drop [<stash>] | show [<stash>] [--name-only | --name-status] | branch <branch> [<stash>] | clear [--force])`。
-- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [-a, --all] [-k, --keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
+- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [--no-include-untracked] [-a, --all] [-k, --keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
 
 
 ## 还未实现的功能

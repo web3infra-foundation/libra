@@ -287,6 +287,7 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
         Stash::Push {
             message,
             include_untracked,
+            no_include_untracked: _,
             all,
             keep_index,
         } => {
