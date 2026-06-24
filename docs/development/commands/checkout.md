@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/checkout.md`。
-- Synopsis：`libra checkout [-b <new_branch>] [-B <new_branch>] [-t] [--ignore-other-worktrees] [<branch>] [-- <pathspec>...]`。
-- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`-f, --force`、`-d, --detach`、`-t, --track`、`--ignore-other-worktrees`（接受式 no-op：Libra 的工作树共享同一 `HEAD`/refs 存储，分支从不被锁定到单个工作树，故无 other-worktree 限制可覆盖；字段 `ignore_other_worktrees` 解析后不被读取）、`-- <pathspec>...`。`-d`/`--detach` 让分支名也走 detached 路径：`checkout --detach <branch>` 在该分支的提交处 detach HEAD（而非切换到分支），复用现有 `checkout_detached`；同时跳过 "already-on" 短路（`--detach <当前分支>` 仍会 detach）。`-t`/`--track` 为接受式 no-op：Libra 在 checkout 远程跟踪分支时本就通过 DWIM 配置 upstream（`set_upstream_safe_with_output`，action `track`），故 `--track` 请求的正是已有行为；对非远程目标无效果（与 Git 严格语义略有差异）；独立显式跟踪请用 `switch --track`。
+- Synopsis：`libra checkout [-b <new_branch>] [-B <new_branch>] [-t] [--ignore-other-worktrees] [--no-progress] [<branch>] [-- <pathspec>...]`。
+- 公开参数/子命令包括：`[<branch>]`、`-b <new_branch>`、`-B <new_branch>`、`-f, --force`、`-d, --detach`、`-t, --track`、`--ignore-other-worktrees`（接受式 no-op：Libra 的工作树共享同一 `HEAD`/refs 存储，分支从不被锁定到单个工作树，故无 other-worktree 限制可覆盖；字段 `ignore_other_worktrees` 解析后不被读取）、`--no-progress`（接受式 no-op：Libra 的 checkout 从不渲染进度条；字段 `no_progress` 解析后不被读取）、`-- <pathspec>...`。`-d`/`--detach` 让分支名也走 detached 路径：`checkout --detach <branch>` 在该分支的提交处 detach HEAD（而非切换到分支），复用现有 `checkout_detached`；同时跳过 "already-on" 短路（`--detach <当前分支>` 仍会 detach）。`-t`/`--track` 为接受式 no-op：Libra 在 checkout 远程跟踪分支时本就通过 DWIM 配置 upstream（`set_upstream_safe_with_output`，action `track`），故 `--track` 请求的正是已有行为；对非远程目标无效果（与 Git 严格语义略有差异）；独立显式跟踪请用 `switch --track`。
 - `-f`/`--force`：在工作树/索引与 HEAD 有差异时仍切换，丢弃对**已跟踪**文件的本地修改（由 `restore_to_commit` 覆盖写回目标内容）。**有意安全差异**：即使带 `-f` 也仍拒绝覆盖会被目标分支写入的**未跟踪**文件（独立调用 `switch::ensure_no_untracked_overwrite`，避免静默丢失未跟踪数据），返回 128。
 
 

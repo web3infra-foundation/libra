@@ -84,6 +84,12 @@ pub struct CheckoutArgs {
     #[clap(long = "ignore-other-worktrees")]
     ignore_other_worktrees: bool,
 
+    /// Do not show a progress meter. Accepted for Git parity and is a no-op:
+    /// Libra's checkout never renders a progress meter, so there is nothing to
+    /// suppress.
+    #[clap(long = "no-progress")]
+    no_progress: bool,
+
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,

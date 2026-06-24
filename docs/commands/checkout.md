@@ -32,6 +32,7 @@ Path restoration is only enabled by an explicit `--` separator. Without `--`, `l
 | `-d` | `--detach` | | Detach HEAD at the named commit even when it is a branch (instead of switching to the branch) |
 | `-t` | `--track` | | Set up upstream tracking when checking out a remote-tracking branch. Accepted as a no-op: Libra always configures tracking for a remote-tracking checkout (DWIM), so this requests behavior Libra already performs; no effect for a non-remote target. Use `libra switch --track` for explicit, standalone tracking. |
 | | `--ignore-other-worktrees` | | Check out a branch even if it is already checked out in another worktree. Accepted as a no-op: Libra worktrees share one `HEAD`/refs store, so a branch is never locked to one worktree and there is no other-worktree restriction to override. |
+| | `--no-progress` | | Do not show a progress meter. Accepted as a no-op: Libra's checkout never renders a progress meter. |
 | | `[<tree-ish>] -- <pathspec>...` | positional | Restore paths. Without `<tree-ish>`, restores the worktree from the index. With `<tree-ish>`, restores both index and worktree from that source. |
 
 ### Flag examples

@@ -30,6 +30,7 @@ libra checkout [<tree-ish>] -- <pathspec>...
 | `-d` | `--detach` | | 即使目标是分支也在其提交处 detach HEAD（而非切换到分支） |
 | `-t` | `--track` | | checkout 远程跟踪分支时配置 upstream。接受式 no-op：Libra 在 checkout 远程跟踪分支时本就通过 DWIM 配置跟踪，故该标志请求的正是已有行为；对非远程目标无效果。独立显式跟踪请用 `libra switch --track`。 |
 | | `--ignore-other-worktrees` | | 即使分支已在另一个工作树中被 checkout，也允许 checkout 它。接受式 no-op：Libra 的工作树共享同一 `HEAD`/refs 存储，分支从不被锁定到单个工作树，故无 other-worktree 限制可覆盖。 |
+| | `--no-progress` | | 不显示进度条。接受式 no-op：Libra 的 checkout 从不渲染进度条。 |
 | | `[<tree-ish>] -- <pathspec>...` | 位置参数 | 恢复路径。没有 `<tree-ish>` 时，从索引恢复工作树。带 `<tree-ish>` 时，从该来源同时恢复索引和工作树。 |
 
 ### 标志示例
