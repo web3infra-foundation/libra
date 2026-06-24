@@ -1258,3 +1258,23 @@ fn diff_rename_relative_indent_noop_flags_are_accepted() {
         );
     }
 }
+
+#[test]
+fn diff_no_textconv_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("t.txt"), "x\ny\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "t.txt"], p), "stage t.txt");
+
+    let plain = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&plain, "diff --cached");
+    // `--no-textconv` is an accepted no-op: Libra's diff has no textconv filters
+    // and always diffs raw content, so output is unchanged.
+    let out = run_libra_command(&["diff", "--cached", "--no-textconv"], p);
+    assert_cli_success(&out, "diff --cached --no-textconv");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "diff --no-textconv matches plain diff (no-op)"
+    );
+}

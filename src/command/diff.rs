@@ -170,6 +170,12 @@ pub struct DiffArgs {
     /// (Git's `--indent-heuristic` is not exposed.)
     #[clap(long = "no-indent-heuristic")]
     pub no_indent_heuristic: bool,
+
+    /// Do not run a textconv filter to make binary files diffable. Accepted for
+    /// Git parity and is a no-op: Libra's diff has no textconv filters and
+    /// always diffs the raw content. (Git's `--textconv` is not exposed.)
+    #[clap(long = "no-textconv")]
+    pub no_textconv: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -977,6 +983,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         no_renames: false,
         no_relative: false,
         no_indent_heuristic: false,
+        no_textconv: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

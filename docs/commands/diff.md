@@ -48,6 +48,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | No renames | | `--no-renames` | Turn off rename detection. Accepted no-op: Libra's diff never detects renames (a rename shows as delete + create). (Git's `--renames`/`-M` is not supported.) |
 | No relative | | `--no-relative` | Show repo-root-relative paths, not cwd-relative. Accepted no-op: Libra's diff always shows repo-root-relative paths. (Git's `--relative` is not supported.) |
 | No indent heuristic | | `--no-indent-heuristic` | Disable the indent heuristic for hunk boundaries. Accepted no-op: Libra's diff does not apply Git's indent heuristic. (Git's `--indent-heuristic` is not supported.) |
+| No textconv | | `--no-textconv` | Do not run a textconv filter to make binary files diffable. Accepted no-op: Libra's diff has no textconv filters and always diffs raw content. (Git's `--textconv` is not supported.) |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
