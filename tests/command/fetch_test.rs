@@ -1687,3 +1687,18 @@ fn fetch_no_progress_flag_is_accepted() {
         "--no-progress is accepted by the parser: {stderr}"
     );
 }
+
+#[test]
+fn fetch_no_prune_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-prune` parses and reaches the runtime: with no configured remote it
+    // fails at remote resolution, NOT at clap. Libra's fetch never prunes
+    // remote-tracking refs, so the flag is an accepted no-op.
+    let output = run_libra_command(&["fetch", "--no-prune"], repo.path());
+    assert!(!output.status.success(), "fetch without a remote fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-prune is accepted by the parser: {stderr}"
+    );
+}

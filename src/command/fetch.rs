@@ -567,6 +567,12 @@ pub struct FetchArgs {
     /// remote progress) on stderr, matching `git fetch --no-progress`.
     #[clap(long = "no-progress")]
     pub no_progress: bool,
+
+    /// Do not prune remote-tracking refs that no longer exist on the remote.
+    /// Accepted for Git parity and is a no-op: Libra's fetch never prunes, so
+    /// this already matches the default. (Git's `--prune` / `-p` is not exposed.)
+    #[clap(long = "no-prune")]
+    pub no_prune: bool,
 }
 
 /// How tags are handled for a fetch, resolved per-remote from CLI flags then
@@ -944,6 +950,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         no_tags,
         no_auto_gc: _,
         no_progress,
+        no_prune: _,
     } = args;
 
     // `--no-progress` forces progress reporting off (the "Receiving objects"

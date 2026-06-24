@@ -35,6 +35,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--no-tags` | Fetch no tags at all, not even tags reachable from fetched commits (overrides the default auto-follow). | `libra fetch origin --no-tags` |
 | `--no-auto-gc` | Do not run a repacking/gc pass after fetching. Accepted no-op for Git parity: Libra's fetch never triggers an automatic gc, so there is nothing to disable. | `libra fetch origin --no-auto-gc` |
 | `--no-progress` | Do not show the progress meter (the "Receiving objects" spinner / remote progress) on stderr, matching `git fetch --no-progress`. | `libra fetch origin --no-progress` |
+| `--no-prune` | Do not prune remote-tracking refs that no longer exist on the remote. Accepted no-op for Git parity: Libra's fetch never prunes, so this already matches the default. (Git's `--prune`/`-p` is not exposed.) | `libra fetch origin --no-prune` |
 | `-f`, `--force` | Allow non-fast-forward updates and overwrite (clobber) a local tag that points elsewhere. Forced updates are marked `+` in `--porcelain` / `(forced update)` in human output. | `libra fetch origin --tags --force` |
 | `--dry-run` | Preview the remote-tracking ref updates the fetch would produce without downloading any objects or writing refs, reflog, or `FETCH_HEAD`. | `libra fetch origin --dry-run` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting it. (`-a` is reserved for `--all`.) | `libra fetch origin --append` |
@@ -180,7 +181,9 @@ requires an additional round-trip to enumerate the remote's current refs, adding
 every fetch, and (2) in agent-driven workflows, stale tracking refs can serve as useful
 historical anchors for diffing against a previous remote state. When pruning is desired,
 `libra remote prune <name>` provides an explicit, auditable operation. This keeps `fetch`
-fast and predictable while giving users a deliberate pruning path.
+fast and predictable while giving users a deliberate pruning path. Git's `--no-prune`
+(don't prune) is accepted as a no-op since this already matches Libra's default; Git's
+opposite `--prune`/`-p` (prune during the fetch) is not exposed.
 
 ### Shallow fetch (`--depth`) is exposed as a stable flag
 

@@ -30,6 +30,7 @@ Fetch 支持 SSH、HTTPS、本地文件和 `git://` 传输。配置了 `vault.ss
 | `--quiet` | 抑制人类可读输出。 | `libra fetch --quiet` |
 | `--no-auto-gc` | fetch 后不运行 repack/gc。为对齐 Git 而接受的 no-op：Libra 的 fetch 从不触发自动 gc，故无可禁用。 | `libra fetch origin --no-auto-gc` |
 | `--no-progress` | 不在 stderr 显示进度条（“Receiving objects” spinner / 远端进度），对齐 `git fetch --no-progress`。 | `libra fetch origin --no-progress` |
+| `--no-prune` | 不修剪远端已不存在的 remote-tracking 引用。为对齐 Git 而接受的 no-op：Libra 的 fetch 从不修剪，故已是默认行为。（Git 的 `--prune`/`-p` 未公开。） | `libra fetch origin --no-prune` |
 
 ## 常用命令
 
@@ -147,7 +148,7 @@ Already up to date with 'origin'
 
 ### 为什么默认没有 --prune？
 
-Git 添加 `fetch.prune = true` 作为推荐默认值，因为陈旧的远程跟踪引用会静默累积。Libra 选择默认不 prune 有两个原因：（1）prune 需要额外往返来枚举远程当前引用，这会为每次 fetch 增加延迟；（2）在代理驱动工作流中，陈旧 tracking refs 可作为与之前远程状态做 diff 的有用历史锚点。需要 pruning 时，`libra remote prune <name>` 提供显式、可审计的操作。这让 `fetch` 保持快速且可预测，同时给用户一个有意的 pruning 路径。
+Git 添加 `fetch.prune = true` 作为推荐默认值，因为陈旧的远程跟踪引用会静默累积。Libra 选择默认不 prune 有两个原因：（1）prune 需要额外往返来枚举远程当前引用，这会为每次 fetch 增加延迟；（2）在代理驱动工作流中，陈旧 tracking refs 可作为与之前远程状态做 diff 的有用历史锚点。需要 pruning 时，`libra remote prune <name>` 提供显式、可审计的操作。这让 `fetch` 保持快速且可预测，同时给用户一个有意的 pruning 路径。Git 的 `--no-prune`（不修剪）作为 no-op 接受，因为它已是 Libra 的默认行为；Git 的反向 `--prune`/`-p`（fetch 时修剪）未公开。
 
 ### Shallow fetch（`--depth`）作为稳定标志暴露
 
