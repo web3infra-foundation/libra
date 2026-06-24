@@ -157,6 +157,7 @@ async fn test_basic_revert() {
     // --- 5. Test 1: Revert HEAD (C3) ---
     println!("\n--- Test 1: Revert HEAD (C3) ---");
     revert::execute(revert::RevertArgs {
+        no_rerere_autoupdate: false,
         commit: vec!["HEAD".to_string()],
         no_commit: false,
         mainline: None,
@@ -279,6 +280,7 @@ async fn test_revert_no_commit() {
 
     // Test revert with no-commit flag
     revert::execute(revert::RevertArgs {
+        no_rerere_autoupdate: false,
         commit: vec!["HEAD".to_string()],
         no_commit: true,
         mainline: None,
@@ -364,6 +366,7 @@ async fn test_revert_root_commit() {
 
     // Revert root commit
     revert::execute(revert::RevertArgs {
+        no_rerere_autoupdate: false,
         commit: vec![root_hash],
         no_commit: false,
         mainline: None,
@@ -424,6 +427,27 @@ fn test_revert_json_output_reports_files_changed() {
         "tracked\n",
         "revert should restore the previous file content"
     );
+}
+
+#[test]
+#[serial]
+fn test_revert_no_rerere_autoupdate_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let tracked_path = repo.path().join("tracked.txt");
+    fs::write(&tracked_path, "updated\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], repo.path()),
+        "stage modified tracked.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "update", "--no-verify"], repo.path()),
+        "commit modified tracked.txt",
+    );
+
+    // `--no-rerere-autoupdate` is accepted and a no-op: Libra has no rerere, so
+    // the revert proceeds and creates a revert commit normally.
+    let out = run_libra_command(&["revert", "--no-rerere-autoupdate", "HEAD"], repo.path());
+    assert_cli_success(&out, "revert --no-rerere-autoupdate HEAD");
 }
 
 #[test]
@@ -669,6 +693,7 @@ async fn test_revert_errors() {
 
     // Test reverting non-existent commit should fail gracefully
     revert::execute(revert::RevertArgs {
+        no_rerere_autoupdate: false,
         commit: vec!["nonexistent".to_string()],
         no_commit: false,
         mainline: None,

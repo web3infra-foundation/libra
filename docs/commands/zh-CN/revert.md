@@ -5,7 +5,7 @@
 ## 概要
 
 ```
-libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--json] [--quiet] <commit>...
+libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
 libra revert --continue
 libra revert --abort
 ```
@@ -63,6 +63,10 @@ libra revert feature-branch
 ### `--no-edit`
 
 接受自动生成的 revert 消息（`Revert "<subject>"`）而不启动编辑器。Libra 从不为 revert 打开编辑器，故此为对齐 Git 而接受的 no-op；不提供 `--edit`。要自定义消息，请用 `-n` 后再 `libra commit -m`。
+
+### `--no-rerere-autoupdate`
+
+不更新 rerere（reuse recorded resolution）索引。为对齐 Git 而接受的 no-op：Libra 无 rerere，无可更新。（Git 的 `--rerere-autoupdate` 未公开。）
 
 ## 常用命令
 
@@ -154,6 +158,7 @@ Libra 的 revert 以路径级三方合并应用逆向更改。结果无歧义时
 | 位置提交 | `git revert <commit>...` | N/A（使用 `jj backout`） | `libra revert <commit>...`（多个，按序回滚） |
 | No-commit 模式 | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
 | 接受默认消息 | `--no-edit` | N/A | `--no-edit`（接受式 no-op；Libra 从不打开编辑器） |
+| 不更新 rerere | `--no-rerere-autoupdate` | N/A | `--no-rerere-autoupdate`（接受式 no-op；无 rerere） |
 | 编辑消息 | `--edit` | N/A | 不支持（使用 `-n` 后再 `commit -m`） |
 | Mainline 父提交 | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>`（合并提交必需） |
 | 冲突后继续 | `--continue` | N/A | `--continue`（解决冲突后） |

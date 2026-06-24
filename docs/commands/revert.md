@@ -5,7 +5,7 @@ Revert some existing commits.
 ## Synopsis
 
 ```
-libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--json] [--quiet] <commit>...
+libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
 libra revert --continue
 libra revert --abort
 ```
@@ -87,6 +87,12 @@ Accept the auto-generated revert message (`Revert "<subject>"`) without launchin
 an editor. Libra never opens an editor for revert, so this is accepted for Git
 parity and is a no-op. The `--edit` counterpart is not provided; to customize the
 message, use `-n` and then `libra commit -m`.
+
+### `--no-rerere-autoupdate`
+
+Do not update the rerere (reuse recorded resolution) index. Accepted no-op for
+Git parity: Libra has no rerere, so there is nothing to update. (Git's
+`--rerere-autoupdate` is not exposed.)
 
 ## Common Commands
 
@@ -201,6 +207,7 @@ is returned. You resolve the markers and run `libra revert --continue` (or
 | Positional commit(s) | `git revert <commit>...` | N/A (uses `jj backout`) | `libra revert <commit>...` (multiple, reverted in order) |
 | No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
 | Accept default message | `--no-edit` | N/A | `--no-edit` (accepted no-op; Libra never opens an editor) |
+| No rerere autoupdate | `--no-rerere-autoupdate` | N/A | `--no-rerere-autoupdate` (accepted no-op; no rerere) |
 | Edit message | `--edit` | N/A | Not supported (use `-n` then `commit -m`) |
 | Mainline parent | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>` (required for merge commits) |
 | Continue after conflict | `--continue` | N/A | `--continue` (after resolving conflicts) |

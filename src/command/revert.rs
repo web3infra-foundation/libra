@@ -238,6 +238,12 @@ pub struct RevertArgs {
     /// a no-op; the `--edit` counterpart is not provided.
     #[clap(long = "no-edit")]
     pub no_edit: bool,
+
+    /// Do not update the rerere (reuse recorded resolution) index. Accepted for
+    /// Git parity and is a no-op: Libra has no rerere, so there is nothing to
+    /// update. (Git's opposite `--rerere-autoupdate` is not exposed.)
+    #[clap(long = "no-rerere-autoupdate")]
+    pub no_rerere_autoupdate: bool,
 }
 
 pub async fn execute(args: RevertArgs) {
