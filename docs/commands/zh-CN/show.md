@@ -24,6 +24,7 @@ libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 | `--pretty <FORMAT>` | | 以预设（`oneline`）或 `%` 占位符模板（`format:`/`tformat:`/裸模板）格式化 commit header。 |
 | `--format <FORMAT>` | | `--pretty=<FORMAT>` 的别名（Git 的 `--format`）。与 `--pretty` 互斥。 |
 | `--abbrev-commit` | | 把默认 header 的 commit 对象名缩写为 7 位前缀。 |
+| `--no-abbrev-commit` | | 显示完整（未缩写）commit 对象名，撤销先前的 `--abbrev-commit`（最后出现者生效）。完整哈希是默认，故单独使用时为 no-op。 |
 | `--name-only` | | 只显示已更改文件名（没有 diff hunk）。 |
 | `--stat` | | 显示 diff 统计（每个文件的插入 / 删除）。 |
 | `--no-expand-tabs` | | 不在提交消息中展开 tab。接受式 no-op：Libra 的 show 逐字打印 tab。 |

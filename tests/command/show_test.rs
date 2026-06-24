@@ -245,6 +245,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
     let _pager = ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
     let args = ShowArgs {
+        no_abbrev_commit: false,
         no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
@@ -300,6 +301,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_abbrev_commit: false,
         no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
@@ -356,6 +358,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_abbrev_commit: false,
         no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
@@ -821,6 +824,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_abbrev_commit: false,
         no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
@@ -868,6 +872,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_abbrev_commit: false,
         no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
@@ -1063,6 +1068,31 @@ fn show_format_aliases_pretty_and_abbrev_commit_shortens_hash() {
     assert!(
         !abbrev_s.contains(&full_hash),
         "full 40-char hash must not appear: {abbrev_s:?}"
+    );
+
+    // `--no-abbrev-commit` shows the full hash (the default); `--abbrev-commit
+    // --no-abbrev-commit` (last wins) countermands `--abbrev-commit`, so the
+    // full 40-char hash appears.
+    let full = run_libra_command(&["show", "--no-patch", "--no-abbrev-commit", "HEAD"], p);
+    assert_cli_success(&full, "show --no-abbrev-commit");
+    assert!(
+        String::from_utf8_lossy(&full.stdout).contains(&format!("commit {full_hash}")),
+        "full hash header present with --no-abbrev-commit"
+    );
+    let override_full = run_libra_command(
+        &[
+            "show",
+            "--no-patch",
+            "--abbrev-commit",
+            "--no-abbrev-commit",
+            "HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&override_full, "show --abbrev-commit --no-abbrev-commit");
+    assert!(
+        String::from_utf8_lossy(&override_full.stdout).contains(&format!("commit {full_hash}")),
+        "--no-abbrev-commit countermands --abbrev-commit (full hash)"
     );
 }
 

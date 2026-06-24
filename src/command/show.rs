@@ -75,9 +75,16 @@ pub struct ShowArgs {
     pub format: Option<String>,
 
     /// Abbreviate the commit object name in the default header instead of
-    /// printing the full 40-character hash.
-    #[clap(long)]
+    /// printing the full (unabbreviated) hash.
+    #[clap(long, overrides_with = "no_abbrev_commit")]
     pub abbrev_commit: bool,
+
+    /// Show the full (unabbreviated) commit object name, countermanding an
+    /// earlier `--abbrev-commit` (last one on the command line wins), matching
+    /// `git show --no-abbrev-commit`. The full hash is the default, so on its
+    /// own this is a no-op.
+    #[clap(long = "no-abbrev-commit", overrides_with = "abbrev_commit")]
+    pub no_abbrev_commit: bool,
 
     /// Show only changed file names.
     #[clap(long)]

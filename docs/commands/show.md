@@ -31,6 +31,7 @@ list their entries and blobs print their text content (or a binary summary).
 | `--pretty <FORMAT>` | | Format the commit header with a preset (`oneline`) or a `%`-placeholder template (`format:`/`tformat:`/bare). |
 | `--format <FORMAT>` | | Alias for `--pretty=<FORMAT>` (Git's `--format`). Mutually exclusive with `--pretty`. |
 | `--abbrev-commit` | | Abbreviate the commit object name in the default header to a 7-character prefix. |
+| `--no-abbrev-commit` | | Show the full (unabbreviated) commit object name, countermanding an earlier `--abbrev-commit` (last one wins). The full hash is the default, so on its own this is a no-op. |
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
