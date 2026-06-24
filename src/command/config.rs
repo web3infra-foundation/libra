@@ -288,6 +288,10 @@ pub struct ConfigArgs {
     /// Rename a section: `--rename-section <old> <new>`
     #[clap(long("rename-section"), hide = true)]
     pub rename_section: bool,
+    /// NUL-terminate output records (`git config -z`): values for get/get-all,
+    /// and `key\nvalue\0` for `--get-regexp` / `--list`.
+    #[clap(short = 'z', long = "null", global = true)]
+    pub null: bool,
 
     // ── Scope flags ──────────────────────────────────────────────────
     /// Use repository config (default)
@@ -508,6 +512,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             reveal,
             regexp,
             default,
+            null,
         } => {
             handle_get(
                 &key,
@@ -517,6 +522,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 default.as_deref(),
                 scope,
                 use_cascade,
+                null,
                 output,
             )
             .await
@@ -527,6 +533,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             vault,
             ssh_keys,
             gpg_keys,
+            null,
         } => {
             handle_list(
                 name_only,
@@ -536,6 +543,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 gpg_keys,
                 scope,
                 use_cascade,
+                null,
                 output,
             )
             .await
@@ -588,6 +596,8 @@ enum ResolvedCommand {
         reveal: bool,
         regexp: bool,
         default: Option<String>,
+        /// NUL-terminate output records (`-z`/`--null`).
+        null: bool,
     },
     List {
         name_only: bool,
@@ -595,6 +605,8 @@ enum ResolvedCommand {
         vault: bool,
         ssh_keys: bool,
         gpg_keys: bool,
+        /// NUL-terminate output records (`-z`/`--null`).
+        null: bool,
     },
     Unset {
         key: String,
@@ -653,6 +665,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 reveal: *reveal,
                 regexp: *regexp,
                 default: default.clone(),
+                null: args.null,
             },
             ConfigCommand::List {
                 name_only,
@@ -666,6 +679,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 vault: *vault,
                 ssh_keys: *ssh_keys,
                 gpg_keys: *gpg_keys,
+                null: args.null,
             },
             ConfigCommand::Unset { key, all } => ResolvedCommand::Unset {
                 key: key.clone(),
@@ -695,6 +709,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             vault: false,
             ssh_keys: false,
             gpg_keys: false,
+            null: args.null,
         });
     }
     if args.remove_section {
@@ -784,6 +799,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             reveal: false,
             regexp: true,
             default: args.default.clone(),
+            null: args.null,
         });
     }
     if args.get {
@@ -793,6 +809,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             reveal: false,
             regexp: false,
             default: args.default.clone(),
+            null: args.null,
         });
     }
     if args.get_all {
@@ -802,6 +819,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             reveal: false,
             regexp: false,
             default: args.default.clone(),
+            null: args.null,
         });
     }
     if args.unset {
@@ -1072,6 +1090,7 @@ async fn handle_get(
     default: Option<&str>,
     scope: ConfigScope,
     use_cascade: bool,
+    null: bool,
     output: &OutputConfig,
 ) -> CliResult<()> {
     // Block --reveal for vault internal keys on exact-key queries
@@ -1143,7 +1162,12 @@ async fn handle_get(
             )?;
         } else if !output.quiet {
             for (e, _, val) in &display_entries {
-                println!("{} = {val}", e.key);
+                if null {
+                    // `git config -z --get-regexp`: key\nvalue\0 per entry.
+                    print!("{}\n{val}\0", e.key);
+                } else {
+                    println!("{} = {val}", e.key);
+                }
             }
         }
         return Ok(());
@@ -1177,7 +1201,11 @@ async fn handle_get(
                     output,
                 )?;
             } else if !output.quiet {
-                println!("{d}");
+                if null {
+                    print!("{d}\0");
+                } else {
+                    println!("{d}");
+                }
             }
             return Ok(());
         }
@@ -1206,7 +1234,11 @@ async fn handle_get(
             )?;
         } else if !output.quiet {
             for (_, _, val) in &display_entries {
-                println!("{val}");
+                if null {
+                    print!("{val}\0");
+                } else {
+                    println!("{val}");
+                }
             }
         }
     } else {
@@ -1294,7 +1326,11 @@ async fn handle_get(
                 output,
             )?;
         } else if !output.quiet {
-            println!("{display_value}");
+            if null {
+                print!("{display_value}\0");
+            } else {
+                println!("{display_value}");
+            }
         }
     }
     Ok(())
@@ -1309,8 +1345,20 @@ async fn handle_list(
     gpg_keys: bool,
     scope: ConfigScope,
     use_cascade: bool,
+    null: bool,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    // `-z` defines NUL records for standard config key/value output only. The
+    // `--ssh-keys` / `--gpg-keys` / `--vault` views are Libra-only formatted
+    // summaries with no `key\nvalue\0` mapping, so reject the combination rather
+    // than silently ignore `-z`.
+    if null && (ssh_keys || gpg_keys || vault) {
+        return Err(CliError::command_usage(
+            "-z/--null applies to standard config output only, not --ssh-keys/--gpg-keys/--vault",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
     if ssh_keys {
         let entries = list_ssh_key_entries(scope).await?;
         if output.is_json() {
@@ -1491,6 +1539,12 @@ async fn handle_list(
         } else if !output.quiet {
             for e in &entries {
                 match (&e.origin, &e.value) {
+                    // `git config -z`: origin\0key\nvalue\0 (origin omitted when
+                    // not requested; value omitted with --name-only).
+                    (Some(origin), Some(val)) if null => print!("{origin}\0{}\n{val}\0", e.key),
+                    (Some(origin), None) if null => print!("{origin}\0{}\0", e.key),
+                    (None, Some(val)) if null => print!("{}\n{val}\0", e.key),
+                    (None, None) if null => print!("{}\0", e.key),
                     (Some(origin), Some(val)) => println!("  {:<8} {} = {val}", origin, e.key),
                     (Some(origin), None) => println!("  {:<8} {}", origin, e.key),
                     (None, Some(val)) => println!("{}={val}", e.key),
@@ -1541,6 +1595,9 @@ async fn handle_list(
         } else if !output.quiet {
             for e in &entries {
                 match &e.value {
+                    // `git config -z --list`: key\nvalue\0 (key\0 with --name-only).
+                    Some(val) if null => print!("{}\n{val}\0", e.key),
+                    None if null => print!("{}\0", e.key),
                     Some(val) => println!("{}={val}", e.key),
                     None => println!("{}", e.key),
                 }

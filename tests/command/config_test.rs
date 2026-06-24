@@ -1698,3 +1698,71 @@ async fn test_config_rename_section_preserves_multivalue_order() {
         "the old multi-value key must be removed, got: {old_out}"
     );
 }
+
+/// `-z` / `--null` NUL-terminates output (`git config -z`): values for
+/// `--get`/`--get-all`, and `key\nvalue\0` records for `--get-regexp`/`--list`
+/// (`key\0` with `--name-only`).
+#[tokio::test]
+#[serial]
+async fn test_config_null_terminated_output() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+    let set = |k: &str, v: &str| {
+        assert_cli_success(&run_libra_command(&["config", "--local", k, v], p), "set");
+    };
+    set("alpha.one", "v1");
+    set("alpha.two", "v2");
+
+    // --get -z : value\0 (exact bytes).
+    let g = run_libra_command(&["config", "--local", "-z", "--get", "alpha.one"], p);
+    assert_cli_success(&g, "get -z");
+    assert_eq!(
+        g.stdout, b"v1\0",
+        "get -z must emit value + NUL, got {:?}",
+        g.stdout
+    );
+
+    // --get-regexp -z : key\nvalue\0 per entry.
+    let gr = run_libra_command(&["config", "--local", "-z", "--get-regexp", "^alpha\\."], p);
+    assert_cli_success(&gr, "get-regexp -z");
+    let grs = String::from_utf8_lossy(&gr.stdout);
+    assert!(
+        grs.contains("alpha.one\nv1\0") && grs.contains("alpha.two\nv2\0"),
+        "get-regexp -z must emit key\\nvalue\\0, got {:?}",
+        gr.stdout
+    );
+
+    // --list -z : key\nvalue\0 (no '=' separator).
+    let l = run_libra_command(&["config", "--local", "-z", "--list"], p);
+    assert_cli_success(&l, "list -z");
+    let ls = String::from_utf8_lossy(&l.stdout);
+    assert!(
+        ls.contains("alpha.one\nv1\0")
+            && ls.contains("alpha.two\nv2\0")
+            && !ls.contains("alpha.one=v1"),
+        "list -z must emit key\\nvalue\\0 (no '='), got {:?}",
+        l.stdout
+    );
+
+    // --name-only -z (subcommand form, -z is a global flag): key\0, no values.
+    let ln = run_libra_command(&["config", "--local", "list", "--name-only", "-z"], p);
+    assert_cli_success(&ln, "list --name-only -z");
+    let lns = String::from_utf8_lossy(&ln.stdout);
+    assert!(
+        lns.contains("alpha.one\0") && lns.contains("alpha.two\0") && !lns.contains("v1"),
+        "list --name-only -z must emit key\\0 with no values, got {:?}",
+        ln.stdout
+    );
+
+    // `-z` applies to standard config output only: combining it with the
+    // Libra-only --ssh-keys/--gpg-keys/--vault views is a usage error (129).
+    assert_eq!(
+        run_libra_command(&["config", "--local", "list", "--ssh-keys", "-z"], p)
+            .status
+            .code(),
+        Some(129),
+        "-z with --ssh-keys must be rejected as a usage error"
+    );
+}

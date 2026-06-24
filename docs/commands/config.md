@@ -22,7 +22,7 @@ libra config generate-gpg-key [--name <name>] [--email <email>] [--usage <usage>
 Git-compatible flag style is also supported (hidden from help):
 
 ```
-libra config [--get | --get-all | --unset | --unset-all | -l | --add | --import | --get-regexp | --show-origin] [--local | --global] [key] [value] [-d <default>]
+libra config [--get | --get-all | --unset | --unset-all | -l | --add | --import | --get-regexp | --show-origin] [--local | --global] [-z | --null] [key] [value] [-d <default>]
 libra config --remove-section <name>
 libra config --rename-section <old-name> <new-name>
 ```
@@ -241,6 +241,7 @@ These flags provide backward compatibility with `git config` invocation patterns
 | Flag | Description |
 |------|-------------|
 | `-d`, `--default <value>` | Default value when key is not found (Git-compat positional mode) |
+| `-z`, `--null` | NUL-terminate output records (`git config -z`): `value\0` for `--get`/`--get-all`; `key\nvalue\0` for `--get-regexp`/`--list`; `key\0` with `--name-only`; `origin\0` prefix with `--show-origin`. `--json` takes precedence. Applies to standard config output only; combining it with `--ssh-keys`/`--gpg-keys`/`--vault` is rejected (exit 129). |
 | `--json` | Emit structured JSON output |
 | `--quiet` | Suppress human-readable output |
 
@@ -431,7 +432,7 @@ Git exits with code 1 when a key is not found, which is indistinguishable from o
 | Show origin | `git config --show-origin` | No | `libra config list --show-origin` |
 | Type coercion | `--type=bool\|int\|path` | No (TOML types) | Not supported (this batch) |
 | Default fallback | `--default value` | No | `--default value` |
-| Null-delimited | `-z` | No | Not supported (this batch) |
+| Null-delimited | `-z` | No | `-z` / `--null` (`value\0` for get/get-all; `key\nvalue\0` for `--get-regexp`/`--list`; `key\0` with `--name-only`) |
 | Rename/remove section | Yes | No | `--remove-section` / `--rename-section` (Git section/subsection semantics; rename refuses an existing destination) |
 | JSON output | No | No | **`--json`** |
 | Secret redaction | No | No | **Auto-detect** |
