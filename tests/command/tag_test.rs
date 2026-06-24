@@ -848,6 +848,7 @@ async fn test_force_tag() {
         column: None,
         sign: false,
         no_sign: false,
+        no_column: false,
         verify: false,
     })
     .await;
@@ -977,6 +978,7 @@ async fn test_delete_tag() {
         column: None,
         sign: false,
         no_sign: false,
+        no_column: false,
         verify: false,
     })
     .await;
@@ -1043,6 +1045,7 @@ async fn test_annotation_lines_tag() {
         column: None,
         sign: false,
         no_sign: false,
+        no_column: false,
         verify: false,
     })
     .await;
@@ -1096,6 +1099,7 @@ async fn test_annotation_lines_tag() {
         column: None,
         sign: false,
         no_sign: false,
+        no_column: false,
         verify: false,
     })
     .await;
@@ -1526,5 +1530,31 @@ fn tag_no_sign_countermands_sign() {
     assert!(
         listed.contains("v-nosign") && listed.contains("v-override"),
         "both tags created: {listed}"
+    );
+}
+
+#[test]
+fn tag_no_column_countermands_column() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    run_libra_command(&["tag", "v1aaaa"], p);
+    run_libra_command(&["tag", "v2bbbb"], p);
+
+    // `--no-column` alone lists one tag per line (the default).
+    let plain = run_libra_command(&["tag", "--no-column"], p);
+    assert_cli_success(&plain, "tag --no-column");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    assert!(plain_out.contains("v1aaaa\n"), "one per line: {plain_out}");
+
+    // `--column=always --no-column` (last wins) countermands `--column`, so the
+    // listing is one-per-line, NOT columnar (no two names share a line).
+    let out = run_libra_command(&["tag", "--column=always", "--no-column"], p);
+    assert_cli_success(&out, "tag --column=always --no-column");
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !listed
+            .lines()
+            .any(|l| l.contains("v1aaaa") && l.contains("v2bbbb")),
+        "--no-column countermands --column (one per line): {listed}"
     );
 }

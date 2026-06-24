@@ -93,8 +93,15 @@ pub struct TagArgs {
     /// Display the tag list in columns. Modes: `always`, `auto` (only when
     /// stdout is a terminal), `never`. Bare `--column` means `always`. Cannot
     /// be combined with `-n`.
-    #[clap(long, value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "n_lines")]
+    #[clap(long, value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "n_lines", overrides_with = "no_column")]
     pub column: Option<String>,
+
+    /// Do not display the tag list in columns (equivalent to `--column=never`),
+    /// countermanding an earlier `--column` (last one on the command line wins),
+    /// matching `git tag --no-column`. Tags are listed one per line by default,
+    /// so on its own this is a no-op.
+    #[clap(long = "no-column", overrides_with = "column")]
+    pub no_column: bool,
 
     /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
     /// since Libra does not open an editor for the tag body).

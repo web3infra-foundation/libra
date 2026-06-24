@@ -40,6 +40,7 @@ Tag references are stored in the SQLite database alongside branch references, pr
 | | `--no-merged` | `<commit>` | List only tags not reachable from `<commit>` |
 | | `--sort` | `<key>` | Sort the listing by key (`refname`, `-refname`, `creatordate`) |
 | | `--column` | `[mode]` | Lay out the tag list in columns. Modes `always`/`auto`/`never` (bare = `always`). Cannot be combined with `-n`. |
+| | `--no-column` | | Do not lay out the tag list in columns (equivalent to `--column=never`), countermanding an earlier `--column` (last one wins). Tags list one-per-line by default, so on its own this is a no-op. |
 
 ### Flag examples
 
@@ -187,7 +188,7 @@ Libra preserves Git's two-tier tag model for on-disk format compatibility. Light
 | List tags | `git tag -l` | `libra tag -l` | `jj tag list` |
 | List with message | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
 | List by target | `git tag --points-at <obj>` | `libra tag --points-at <obj>` | N/A |
-| Column layout | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]` (always/auto/never) | N/A |
+| Column layout | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]` (always/auto/never; `--no-column` countermands) | N/A |
 | Delete | `git tag -d <name>` | `libra tag -d <name>` | `jj tag delete <name>` |
 | Force overwrite | `git tag -f <name>` | `libra tag -f <name>` | `jj tag create <name>` (always overwrites) |
 | Sign tag | `git tag -s <name>` | `libra tag -s -m "msg" <name>` (vault PGP; requires `-m`, not Git GPG-interoperable) | N/A |

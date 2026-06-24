@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/tag.md`。
-- Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE> | -F <FILE>] [-n <N_LINES>] [--points-at <object>] [--contains <commit>] [--no-contains <commit>] [--merged <commit>] [--no-merged <commit>] [--sort <key>] [--column[=<mode>]] [NAME]`。
-- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`--merged <commit>`、`--no-merged <commit>`、`--sort <key>`、`--column[=<mode>]`（`always`/`auto`/`never`，缺省 `always`，dense column-major，与 `-n` 互斥，未知 mode 报 `LBR-CLI-002`）、`-s, --sign`、`--no-sign`（经 clap `overrides_with` 与 `--sign` 互为最后一个生效；`sign` 字段读出 last-wins 结果，`no_sign` 不直接读取）、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
+- Synopsis：`libra tag [OPTIONS] [-l | -d | -f] [-m <MESSAGE> | -F <FILE>] [-n <N_LINES>] [--points-at <object>] [--contains <commit>] [--no-contains <commit>] [--merged <commit>] [--no-merged <commit>] [--sort <key>] [--column[=<mode>]] [--no-column] [NAME]`。
+- 公开参数/子命令包括：`-l, --list`、`-d, --delete`、`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`-f, --force`、`-n, --n-lines <N_LINES>`、`--points-at <object>`、`--contains <commit>`、`--no-contains <commit>`、`--merged <commit>`、`--no-merged <commit>`、`--sort <key>`、`--column[=<mode>]`（`always`/`auto`/`never`，缺省 `always`，dense column-major，与 `-n` 互斥，未知 mode 报 `LBR-CLI-002`）、`--no-column`（等价于 `--column=never`，经 clap `overrides_with` 与 `--column` 互为最后一个生效；`column` 字段读出 last-wins 结果，`no_column` 不直接读取；标签默认每行一个，故单独使用为 no-op）、`-s, --sign`、`--no-sign`（经 clap `overrides_with` 与 `--sign` 互为最后一个生效；`sign` 字段读出 last-wins 结果，`no_sign` 不直接读取）、`-v, --verify`、`[NAME]`（创建时为标签名；列表模式下作为 fnmatch glob 过滤模式，如 `tag -l 'v1.*'`，`*`/`?`/`[...]` 经 `compile_tag_glob` 锚定匹配标签名）。
 - `-F, --file <FILE>`（与 `-m` 互斥）：从文件读取 annotated 标签消息（`-` 表示从 stdin 读取），由 `resolve_tag_message` 解析，提供后即创建 annotated 标签。读文件失败报 `TagError::MessageFileRead`→`LBR-IO-001`（`IoReadFailed`）。签名（`-s`）当前仍要求 `-m`（因此与 `-F` 不组合）。
 - `-s, --sign`（要求 `-m`，因 Libra 不为标签正文打开编辑器）：用 vault PGP 密钥对规范化的未签名标签内容（`object/type/tag/tagger/\n\n/message`）签名，并把 armored 签名块（`vault::signature_to_armored`）追加到标签消息后，对齐 Git 的 signed-tag 布局；tagger 仅构建一次以保证被签名字节与落库对象一致。无 unseal key 时报 `CreateTagError::VaultSign`→`TagError::VaultSign`。
 - `-v, --verify <name>`：`internal::tag::verify` 在签名标记处切分标签消息、重建未签名内容、`vault::armored_to_signature_hex` 还原签名后调用 `vault::pgp_verify`（libvault `pki/keys/verify`）。好签名打印 `Good signature for tag '<name>'`（exit 0）；坏签名 `TagError::BadSignature`（exit 1）；未签名/非 annotated/未找到/无密钥经 `map_verify_tag_error` 报错。
@@ -65,7 +65,7 @@ flowchart TD
 | ✅ 已实现 | 从文件读取消息 | 原始对照：git tag -F <file>（`-` 为 stdin）；当前说明：已实现 `-F`/`--file`（`resolve_tag_message` 读取文件或 stdin，与 `-m` 互斥，提供后即 annotated）。签名 `-s` 当前仍要求 `-m`，故不与 `-F` 组合。带集成测试（`test_tag_dash_f_reads_message_from_file_and_stdin`）。 |
 | ✅ 已实现 | 按合并状态过滤 | 原始对照：git tag --merged / --no-merged；当前说明：已实现（`TagArgs.merged`/`no_merged`，复用可达性判定，隐含 list 模式）。 |
 | ✅ 已实现 | 排序输出 | 原始对照：git tag --sort=<key>；当前说明：已实现 `--sort`（`refname`/`-refname`/`creatordate`/`-creatordate`，经 `sort_tags`）。 |
-| ✅ 已实现（部分） | 多列输出 `--column` | `--column[=always|auto|never]`（缺省 `always`）以 dense column-major 布局排列标签名：列宽 = 最长名 + 2，列数 = `width / 列宽`，宽度取 `COLUMNS` 或 80；`auto` 仅在 stdout 为终端时生效，`never` 退回每行一个；与 `-n` 互斥（clap conflicts_with），未知 mode 报 `LBR-CLI-002`。带集成测试。row/dense 等 git 子模式未实现。 |
+| ✅ 已实现（部分） | 多列输出 `--column` | `--column[=always|auto|never]`（缺省 `always`）以 dense column-major 布局排列标签名：列宽 = 最长名 + 2，列数 = `width / 列宽`，宽度取 `COLUMNS` 或 80；`auto` 仅在 stdout 为终端时生效，`never` 退回每行一个；与 `-n` 互斥（clap conflicts_with），未知 mode 报 `LBR-CLI-002`。`--no-column`（= `--column=never`）经 `overrides_with` 撤销先前的 `--column`（last-wins），默认每行一个故单独为 no-op。带集成测试。row/dense 等 git 子模式未实现。 |
 
 ## 维护要求
 
