@@ -274,6 +274,16 @@ note.)
 libra log --no-notes
 ```
 
+### `--no-mailmap`
+
+Do not use a `.mailmap` to rewrite author/committer identities. Accepted no-op
+for Git parity: Libra's log never applies a mailmap, so it already shows the raw
+recorded identities. (Git's opposite `--mailmap` is not implemented.)
+
+```bash
+libra log --no-mailmap
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved

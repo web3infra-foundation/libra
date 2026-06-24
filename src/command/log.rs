@@ -280,6 +280,13 @@ pub struct LogArgs {
     #[clap(long = "no-notes")]
     pub no_notes: bool,
 
+    /// Do not use a `.mailmap` to rewrite author/committer identities. Accepted
+    /// for Git parity and is a no-op: Libra's log never applies a mailmap, so it
+    /// already shows the raw recorded identities. (Git's opposite `--mailmap`
+    /// is not implemented.)
+    #[clap(long = "no-mailmap")]
+    pub no_mailmap: bool,
+
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
     pub all: bool,

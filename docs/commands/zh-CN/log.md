@@ -248,6 +248,14 @@ libra log --no-expand-tabs
 libra log --no-notes
 ```
 
+### `--no-mailmap`
+
+不使用 `.mailmap` 重写 author/committer 身份。为对齐 Git 而接受的 no-op：Libra 的 log 从不应用 mailmap，直接显示记录的原始身份。（Git 的反向标志 `--mailmap` 未实现。）
+
+```bash
+libra log --no-mailmap
+```
+
 ### `--follow <FILE>`
 
 Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。

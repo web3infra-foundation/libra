@@ -2622,3 +2622,20 @@ fn log_no_notes_flag_is_accepted_noop() {
         "Libra log does not display notes inline"
     );
 }
+
+#[test]
+fn log_no_mailmap_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let plain = run_libra_command(&["log"], p);
+    assert_cli_success(&plain, "log");
+    // `--no-mailmap` is accepted and a no-op: Libra's log never applies a
+    // mailmap, so the output is unchanged.
+    let out = run_libra_command(&["log", "--no-mailmap"], p);
+    assert_cli_success(&out, "log --no-mailmap");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "log --no-mailmap matches plain log (no-op)"
+    );
+}
