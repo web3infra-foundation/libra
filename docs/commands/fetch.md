@@ -33,6 +33,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
 | `--tags` | Fetch every tag from the remote into the local `refs/tags/*` (overrides the default auto-follow and `remote.<name>.tagOpt`). | `libra fetch origin --tags` |
 | `--no-tags` | Fetch no tags at all, not even tags reachable from fetched commits (overrides the default auto-follow). | `libra fetch origin --no-tags` |
+| `--no-auto-gc` | Do not run a repacking/gc pass after fetching. Accepted no-op for Git parity: Libra's fetch never triggers an automatic gc, so there is nothing to disable. | `libra fetch origin --no-auto-gc` |
 | `-f`, `--force` | Allow non-fast-forward updates and overwrite (clobber) a local tag that points elsewhere. Forced updates are marked `+` in `--porcelain` / `(forced update)` in human output. | `libra fetch origin --tags --force` |
 | `--dry-run` | Preview the remote-tracking ref updates the fetch would produce without downloading any objects or writing refs, reflog, or `FETCH_HEAD`. | `libra fetch origin --dry-run` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting it. (`-a` is reserved for `--all`.) | `libra fetch origin --append` |

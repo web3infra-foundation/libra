@@ -554,6 +554,12 @@ pub struct FetchArgs {
     /// Overrides the default auto-follow and an earlier `--tags`.
     #[clap(long = "no-tags", overrides_with = "tags")]
     pub no_tags: bool,
+
+    /// Do not run a repacking/gc pass after fetching. Accepted for Git parity
+    /// and is a no-op: Libra's fetch never triggers an automatic gc, so there
+    /// is nothing to disable.
+    #[clap(long = "no-auto-gc")]
+    pub no_auto_gc: bool,
 }
 
 /// How tags are handled for a fetch, resolved per-remote from CLI flags then
@@ -913,6 +919,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         force,
         tags,
         no_tags,
+        no_auto_gc: _,
     } = args;
 
     // Resolve the CLI tag intent: `--tags` -> All, `--no-tags` -> NoTags, neither

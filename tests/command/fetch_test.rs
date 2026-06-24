@@ -1657,3 +1657,18 @@ async fn test_fetch_tags_from_libra_native_remote_serves_annotated() {
         "annotated tag must be served + fetched from a libra-native remote: {listed}"
     );
 }
+
+#[test]
+fn fetch_no_auto_gc_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-auto-gc` parses and reaches the runtime: with no configured remote
+    // it fails at remote resolution, NOT at clap. Libra's fetch never triggers
+    // an automatic gc, so the flag is an accepted no-op.
+    let output = run_libra_command(&["fetch", "--no-auto-gc"], repo.path());
+    assert!(!output.status.success(), "fetch without a remote fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-auto-gc is accepted by the parser: {stderr}"
+    );
+}
