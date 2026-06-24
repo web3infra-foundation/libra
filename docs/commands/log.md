@@ -284,6 +284,16 @@ recorded identities. (Git's opposite `--mailmap` is not implemented.)
 libra log --no-mailmap
 ```
 
+### `--no-show-signature`
+
+Do not display the GPG signature of signed commits. Accepted no-op for Git
+parity: Libra's log never displays commit signatures inline, so it already
+matches the default. (Git's opposite `--show-signature` is not implemented.)
+
+```bash
+libra log --no-show-signature
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved

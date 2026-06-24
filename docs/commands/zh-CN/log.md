@@ -256,6 +256,14 @@ libra log --no-notes
 libra log --no-mailmap
 ```
 
+### `--no-show-signature`
+
+不显示已签名提交的 GPG 签名。为对齐 Git 而接受的 no-op：Libra 的 log 从不内联显示提交签名，故已是默认行为。（Git 的反向标志 `--show-signature` 未实现。）
+
+```bash
+libra log --no-show-signature
+```
+
 ### `--follow <FILE>`
 
 Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。

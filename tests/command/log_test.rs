@@ -2639,3 +2639,20 @@ fn log_no_mailmap_flag_is_accepted_noop() {
         "log --no-mailmap matches plain log (no-op)"
     );
 }
+
+#[test]
+fn log_no_show_signature_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let plain = run_libra_command(&["log"], p);
+    assert_cli_success(&plain, "log");
+    // `--no-show-signature` is accepted and a no-op: Libra's log never displays
+    // commit signatures inline, so the output is unchanged.
+    let out = run_libra_command(&["log", "--no-show-signature"], p);
+    assert_cli_success(&out, "log --no-show-signature");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "log --no-show-signature matches plain log (no-op)"
+    );
+}

@@ -287,6 +287,13 @@ pub struct LogArgs {
     #[clap(long = "no-mailmap")]
     pub no_mailmap: bool,
 
+    /// Do not display the GPG signature of signed commits. Accepted for Git
+    /// parity and is a no-op: Libra's log never displays commit signatures
+    /// inline, so it already matches the default. (Git's opposite
+    /// `--show-signature` is not implemented.)
+    #[clap(long = "no-show-signature")]
+    pub no_show_signature: bool,
+
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
     pub all: bool,
