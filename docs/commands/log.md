@@ -253,6 +253,16 @@ libra log --date-order
 libra log --date-order --oneline
 ```
 
+### `--no-expand-tabs`
+
+Do not expand tabs in the log message. Accepted no-op for Git parity: Libra
+never expands tabs in commit messages (it prints them verbatim), so this already
+matches the default. (Git's opposite `--expand-tabs[=<n>]` is not implemented.)
+
+```bash
+libra log --no-expand-tabs
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved

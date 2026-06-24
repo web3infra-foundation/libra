@@ -232,6 +232,14 @@ libra log --date-order
 libra log --date-order --oneline
 ```
 
+### `--no-expand-tabs`
+
+不在日志消息中展开 tab。为对齐 Git 而接受的 no-op：Libra 从不展开提交消息中的 tab（逐字打印），故该标志已是默认行为。（Git 的反向标志 `--expand-tabs[=<n>]` 未实现。）
+
+```bash
+libra log --no-expand-tabs
+```
+
 ### `--follow <FILE>`
 
 Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。

@@ -266,6 +266,13 @@ pub struct LogArgs {
     #[clap(long = "date-order", conflicts_with = "author_date_order")]
     pub date_order: bool,
 
+    /// Do not expand tabs in the log message. Accepted for Git parity and is a
+    /// no-op: Libra never expands tabs in commit messages (it prints them
+    /// verbatim), so this already matches the default. (Git's opposite
+    /// `--expand-tabs[=<n>]` is not implemented.)
+    #[clap(long = "no-expand-tabs")]
+    pub no_expand_tabs: bool,
+
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
     pub all: bool,

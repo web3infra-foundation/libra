@@ -2570,3 +2570,27 @@ fn test_log_date_order_selects_default_and_conflicts() {
         "--date-order and --author-date-order conflict"
     );
 }
+
+#[test]
+fn log_no_expand_tabs_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("t.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "t.txt"], p), "stage t.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "msg\twith\ttab", "--no-verify"], p),
+        "commit with tabs",
+    );
+
+    let plain = run_libra_command(&["log"], p);
+    assert_cli_success(&plain, "log");
+    // `--no-expand-tabs` is accepted and a no-op: Libra never expands tabs in
+    // commit messages, so the output is identical.
+    let out = run_libra_command(&["log", "--no-expand-tabs"], p);
+    assert_cli_success(&out, "log --no-expand-tabs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "log --no-expand-tabs matches plain log (no-op)"
+    );
+}
