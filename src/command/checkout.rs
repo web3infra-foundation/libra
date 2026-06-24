@@ -90,6 +90,13 @@ pub struct CheckoutArgs {
     #[clap(long = "no-progress")]
     no_progress: bool,
 
+    /// Do not check out paths in overlay mode (the default): paths missing from
+    /// the source are still removed. Accepted for Git parity and is a no-op:
+    /// Libra's checkout is never in overlay mode, so this already matches the
+    /// default. (Git's opposite `--overlay` is not implemented.)
+    #[clap(long = "no-overlay")]
+    no_overlay: bool,
+
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,
