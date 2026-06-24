@@ -13,12 +13,20 @@ use crate::internal::config::ConfigKv;
 /// Failure to launch the configured editor or read back its result.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EditorError {
-    #[error("failed to write the commit edit buffer {path}: {detail}")]
+    #[error("failed to write the editor buffer {path}: {detail}")]
     WriteBuffer { path: String, detail: String },
-    #[error("failed to read the edited commit message: {detail}")]
+    #[error("failed to read the edited buffer: {detail}")]
     ReadBuffer { detail: String },
-    #[error("editor '{editor}' exited abnormally; commit aborted")]
+    #[error("editor '{editor}' exited abnormally; edit aborted")]
     Aborted { editor: String },
+}
+
+/// Wrap `value` in single quotes for safe inclusion in a `sh -c` command line,
+/// escaping any embedded single quotes (`'` → `'\''`). Used to pass the scratch
+/// file path so a repository/storage path containing shell metacharacters
+/// (`$()`, backticks, quotes, spaces) cannot be expanded or break out.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Resolve an *explicitly configured* editor command, mirroring Git precedence:
@@ -64,7 +72,10 @@ pub(crate) async fn edit_message(
     })?;
     let status = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("{editor} \"{}\"", path.display()))
+        .arg(format!(
+            "{editor} {}",
+            shell_single_quote(&path.display().to_string())
+        ))
         .status();
     match status {
         Ok(code) if code.success() => {
@@ -76,5 +87,27 @@ pub(crate) async fn edit_message(
             editor: editor.to_string(),
         }),
         _ => Ok(initial.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_single_quote;
+
+    #[test]
+    fn shell_single_quote_neutralizes_metacharacters() {
+        // Ordinary paths are simply wrapped.
+        assert_eq!(
+            shell_single_quote("/tmp/x/COMMIT_EDITMSG"),
+            "'/tmp/x/COMMIT_EDITMSG'"
+        );
+        // Command-substitution / backticks / spaces are inert inside single quotes.
+        assert_eq!(
+            shell_single_quote("/tmp/$(touch pwned)/f"),
+            "'/tmp/$(touch pwned)/f'"
+        );
+        // An embedded single quote is escaped via the '\'' idiom, so the quoting
+        // cannot be broken out of.
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
     }
 }

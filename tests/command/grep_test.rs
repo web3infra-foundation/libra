@@ -199,6 +199,7 @@ async fn test_grep_tree_accepts_branch_revisions() {
             delete_safe: None,
             set_upstream_to: None,
             unset_upstream: None,
+            edit_description: None,
             show_current: false,
             rename: Vec::new(),
             copy: Vec::new(),

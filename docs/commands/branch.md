@@ -15,6 +15,7 @@ libra branch -m [<old>] <new>
 libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
 libra branch --unset-upstream [<branch>]
+libra branch --edit-description [<branch>]
 libra branch --show-current
 ```
 
@@ -37,6 +38,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | `-d` | `--delete` | `<name>` | Safe-delete a branch (must be fully merged) |
 | `-u` | `--set-upstream-to` | `<upstream>` | Set upstream tracking for the current branch |
 | | `--unset-upstream` | `[branch]` | Remove upstream tracking for the current branch or the named branch |
+| | `--edit-description` | `[branch]` | Edit the branch's description (`branch.<name>.description`) in the configured editor; an empty/comment-only buffer unsets it. Defaults to the current branch. |
 | | `--show-current` | | Print the current branch name or detached HEAD state |
 | `-m` | `--move` | `<old> <new>` or `<new>` | Rename a branch; with one argument renames the current branch |
 | `-c` | `--copy` | `<old> <new>` or `<new>` | Copy a branch (and its upstream config) to a new name, keeping the source; fails if the destination exists |

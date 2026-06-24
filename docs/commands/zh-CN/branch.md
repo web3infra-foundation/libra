@@ -14,6 +14,7 @@ libra branch -D <name>
 libra branch -m [<old>] <new>
 libra branch (-c | -C) [<old>] <new>
 libra branch -u <upstream>
+libra branch --edit-description [<branch>]
 libra branch --show-current
 ```
 
@@ -35,6 +36,7 @@ libra branch --show-current
 | `-D` | `--delete-force` | `<name>` | 强制删除分支，即使未完全合并 |
 | `-d` | `--delete` | `<name>` | 安全删除分支（必须已完全合并） |
 | `-u` | `--set-upstream-to` | `<upstream>` | 为当前分支设置 upstream tracking |
+| | `--edit-description` | `[branch]` | 在配置的编辑器中编辑分支描述（`branch.<name>.description`）；空/仅注释的缓冲会清除该描述。默认当前分支。 |
 | | `--show-current` | | 打印当前分支名或 detached HEAD 状态 |
 | `-m` | `--move` | `<old> <new>` 或 `<new>` | 重命名分支；一个参数时重命名当前分支 |
 | `-c` | `--copy` | `<old> <new>` 或 `<new>` | 复制分支（连同上游配置）到新名称，保留源分支；目标已存在则失败 |

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。创建、列出、删除、重命名、复制（`-c`/`-C`/`--copy`，连同上游配置，保留源分支）、上游设置/清除、contains/no-contains、points-at、merged/no-merged、`--sort`（`refname`/`version:refname`，可加 `-` 反转）、ignore-case、`--column[=<always|auto|never>]`/`--no-column`（列式列表布局；`--no-column` 撤销先前的 `--column`，last-wins，默认每行一个故单独为 no-op）和 `-v`/`--verbose`（每个分支附带 tip sha 与提交 subject；`-vv` 额外显示上游 tracking 段 `[<upstream>: ahead N, behind M]`）已支持；描述编辑、自定义 `--format`、其余 sort key（如 creatordate）尚未公开。
+- 兼容级别：`partial`。创建、列出、删除、重命名、复制（`-c`/`-C`/`--copy`，连同上游配置，保留源分支）、上游设置/清除、contains/no-contains、points-at、merged/no-merged、`--sort`（`refname`/`version:refname`，可加 `-` 反转）、ignore-case、`--column[=<always|auto|never>]`/`--no-column`（列式列表布局；`--no-column` 撤销先前的 `--column`，last-wins，默认每行一个故单独为 no-op）、`-v`/`--verbose`（每个分支附带 tip sha 与提交 subject；`-vv` 额外显示上游 tracking 段 `[<upstream>: ahead N, behind M]`）和 `--edit-description [<branch>]`（在配置的编辑器中编辑 `branch.<name>.description`，空/仅注释的缓冲会清除该描述；默认当前分支，detached HEAD 无分支参数则报错）已支持；自定义 `--format`、其余 sort key（如 creatordate）尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -56,7 +56,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | ✅ 已实现 | 复制分支 `-c` / `-C` / `--copy` | `copy_branch_impl` 在源分支提交处创建目标并复制上游配置；保留源、不移动 HEAD；`-c` 目标存在则报错，`-C` 覆盖；一参数形式复制当前分支。带集成测试（`branch_copy_duplicates_branch_with_config`）。 |
-| 描述编辑 | `--edit-description` 在当前 `BranchArgs` 中无对应定义。 | 暂未实现。 |
+| ✅ 已实现 | `--edit-description [<branch>]`（描述编辑）。`BranchArgs.edit_description: Option<String>`（`num_args=0..=1`，空=当前分支）；`edit_description_impl` 用 `editor::resolve_editor`+`edit_message` 打开 seeded（当前描述+注释块）缓冲，经 `clean_branch_description`（剥离 `#` 行并 trim）后写入/清除 `branch.<name>.description`。detached HEAD 无参数 → `detached_head_branch_error`；无编辑器且非 TTY → `BranchError::NoEditor`。带单元测试（`clean_branch_description_*`/`edit_description_flag_*`）+ 端到端 fake-editor 测试（`branch_edit_description_sets_then_unsets_via_editor`）。 |
 | 自定义格式与其余 sort key | 自定义 `--format <format>` 仍无对应定义；`--sort` 仅支持 `refname`/`version:refname`，creatordate 等其余 key 未实现。 | 部分实现：`--sort=refname`/`version:refname` 已支持（见上）；`--format` 与其余 sort key 暂未实现。 |
 | ✅ 已实现 | 详细列表 `-v` / `-vv` / `--verbose` | `branch_verbose_suffix` 在 List 输出追加 ` <短sha> <subject>`；`-vv` 经 `branch_upstream_segment` 额外插入上游 tracking `[<upstream>: ahead N, behind M]`（复用 `status::compute_ahead_behind`）。带集成测试（`branch_verbose_shows_sha_and_subject` + `branch_vv_shows_upstream_segment`）。 |
 | 跟踪设置 | `--track` / `--no-track` 已在 `f54123ea` 明确 decline，当前 `BranchArgs` 无对应定义。 | 已声明拒绝；不提供该参数。 |

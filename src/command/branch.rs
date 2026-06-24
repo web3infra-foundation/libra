@@ -16,7 +16,10 @@
 //! - For listing, supports `--contains` / `--no-contains` commit filters
 //!   that BFS-walk the commit graph from each branch tip.
 
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    io::IsTerminal,
+};
 
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
@@ -66,6 +69,7 @@ EXAMPLES:
     libra branch -D topic                 Force-delete a branch
     libra branch -c topic topic-backup    Copy a branch, keeping the original
     libra branch -u origin/main           Set upstream for the current branch
+    libra branch --edit-description       Edit the current branch's description in an editor
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
     libra branch --column                 List branches laid out in columns
@@ -126,6 +130,10 @@ pub enum BranchOutput {
     /// `--unset-upstream` succeeded.
     #[serde(rename = "unset-upstream")]
     UnsetUpstream { branch: String },
+    /// `--edit-description` succeeded. `set` is true when a non-empty
+    /// description was stored, false when the (empty) buffer unset it.
+    #[serde(rename = "edit-description")]
+    EditDescription { branch: String, set: bool },
     /// `--show-current` result. `detached` is true when HEAD is detached;
     /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
@@ -146,6 +154,7 @@ impl BranchOutput {
                 | Self::Copy { .. }
                 | Self::SetUpstream { .. }
                 | Self::UnsetUpstream { .. }
+                | Self::EditDescription { .. }
         )
     }
 }
@@ -207,6 +216,12 @@ pub struct BranchArgs {
     /// Remove the branch's upstream configuration. Defaults to current branch.
     #[clap(long = "unset-upstream", group = "action", value_name = "BRANCH", num_args = 0..=1, default_missing_value = "")]
     pub unset_upstream: Option<String>,
+
+    /// Edit the description of a branch (defaults to the current branch) in an
+    /// editor, storing it as `branch.<name>.description`. Saving an empty
+    /// (comment-only) buffer unsets the description.
+    #[clap(long = "edit-description", group = "action", value_name = "BRANCH", num_args = 0..=1, default_missing_value = "")]
+    pub edit_description: Option<String>,
 
     /// show current branch
     #[clap(long, group = "action")]
@@ -383,6 +398,12 @@ enum BranchError {
     #[error("failed to load commit {commit}: {detail}")]
     CommitLoadFailed { commit: String, detail: String },
 
+    #[error("no editor configured for --edit-description")]
+    NoEditor,
+
+    #[error("failed to edit branch description: {0}")]
+    EditorFailed(String),
+
     #[error("too many arguments")]
     RenameTooManyArgs,
 
@@ -469,6 +490,14 @@ impl From<BranchError> for CliError {
                     .with_stable_code(StableErrorCode::IoWriteFailed)
                     .with_hint("check whether the repository database is writable.")
             }
+            BranchError::NoEditor => CliError::fatal(
+                "no editor configured; set core.editor, $GIT_EDITOR, $VISUAL, or $EDITOR",
+            )
+            .with_stable_code(StableErrorCode::IoReadFailed)
+            .with_hint("configure an editor, e.g. `libra config core.editor vim`"),
+            BranchError::EditorFailed(detail) => CliError::fatal(detail)
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("set core.editor/$GIT_EDITOR to a working editor command"),
             BranchError::StorageQueryFailed(detail) => {
                 CliError::fatal(format!("failed to query branch storage: {detail}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -728,6 +757,86 @@ async fn unset_upstream_impl(branch: &str) -> Result<(), BranchError> {
             .map_err(|e| branch_config_write_error(&key, e))?;
     }
     Ok(())
+}
+
+/// `--edit-description`: open the configured editor seeded with the branch's
+/// current `branch.<name>.description`, then store the cleaned result — or unset
+/// the key when the saved buffer is empty (comment-only). Returns `true` when a
+/// non-empty description was stored, `false` when it was unset.
+async fn edit_description_impl(branch: &str) -> Result<bool, BranchError> {
+    require_existing_local_branch(branch).await?;
+
+    let key = format!("branch.{branch}.description");
+    let current = crate::internal::config::ConfigKv::get(&key)
+        .await
+        .map_err(|e| branch_config_read_error(format!("config '{key}'"), e))?
+        .map(|entry| entry.value)
+        .unwrap_or_default();
+
+    // Seed the editor with the existing description followed by a comment block;
+    // lines starting with '#' are stripped on save (Git convention).
+    let template = format!(
+        "{current}\n\
+         # Please edit the description for the branch:\n\
+         #   {branch}\n\
+         # Lines starting with '#' will be stripped.\n"
+    );
+
+    // An explicitly configured editor runs even without a TTY (so scripted
+    // editors work in tests/automation); `vi` is only assumed on a terminal.
+    let editor_cmd = match crate::command::editor::resolve_editor().await {
+        Some(cmd) => cmd,
+        None if std::io::stdin().is_terminal() => "vi".to_string(),
+        None => return Err(BranchError::NoEditor),
+    };
+
+    let path = crate::utils::util::storage_path().join("BRANCH_DESCRIPTION_EDITMSG");
+    let raw = crate::command::editor::edit_message(&path, &template, &editor_cmd, true)
+        .await
+        .map_err(|e| BranchError::EditorFailed(e.to_string()))?;
+
+    let description = clean_branch_description(&raw);
+    if description.is_empty() {
+        crate::internal::config::ConfigKv::unset_all(&key)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(false)
+    } else {
+        crate::internal::config::ConfigKv::set(&key, &description, false)
+            .await
+            .map_err(|e| branch_config_write_error(&key, e))?;
+        Ok(true)
+    }
+}
+
+/// Clean an edited branch-description buffer with `git stripspace` semantics
+/// (as `git branch --edit-description` does):
+/// - drop lines whose **first character** is the comment char `#` (an indented
+///   `  # heading` is content and is kept);
+/// - trim trailing whitespace from each line but preserve leading indentation;
+/// - collapse runs of blank lines into a single blank and drop leading/trailing
+///   blank lines.
+fn clean_branch_description(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending_blank = false;
+    for line in raw.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            // Remember a blank only once we have content, so leading blanks are
+            // dropped and interior runs collapse to a single blank line.
+            pending_blank = !out.is_empty();
+            continue;
+        }
+        if pending_blank {
+            out.push(String::new());
+            pending_blank = false;
+        }
+        out.push(trimmed.to_string());
+    }
+    out.join("\n")
 }
 
 /// Enumerate every branch stored under each known remote.
@@ -1257,6 +1366,17 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
         };
         unset_upstream_impl(&branch).await?;
         Ok(BranchOutput::UnsetUpstream { branch })
+    } else if let Some(branch) = args.edit_description.as_deref() {
+        let branch = if branch.is_empty() {
+            match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => return Err(detached_head_branch_error()),
+            }
+        } else {
+            branch.to_string()
+        };
+        let set = edit_description_impl(&branch).await?;
+        Ok(BranchOutput::EditDescription { branch, set })
     } else if !args.rename.is_empty() {
         rename_branch_impl(&args.rename).await
     } else if !args.copy.is_empty() {
@@ -1489,6 +1609,13 @@ async fn render_branch_output(
         BranchOutput::UnsetUpstream { branch } => {
             println!("Branch '{branch}' no longer tracks an upstream branch");
         }
+        BranchOutput::EditDescription { branch, set } => {
+            if *set {
+                println!("Updated description for branch '{branch}'");
+            } else {
+                println!("Removed description for branch '{branch}'");
+            }
+        }
         BranchOutput::ShowCurrent {
             name,
             detached,
@@ -1611,6 +1738,7 @@ pub async fn list_branches(
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1828,18 +1956,56 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 mod tests {
     use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
+    use clap::Parser;
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
     use serial_test::serial;
 
     use super::{
-        Branch, BranchError, commit_contains, format_branch_name, load_remote_branches_with_conn,
-        map_head_commit_store_error,
+        Branch, BranchArgs, BranchError, clean_branch_description, commit_contains,
+        format_branch_name, load_remote_branches_with_conn, map_head_commit_store_error,
     };
     use crate::utils::{
         error::{CliError, StableErrorCode},
         test,
     };
+
+    #[test]
+    fn clean_branch_description_uses_stripspace_semantics() {
+        // Lines whose FIRST char is `#` are dropped; surrounding blanks removed.
+        assert_eq!(
+            clean_branch_description("my feature\n# a comment\n"),
+            "my feature"
+        );
+        // A comment-only / blank buffer collapses to empty (which unsets the key).
+        assert_eq!(
+            clean_branch_description("# Please edit\n#   branch\n\n  \n"),
+            ""
+        );
+        // An INDENTED `#` line is content (only a first-char `#` is a comment)
+        // and its leading indentation is preserved; trailing whitespace per line
+        // is trimmed; runs of blank lines collapse to one; leading/trailing
+        // blanks are dropped.
+        assert_eq!(
+            clean_branch_description(
+                "\n\n  keep me   \n  # indented heading\n\n\nlast\t\n# real comment\n\n"
+            ),
+            "  keep me\n  # indented heading\n\nlast"
+        );
+    }
+
+    #[test]
+    fn edit_description_flag_parses_optional_branch() {
+        // Bare flag defaults to "" (the current branch).
+        let args = BranchArgs::try_parse_from(["branch", "--edit-description"]).unwrap();
+        assert_eq!(args.edit_description.as_deref(), Some(""));
+        // An explicit branch name is captured.
+        let args = BranchArgs::try_parse_from(["branch", "--edit-description", "feature"]).unwrap();
+        assert_eq!(args.edit_description.as_deref(), Some("feature"));
+        // Absent when not requested.
+        let args = BranchArgs::try_parse_from(["branch"]).unwrap();
+        assert_eq!(args.edit_description, None);
+    }
 
     struct ColorOverrideReset;
 

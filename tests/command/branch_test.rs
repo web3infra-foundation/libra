@@ -544,6 +544,7 @@ async fn test_branch() {
             delete_safe: None,
             set_upstream_to: None,
             unset_upstream: None,
+            edit_description: None,
             show_current: false,
             rename: vec![],
             copy: vec![],
@@ -590,6 +591,7 @@ async fn test_branch() {
             delete_safe: None,
             set_upstream_to: None,
             unset_upstream: None,
+            edit_description: None,
             show_current: false,
             rename: vec![],
             copy: vec![],
@@ -626,6 +628,7 @@ async fn test_branch() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: true,
         rename: vec![],
         copy: vec![],
@@ -690,6 +693,7 @@ async fn test_create_branch_from_remote() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -755,6 +759,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -976,6 +981,7 @@ async fn test_branch_rename() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1011,6 +1017,7 @@ async fn test_branch_rename() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
         copy: vec![],
@@ -1115,6 +1122,7 @@ async fn test_rename_current_branch() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![feature_new.clone()],
         copy: vec![],
@@ -1194,6 +1202,7 @@ async fn test_rename_to_existing_branch() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1221,6 +1230,7 @@ async fn test_rename_to_existing_branch() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1249,6 +1259,7 @@ async fn test_rename_to_existing_branch() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
         copy: vec![],
@@ -1321,6 +1332,7 @@ async fn test_list_all_branches() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1359,6 +1371,7 @@ async fn test_list_all_branches() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1436,6 +1449,7 @@ async fn test_branch_delete_safe() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1510,6 +1524,7 @@ async fn test_branch_delete_safe() {
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1585,6 +1600,7 @@ async fn test_branch_delete_safe() {
         delete_safe: Some("feature".to_string()),
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -1681,6 +1697,7 @@ async fn test_branch_contains_commit_filter() {
         delete_safe: None,
         set_upstream_to: None,
         unset_upstream: None,
+        edit_description: None,
         show_current: false,
         rename: vec![],
         copy: vec![],
@@ -2288,5 +2305,69 @@ fn branch_no_column_countermands_column() {
             .lines()
             .any(|l| l.contains("aaaaa") && l.contains("bbbbb")),
         "--no-column countermands --column (one per line): {listed}"
+    );
+}
+
+/// End-to-end `branch --edit-description`: an explicitly configured (scripted)
+/// editor sets `branch.<name>.description`, and a comment-only buffer unsets it.
+/// Uses GIT_EDITOR so no TTY is needed (the editor runs regardless of TTY when
+/// explicitly configured).
+#[cfg(unix)]
+#[test]
+fn branch_edit_description_sets_then_unsets_via_editor() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Resolve the current branch name to query its description config key.
+    let cur = run_libra_command(&["branch", "--show-current"], p);
+    assert_cli_success(&cur, "branch --show-current");
+    let branch = String::from_utf8_lossy(&cur.stdout).trim().to_string();
+    assert!(!branch.is_empty(), "expected a current branch name");
+    let key = format!("branch.{branch}.description");
+
+    let write_editor = |name: &str, body: &str| -> String {
+        let path = p.join(name);
+        fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n")).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+
+    // 1) A scripted editor writes a description, which is stored under the key.
+    let set_editor = write_editor("set_editor.sh", "a tidy summary\n# stripped comment\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description"],
+        p,
+        "",
+        &[("GIT_EDITOR", set_editor.as_str())],
+    );
+    assert_cli_success(&out, "branch --edit-description (set)");
+
+    let got = run_libra_command(&["config", "get", &key], p);
+    assert_cli_success(&got, "config get description after set");
+    assert!(
+        String::from_utf8_lossy(&got.stdout).contains("a tidy summary"),
+        "description should be stored: {}",
+        String::from_utf8_lossy(&got.stdout)
+    );
+
+    // 2) A comment-only buffer cleans to empty, which unsets the key.
+    let clear_editor = write_editor("clear_editor.sh", "# only a comment line\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["branch", "--edit-description"],
+        p,
+        "",
+        &[("GIT_EDITOR", clear_editor.as_str())],
+    );
+    assert_cli_success(&out, "branch --edit-description (unset)");
+
+    // The previous value must be gone (whether `config get` now fails or prints
+    // nothing, the old description must not survive).
+    let got = run_libra_command(&["config", "get", &key], p);
+    assert!(
+        !String::from_utf8_lossy(&got.stdout).contains("a tidy summary"),
+        "description should be unset: {}",
+        String::from_utf8_lossy(&got.stdout)
     );
 }
