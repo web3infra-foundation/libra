@@ -1214,3 +1214,23 @@ fn diff_no_ext_diff_flag_is_accepted_noop() {
         "diff --no-ext-diff matches plain diff (no-op)"
     );
 }
+
+#[test]
+fn diff_no_color_moved_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("m.txt"), "a\nb\nc\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "m.txt"], p), "stage m.txt");
+
+    let plain = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&plain, "diff --cached");
+    // `--no-color-moved` is accepted and a no-op: Libra's diff never colors
+    // moved lines, so the output is identical.
+    let out = run_libra_command(&["diff", "--cached", "--no-color-moved"], p);
+    assert_cli_success(&out, "diff --cached --no-color-moved");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "diff --no-color-moved matches plain diff (no-op)"
+    );
+}

@@ -145,6 +145,13 @@ pub struct DiffArgs {
     /// diff engine, so external drivers are never invoked to begin with.
     #[clap(long = "no-ext-diff")]
     pub no_ext_diff: bool,
+
+    /// Do not color moved lines differently from added/removed lines. Accepted
+    /// for Git parity and is a no-op: Libra's diff never performs moved-line
+    /// detection or coloring, so this already matches the default. (Git's
+    /// opposite `--color-moved[=<mode>]` is not implemented.)
+    #[clap(long = "no-color-moved")]
+    pub no_color_moved: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -948,6 +955,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         reverse: false,
         text: false,
         no_ext_diff: false,
+        no_color_moved: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

@@ -44,6 +44,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Reverse | `-R` | `--reverse` | Swap the two sides so additions become deletions and vice-versa (the patch that would undo the change). |
 | Text | `-a` | `--text` | Treat all files as text. Accepted no-op: Libra's diff never detects binary files, so it always shows the content diff (it never prints "Binary files differ"). Distinct from `--binary` (binary-patch format), which is not supported. |
 | No external diff | | `--no-ext-diff` | Disallow external diff drivers. Accepted no-op: Libra has no external diff drivers and always uses its built-in engine. (The external diff tool itself — `--ext-diff` / `diff.external` — is not supported.) |
+| No moved-line color | | `--no-color-moved` | Do not color moved lines differently. Accepted no-op: Libra's diff never detects or colors moved lines. (Git's `--color-moved` is not supported.) |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
