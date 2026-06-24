@@ -1415,6 +1415,7 @@ async fn clone_cloud_publish_into_destination(
         pathspec: vec![util::working_dir_string()],
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        no_progress: false,
     })
     .await
     .map_err(|source| CloneError::CheckoutFailed { source })?;
@@ -3000,6 +3001,7 @@ pub(crate) async fn setup_repository(
                 pathspec: vec![util::working_dir_string()],
                 pathspec_from_file: None,
                 pathspec_file_nul: false,
+                no_progress: false,
             })
             .await
             .map_err(|source| CloneError::CheckoutFailed { source })?;

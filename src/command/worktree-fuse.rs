@@ -538,6 +538,7 @@ async fn add_fuse_worktree(
             staged: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            no_progress: false,
         })
         .await
     {

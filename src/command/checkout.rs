@@ -503,6 +503,7 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
         pathspec: args.pathspec,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        no_progress: false,
     };
     let restore = restore::execute_to_output(restore_args)
         .await
@@ -754,6 +755,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         pathspec: vec![util::working_dir_string()],
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        no_progress: false,
     };
     restore::execute_safe(restore_args, &output.child_output_config()).await
 }

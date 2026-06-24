@@ -802,6 +802,7 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
             staged: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            no_progress: false,
         })
         .await
         {

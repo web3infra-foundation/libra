@@ -963,6 +963,7 @@ async fn apply_fast_forward_merge(
             pathspec: vec![util::working_dir_string()],
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            no_progress: false,
         },
         &output.child_output_config(),
     )

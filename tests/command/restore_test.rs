@@ -3,9 +3,7 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use libra::{
-    internal::{
-        branch::TRACES_BRANCH, db::get_db_conn_instance, head::Head, model::reference,
-    },
+    internal::{branch::TRACES_BRANCH, db::get_db_conn_instance, head::Head, model::reference},
     utils::test::ChangeDirGuard,
 };
 use sea_orm::{ActiveModelTrait, Set};
@@ -383,4 +381,15 @@ async fn test_restore_worktree_refuses_ai_managed_current_branch() {
         content, "modified\n",
         "locked-current-branch guard must not modify the worktree"
     );
+}
+
+#[test]
+fn restore_no_progress_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("r.txt"), "modified\n").unwrap();
+    // `--no-progress` is accepted and a no-op: Libra's restore renders no
+    // progress meter, so the restore proceeds and reverts the file.
+    let out = run_libra_command(&["restore", "--no-progress", "r.txt"], p);
+    assert_cli_success(&out, "restore --no-progress r.txt");
 }

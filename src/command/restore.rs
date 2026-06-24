@@ -170,6 +170,11 @@ pub struct RestoreArgs {
     /// Pathspecs read via --pathspec-from-file are separated by NUL, not newlines.
     #[clap(long = "pathspec-file-nul", requires = "pathspec_from_file")]
     pub pathspec_file_nul: bool,
+    /// Do not show a progress meter. Accepted for Git parity and is a no-op:
+    /// Libra's restore never renders a progress meter, so there is nothing to
+    /// suppress.
+    #[clap(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {

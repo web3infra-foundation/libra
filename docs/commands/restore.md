@@ -30,6 +30,7 @@ LFS-managed files are automatically downloaded from the LFS server when restorin
 | Source | `-s` | `--source <tree-ish>` | Restore from the specified commit or tree-ish instead of the default source. When omitted, the default source depends on the mode: index for worktree restore, HEAD for staged restore. |
 | Staged | `-S` | `--staged` | Restore the index (unstage files). Defaults the source to HEAD if `--source` is not given. |
 | Worktree | `-W` | `--worktree` | Restore the working tree. This is the default when `--staged` is not given. |
+| No progress | | `--no-progress` | Do not show a progress meter. Accepted no-op for Git parity: Libra's restore never renders a progress meter. |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress human-readable output. |
 
@@ -163,7 +164,8 @@ Unlike `git restore` which can operate on the entire worktree with `--worktree`,
 | Overlay mode | Not supported | `--overlay` / `--no-overlay` | N/A |
 | Conflict resolution | Not supported | `--ours` / `--theirs` / `--merge` | `--restore-descendants` |
 | Patch mode | Not supported | `-p` / `--patch` | N/A |
-| Progress | Not supported | `--progress` / `--no-progress` | N/A |
+| No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
+| Progress meter | Not supported | `--progress` | N/A |
 | Target revision | Not supported | N/A | `--to <revision>` |
 | Restore changes into | Not supported | N/A | `--changes-in <revision>` |
 | JSON output | `--json` | Not supported | N/A |

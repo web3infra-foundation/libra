@@ -258,6 +258,7 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
         staged: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        no_progress: false,
     };
     execute_checked_typed(restore_args)
         .await

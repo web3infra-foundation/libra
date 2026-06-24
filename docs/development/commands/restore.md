@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--source` / `--staged` / `--worktree` 和路径 restore 已支持；overlay、冲突解析、patch/progress 变体尚未公开。
+- 兼容级别：`partial`。`--source` / `--staged` / `--worktree`、路径 restore 与 `--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条）已支持；overlay、冲突解析、patch 变体与 `--progress` 进度条尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,7 +45,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/restore.md`。
 - Synopsis：`libra restore [--source <tree-ish>] [--staged] [--worktree] [--pathspec-from-file <FILE> [--pathspec-file-nul]] [<pathspec>...]`。
-- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`。
+- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条；字段 `no_progress` 解析后不被读取）。
 - `--pathspec-from-file <FILE>`：从文件读取 pathspec（每行一个，`-` 读 stdin），与位置 `<pathspec>` 二选一（clap `required_unless_present`，省略位置参数时由该选项满足）；`--pathspec-file-nul` 改用 NUL 分隔（要求同时给出 `--pathspec-from-file`）。空条目被忽略，换行模式下去除行尾 `\r`。在 `run_restore` 顶部解析后填充 `args.pathspec`，对内部 `execute_checked*` 调用方无影响（它们传显式 pathspec）。
 
 
@@ -56,7 +56,7 @@ flowchart TD
 | 兼容差异项 | overlay 模式 | 原始对照：不支持；相关参数/替代：--overlay / --no-overlay；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 冲突解析 | 原始对照：不支持；相关参数/替代：--ours / --theirs / --merge；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | patch 模式 | 原始对照：不支持；相关参数/替代：-p / --patch；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 进度 | 原始对照：不支持；相关参数/替代：--progress / --no-progress；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 部分实现 | 进度 | `--no-progress` 作为接受式 no-op 已公开（Libra 的 restore 从不渲染进度条）；`--progress` 进度条本身仍未实现。 |
 | 兼容差异项 | 目标 revision | 原始对照：不支持；相关参数/替代：不适用；当前说明：--to <revision>。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 恢复指定 revision 的变更 | 原始对照：不支持；相关参数/替代：不适用；当前说明：--changes-in <revision>。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
