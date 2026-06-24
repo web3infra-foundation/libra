@@ -971,6 +971,7 @@ async fn apply_fast_forward_merge(
     // Only restore the working directory *after* the pointers have been updated.
     restore::execute_safe(
         RestoreArgs {
+            overlay: false,
             no_overlay: false,
             ours: false,
             theirs: false,

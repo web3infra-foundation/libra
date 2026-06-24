@@ -20,7 +20,7 @@ For new workflows, use `libra restore` directly. `libra checkout -- <path>` and 
 
 The `<pathspec>` argument is required and accepts one or more file paths or directory paths. The special path `.` restores all files.
 
-When a source commit contains files that do not exist in the current worktree, those files are created. When the current worktree contains files that do not exist in the source, those files are deleted. The output reports both `restored_files` and `deleted_files` separately.
+When a source commit contains files that do not exist in the current worktree, those files are created. In the default (`--no-overlay`) mode, when the current worktree contains tracked files that do not exist in the source, those files are deleted so the target matches the source exactly; with `--overlay` those source-absent tracked paths are left in place instead. The output reports both `restored_files` and `deleted_files` separately.
 
 LFS-managed files are automatically downloaded from the LFS server when restoring from a commit that references LFS pointers.
 
@@ -38,7 +38,8 @@ LFS-managed files are automatically downloaded from the LFS server when restorin
 | Pathspec from file | | `--pathspec-from-file <FILE>` | Read pathspecs from `<FILE>` (one per line; `-` reads stdin). When given, the file contents replace any positional pathspecs (which then need not be supplied). |
 | Pathspec file NUL | | `--pathspec-file-nul` | Pathspecs read via `--pathspec-from-file` are separated by NUL, not newlines (requires `--pathspec-from-file`). |
 | No progress | | `--no-progress` | Do not show a progress meter. Accepted no-op for Git parity: Libra's restore never renders a progress meter. |
-| No overlay | | `--no-overlay` | Do not restore in overlay mode (paths missing from the source are still removed). Accepted no-op for Git parity: Libra's restore is never in overlay mode, matching the Git default. (Git's `--overlay` is not implemented.) |
+| Overlay | | `--overlay` | Restore in overlay mode: only create/update paths present in the source; tracked paths absent from the source are left alone instead of removed. Toggle pair with `--no-overlay` (last one wins). |
+| No overlay | | `--no-overlay` | Do not restore in overlay mode (the default): paths absent from the source are removed so the target matches it exactly. Toggle pair with `--overlay` (last one wins). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress human-readable output. |
 
@@ -98,7 +99,7 @@ A plain `libra restore` over an unmerged path refuses to act and reports `path '
 libra restore --ignore-unmerged --source HEAD .
 ```
 
-> **Not yet supported:** `--merge` / `--conflict=<style>` (re-render conflict markers), `--overlay` (the positive overlay mode), and `-p` / `--patch` are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
+> **Not yet supported:** `--merge` / `--conflict=<style>` (re-render conflict markers) and `-p` / `--patch` are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
 
 ## Common Commands
 
@@ -124,6 +125,9 @@ libra restore --theirs file.txt
 
 # Restore from HEAD, skipping still-conflicted paths
 libra restore --ignore-unmerged --source HEAD .
+
+# Overlay restore: update files from an older commit without deleting newer ones
+libra restore --overlay --source HEAD~3 .
 
 # JSON output for scripting
 libra restore --json --source HEAD .
@@ -200,7 +204,7 @@ Unlike `git restore` which can operate on the entire worktree with `--worktree`,
 | Target index/staging | `-S` / `--staged` | `-S` / `--staged` | N/A (no staging area) |
 | Both targets | `-S -W` | `-S -W` | N/A |
 | Pathspec from file | `--pathspec-from-file <FILE>` / `--pathspec-file-nul` | `--pathspec-from-file` / `--pathspec-file-nul` | N/A |
-| Overlay mode | `--no-overlay` (no-op; never in overlay mode); `--overlay` not supported (deferred) | `--overlay` / `--no-overlay` | N/A |
+| Overlay mode | `--overlay` / `--no-overlay` (last wins; default is no-overlay = remove absent paths) | `--overlay` / `--no-overlay` | N/A |
 | Conflict resolution | `--ours` / `-2`, `--theirs` / `-3` (worktree-only); `--merge` / `--conflict` deferred | `--ours` / `--theirs` / `--merge` | `--restore-descendants` |
 | Skip unmerged | `--ignore-unmerged` | `--ignore-unmerged` | N/A |
 | Patch mode | Not supported | `-p` / `--patch` | N/A |

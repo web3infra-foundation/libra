@@ -1432,6 +1432,7 @@ async fn clone_cloud_publish_into_destination(
         eprintln!("Checking out working copy ...");
     }
     command::restore::execute_checked_typed(RestoreArgs {
+        overlay: false,
         no_overlay: false,
         ours: false,
         theirs: false,
@@ -3026,6 +3027,7 @@ pub(crate) async fn setup_repository(
 
         if checkout_worktree {
             command::restore::execute_checked_typed(RestoreArgs {
+                overlay: false,
                 no_overlay: false,
                 ours: false,
                 theirs: false,

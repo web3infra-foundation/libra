@@ -796,6 +796,7 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         // Populate from HEAD so new worktrees reflect committed state instead
         // of carrying staged-but-uncommitted index content.
         if let Err(e) = restore::execute_checked(RestoreArgs {
+            overlay: false,
             no_overlay: false,
             ours: false,
             theirs: false,

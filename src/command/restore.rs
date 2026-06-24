@@ -231,11 +231,15 @@ pub struct RestoreArgs {
     /// suppress.
     #[clap(long = "no-progress")]
     pub no_progress: bool,
+    /// Restore in overlay mode: only create or update the paths present in the
+    /// source; tracked paths that are absent from the source are left alone
+    /// rather than removed. Toggle pair with `--no-overlay`; the last one wins.
+    #[clap(long = "overlay", overrides_with = "no_overlay")]
+    pub overlay: bool,
     /// Do not restore in overlay mode (the default): paths missing from the
-    /// source are still removed from the target. Accepted for Git parity and is
-    /// a no-op: Libra's restore is never in overlay mode, so this already
-    /// matches the default. (Git's opposite `--overlay` is not implemented.)
-    #[clap(long = "no-overlay")]
+    /// source are removed from the target so it matches the source exactly.
+    /// Toggle pair with `--overlay`; the last one wins.
+    #[clap(long = "no-overlay", overrides_with = "overlay")]
     pub no_overlay: bool,
 }
 
@@ -394,13 +398,18 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
     let mut restored_files = Vec::new();
     let mut deleted_files = Vec::new();
 
+    // Overlay mode (`--overlay`) only creates/updates paths from the source and
+    // never removes tracked paths absent from it; the default (`--no-overlay`)
+    // removes them so the target matches the source exactly.
+    let overlay = args.overlay;
+
     if worktree {
-        let (restored, deleted) = restore_worktree_tracked(&paths, &target_blobs).await?;
+        let (restored, deleted) = restore_worktree_tracked(&paths, &target_blobs, overlay).await?;
         restored_files.extend(restored);
         deleted_files.extend(deleted);
     }
     if staged {
-        let (restored, deleted) = restore_index_tracked(&paths, &target_blobs)?;
+        let (restored, deleted) = restore_index_tracked(&paths, &target_blobs, overlay)?;
         let mut restored_seen: HashSet<String> = restored_files.iter().cloned().collect();
         let mut deleted_seen: HashSet<String> = deleted_files.iter().cloned().collect();
 
@@ -494,8 +503,13 @@ async fn resolve_target_blobs(
 async fn restore_worktree_tracked(
     filter: &[PathBuf],
     target_blobs: &[(PathBuf, ObjectHash)],
+    overlay: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
+    // This set holds source paths that are MISSING from the worktree — they must
+    // be (re)created in BOTH modes. Overlay only suppresses *removal* of paths
+    // present in the worktree but absent from the source (gated below); it still
+    // creates/updates everything the source provides.
     let deleted_files = get_worktree_deleted_files_in_filters(filter, &target_map);
 
     for path in filter {
@@ -511,6 +525,13 @@ async fn restore_worktree_tracked(
     let mut file_paths =
         util::integrate_pathspec(filter).map_err(|_| RestoreError::ReadWorktree)?;
     file_paths.extend(deleted_files);
+    // `integrate_pathspec` inserts a *deleted* directory pathspec verbatim (a
+    // missing path is not `is_dir()`), so a bare directory placeholder can land
+    // in `file_paths`. Restoring its children recreates the directory, after
+    // which hashing the bare entry as a blob would panic. Keep only entries that
+    // name a real source blob or an existing worktree file; the directory's
+    // actual files arrive via the `deleted_files` discovery set above.
+    file_paths.retain(|p| target_map.contains_key(p) || util::workdir_to_absolute(p).is_file());
 
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let mut restored = Vec::new();
@@ -533,7 +554,7 @@ async fn restore_worktree_tracked(
                     restore_to_file_typed(&target_map[path_wd], path_wd).await?;
                     restored.push(path_wd.display().to_string());
                 }
-            } else if index.tracked(path_wd_str, 0) {
+            } else if !overlay && index.tracked(path_wd_str, 0) {
                 fs::remove_file(&path_abs).map_err(|_| RestoreError::WriteWorktree)?;
                 util::clear_empty_dir(&path_abs);
                 deleted.push(path_wd.display().to_string());
@@ -549,11 +570,14 @@ async fn restore_worktree_tracked(
 fn restore_index_tracked(
     filter: &[PathBuf],
     target_blobs: &[(PathBuf, ObjectHash)],
+    overlay: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
 
     let idx_file = path::index();
     let mut index = Index::load(&idx_file).map_err(|_| RestoreError::ReadIndex)?;
+    // Source paths missing from the index — added in BOTH modes. Overlay only
+    // suppresses *removal* of index entries absent from the source (gated below).
     let deleted_files_index =
         get_index_deleted_files_in_filters_typed(&index, filter, &target_map)?;
 
@@ -590,7 +614,7 @@ fn restore_index_tracked(
                 ));
                 restored.push(path.display().to_string());
             }
-        } else {
+        } else if !overlay {
             index.remove(path_str, 0);
             deleted.push(path.display().to_string());
         }
@@ -1040,6 +1064,9 @@ pub async fn restore_worktree(
 
     let mut file_paths = util::integrate_pathspec(filter)?;
     file_paths.extend(deleted_files);
+    // Drop bare deleted-directory placeholders so recreating their children does
+    // not leave a directory entry that would later be hashed as a blob (panic).
+    file_paths.retain(|p| target_blobs.contains_key(p) || util::workdir_to_absolute(p).is_file());
 
     let index = Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
     for path_wd in &file_paths {
@@ -1090,6 +1117,9 @@ async fn restore_worktree_legacy_typed(
     let mut file_paths =
         util::integrate_pathspec(filter).map_err(|_| RestoreError::ReadWorktree)?;
     file_paths.extend(deleted_files);
+    // Drop bare deleted-directory placeholders so recreating their children does
+    // not leave a directory entry that would later be hashed as a blob (panic).
+    file_paths.retain(|p| target_blobs.contains_key(p) || util::workdir_to_absolute(p).is_file());
 
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     for path_wd in &file_paths {

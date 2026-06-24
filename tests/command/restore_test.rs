@@ -395,13 +395,14 @@ fn restore_no_progress_flag_is_accepted_noop() {
 }
 
 #[test]
-fn restore_no_overlay_flag_is_accepted_noop() {
+fn restore_no_overlay_flag_is_accepted() {
     let repo = create_committed_repo_via_cli();
     let p = repo.path();
     std::fs::write(p.join("r.txt"), "modified\n").unwrap();
-    // `--no-overlay` is accepted and a no-op: Libra's restore is never in
-    // overlay mode (it already matches `--no-overlay`, the Git default), so the
-    // restore proceeds normally.
+    // `--no-overlay` selects the default (non-overlay) mode explicitly; restore
+    // proceeds normally. (Its real toggle counterpart `--overlay` — which
+    // preserves source-absent tracked paths — is covered by the overlay tests
+    // below.)
     let out = run_libra_command(&["restore", "--no-overlay", "r.txt"], p);
     assert_cli_success(&out, "restore --no-overlay r.txt");
 }
@@ -631,4 +632,220 @@ fn test_restore_conflict_flags_mutually_exclusive() {
         Some(129),
         "--ignore-unmerged conflicts with --ours",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Overlay mode: `--overlay` only creates/updates source paths and never removes
+// tracked paths absent from the source; the default (`--no-overlay`) removes
+// them. The two form a last-one-wins toggle.
+// ---------------------------------------------------------------------------
+
+/// A repo whose HEAD has `extra.txt` but whose parent commit (`HEAD~1`) does
+/// not, so restoring from `HEAD~1` makes `extra.txt` a path absent from source.
+fn repo_with_extra_over_parent() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    commit_file_cli(repo.path(), "extra.txt", "extra\n", "add extra");
+    repo
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_keeps_files_absent_from_source() {
+    let repo = repo_with_extra_over_parent();
+    let p = repo.path();
+    assert!(p.join("extra.txt").exists());
+    let out = run_libra_command(&["restore", "--overlay", "--source", "HEAD~1", "."], p);
+    assert_cli_success(&out, "restore --overlay");
+    assert!(
+        p.join("extra.txt").exists(),
+        "overlay mode must not remove a file absent from the source",
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_default_removes_files_absent_from_source() {
+    let repo = repo_with_extra_over_parent();
+    let p = repo.path();
+    assert!(p.join("extra.txt").exists());
+    // Default (no-overlay): files absent from the source are removed.
+    let out = run_libra_command(&["restore", "--source", "HEAD~1", "."], p);
+    assert_cli_success(&out, "restore default (no-overlay)");
+    assert!(
+        !p.join("extra.txt").exists(),
+        "default no-overlay must remove a file absent from the source",
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_no_overlay_toggle_last_wins() {
+    // `--no-overlay --overlay` → overlay wins → keep.
+    let repo = repo_with_extra_over_parent();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--no-overlay",
+                "--overlay",
+                "--source",
+                "HEAD~1",
+                ".",
+            ],
+            p,
+        ),
+        "toggle: overlay last",
+    );
+    assert!(
+        p.join("extra.txt").exists(),
+        "last --overlay wins → file kept",
+    );
+
+    // `--overlay --no-overlay` → no-overlay wins → delete.
+    let repo = repo_with_extra_over_parent();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--overlay",
+                "--no-overlay",
+                "--source",
+                "HEAD~1",
+                ".",
+            ],
+            p,
+        ),
+        "toggle: no-overlay last",
+    );
+    assert!(
+        !p.join("extra.txt").exists(),
+        "last --no-overlay wins → file removed",
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_staged_overlay_keeps_index_entry_absent_from_source() {
+    // Index overlay: `--staged --overlay` must not unstage/remove an index entry
+    // that is absent from the source.
+    let repo = repo_with_extra_over_parent();
+    let p = repo.path();
+    let out = run_libra_command(
+        &[
+            "restore",
+            "--staged",
+            "--overlay",
+            "--source",
+            "HEAD~1",
+            ".",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "restore --staged --overlay");
+    // extra.txt is still tracked in the index (its blob is unchanged on disk).
+    let status = run_libra_command(&["status", "--short"], p);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !s.contains("D  extra.txt") && !s.contains("D extra.txt"),
+        "overlay --staged must not stage a deletion of extra.txt; status: {s}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_recreates_source_path_missing_from_worktree() {
+    // Overlay must still CREATE a source path that is missing from the worktree;
+    // it only suppresses removal of paths absent from the source.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::remove_file(p.join("tracked.txt")).expect("delete tracked.txt from worktree");
+    assert!(!p.join("tracked.txt").exists());
+    let out = run_libra_command(&["restore", "--overlay", "tracked.txt"], p);
+    assert_cli_success(&out, "restore --overlay recreate");
+    assert!(
+        p.join("tracked.txt").exists(),
+        "overlay must recreate a source path missing from the worktree",
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_staged_overlay_adds_source_path_missing_from_index() {
+    // Overlay --staged must still ADD a source path that is missing from the
+    // index (it only suppresses removal of index entries absent from source).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    commit_file_cli(p, "extra.txt", "extra\n", "add extra"); // HEAD has extra.txt
+    // Drop extra.txt from the index (keeps the worktree file).
+    assert_cli_success(
+        &run_libra_command(&["rm", "--cached", "extra.txt"], p),
+        "rm --cached extra.txt",
+    );
+    let listed = String::from_utf8_lossy(&run_libra_command(&["ls-files"], p).stdout).to_string();
+    assert!(
+        !listed.contains("extra.txt"),
+        "precondition: extra.txt should be untracked after rm --cached; ls-files: {listed}"
+    );
+    // Overlay staged restore from HEAD must re-add extra.txt to the index.
+    let out = run_libra_command(
+        &[
+            "restore",
+            "--staged",
+            "--overlay",
+            "--source",
+            "HEAD",
+            "extra.txt",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "restore --staged --overlay add");
+    let listed = String::from_utf8_lossy(&run_libra_command(&["ls-files"], p).stdout).to_string();
+    assert!(
+        listed.contains("extra.txt"),
+        "overlay --staged must add a source path missing from the index; ls-files: {listed}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_recreates_deleted_tracked_directory() {
+    // A directory pathspec whose tracked files were all deleted from the
+    // worktree must be recreated (the pathspec expands to its source files via
+    // the discovery set, not a bare directory entry). Covers both overlay and
+    // default modes.
+    for overlay in [true, false] {
+        let repo = create_committed_repo_via_cli();
+        let p = repo.path();
+        std::fs::create_dir(p.join("dir")).unwrap();
+        std::fs::write(p.join("dir/a.txt"), "a\n").unwrap();
+        std::fs::write(p.join("dir/b.txt"), "b\n").unwrap();
+        assert_cli_success(&run_libra_command(&["add", "dir"], p), "add dir");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", "add dir", "--no-verify"], p),
+            "commit dir",
+        );
+        // Delete the whole tracked directory from the worktree.
+        std::fs::remove_dir_all(p.join("dir")).unwrap();
+        assert!(!p.join("dir").exists());
+
+        let mut argv = vec!["restore"];
+        if overlay {
+            argv.push("--overlay");
+        }
+        argv.push("dir");
+        let out = run_libra_command(&argv, p);
+        assert_cli_success(&out, "restore deleted directory");
+        assert_eq!(
+            std::fs::read_to_string(p.join("dir/a.txt")).unwrap_or_default(),
+            "a\n",
+            "dir/a.txt must be recreated (overlay={overlay})",
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("dir/b.txt")).unwrap_or_default(),
+            "b\n",
+            "dir/b.txt must be recreated (overlay={overlay})",
+        );
+    }
 }

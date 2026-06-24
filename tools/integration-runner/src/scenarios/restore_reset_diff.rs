@@ -99,6 +99,8 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
     let reset_merge = ctx.command(&["--json", "reset", "--merge", "HEAD"], repo.clone(), false)?;
     assert_json_error_code(&reset_merge, "LBR-CLI-002")?;
 
+    // `--overlay` is now a real mode: it only creates/updates source paths and
+    // never removes tracked paths absent from the source, so it succeeds.
     let overlay_restore = ctx.command(
         &[
             "--json",
@@ -109,12 +111,11 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
             "tracked.txt",
         ],
         repo.clone(),
-        false,
+        true,
     )?;
-    assert_json_error_code(&overlay_restore, "LBR-CLI-002")?;
-    // `--no-overlay` is the Git default for restore, accepted as a no-op
-    // (Libra's restore is never in overlay mode), so it succeeds. The positive
-    // `--overlay` (above) remains rejected.
+    assert_json_ok(&overlay_restore, "restore --source HEAD --overlay tracked.txt")?;
+    // `--no-overlay` selects the Git default (remove paths absent from source);
+    // it is the real toggle counterpart of `--overlay` above. Both succeed.
     let no_overlay_restore = ctx.command(
         &[
             "--json",

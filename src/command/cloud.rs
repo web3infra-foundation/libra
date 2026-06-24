@@ -1532,6 +1532,7 @@ async fn execute_restore(args: RestoreArgs) -> CloudResult<()> {
 
 async fn restore_worktree_to_head(render_human: bool) -> CloudResult<()> {
     let restore_args = RestoreWorktreeArgs {
+        overlay: false,
         no_overlay: false,
         ours: false,
         theirs: false,

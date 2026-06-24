@@ -1168,6 +1168,7 @@ async fn restore_to_commit(
     output: &OutputConfig,
 ) -> Result<(), SwitchError> {
     let restore_args = RestoreArgs {
+        overlay: false,
         no_overlay: false,
         ours: false,
         theirs: false,

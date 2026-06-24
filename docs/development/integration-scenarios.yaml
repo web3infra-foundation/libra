@@ -221,7 +221,7 @@ scenarios:
   - id: cli.restore-reset-diff
     wave: 1
     group: working_tree
-    purpose: "Cover diff (unstaged/staged/old-new/name/status/stat/numstat/output/algorithm), restore --staged/--worktree/--source, reset --soft/--mixed/--hard and path-level reset. Negative checks document currently unsupported pathspec-from-file, overlay, keep, and merge variants."
+    purpose: "Cover diff (unstaged/staged/old-new/name/status/stat/numstat/output/algorithm), restore --staged/--worktree/--source plus the real --overlay/--no-overlay toggle, reset --soft/--mixed/--hard and path-level reset. Negative checks document currently unsupported reset --keep/--merge, restore --pathspec-from-file (missing pathspec file), and diff algorithm variants."
     gh_required: false
     requires_git: false
     key_assertion_categories: [json_envelope, fsck, negative_exit]
