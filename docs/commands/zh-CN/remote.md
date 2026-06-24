@@ -14,7 +14,7 @@ libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
 libra remote set-url [--add | --delete] [--push] [--all] <name> <value>
 libra remote prune [--dry-run] <name>
-libra remote update [<group> | <remote>...]
+libra remote update [-p | --prune] [<group> | <remote>...]
 ```
 
 ## 说明
@@ -105,9 +105,10 @@ libra remote update [<group> | <remote>...]
 
 | 标志 / 参数 | 说明 | 示例 |
 |-----------------|-------------|---------|
+| `-p`, `--prune` | fetch 之后，修剪远端已不存在的远程跟踪分支（对应 Git 的 `remote update -p`） | `libra remote update -p` |
 | `[<group> \| <remote>...]` | 要 fetch 的远程或远程组（默认：全部） | `libra remote update origin upstream` |
 
-> `remote update -p` / `--prune`（fetch 后修剪陈旧跟踪 ref）尚未公开；可单独运行 `libra remote prune <name>`。
+> `-p` / `--prune` 运行与 `libra remote prune <name>` 相同的修剪逻辑，但仅在所有 resolved 远端都 fetch 成功后才执行（两段式：先 fetch 全部，再统一 prune，因此后面的远端 fetch 失败不会遗留前面已删除的 ref），并以 `* [pruned] <name>/<branch>` 形式报告被删除的 ref。
 
 ## 常用命令
 
@@ -161,6 +162,7 @@ Would prune 2 stale remote-tracking branch(es).
 - `urls`: `name`, `push`, `all`, `urls[]`
 - `set-url`: `name`, `role`, `mode`, `urls[]`, `removed`
 - `prune`: `name`, `dry_run`, `stale_branches[]`
+- `update`: `remotes[]`（已 fetch 的远程名）、`pruned[]`（每项 `{remote_ref, branch}`；仅在带 `-p`/`--prune` 时出现，无任何修剪时整体省略）
 
 示例（verbose list）：
 

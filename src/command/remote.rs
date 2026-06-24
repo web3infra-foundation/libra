@@ -86,6 +86,7 @@ EXAMPLES:
                                                    Replace the push URL only
     libra remote prune --dry-run origin            Preview which tracking refs would be removed
     libra remote update                            Fetch all configured remotes (or named ones)
+    libra remote update -p                         Fetch all remotes, then prune stale tracking refs
     libra remote set-branches origin main          Track only the named branch(es)
     libra remote set-head origin main              Point the remote's default branch at main
     libra remote set-head origin --auto            Query the remote and set HEAD automatically
@@ -187,6 +188,10 @@ pub enum RemoteCmds {
         /// Remotes or remote groups to update (default: all remotes).
         #[arg(value_name = "GROUP")]
         groups: Vec<String>,
+        /// After fetching, prune remote-tracking branches that no longer exist
+        /// on the remote (Git's `remote update -p`).
+        #[arg(short = 'p', long = "prune")]
+        prune: bool,
     },
     /// Set the branches tracked by a remote (rewrites `remote.<name>.fetch`).
     ///
@@ -423,6 +428,12 @@ pub enum RemoteOutput {
     },
     Update {
         remotes: Vec<String>,
+        /// Stale remote-tracking branches pruned by `update -p`. Serialized
+        /// only when non-empty so a plain `remote update` (no `-p`) keeps its
+        /// original `{action, remotes}` JSON shape; `#[serde(default)]` keeps
+        /// deserialization of the old shape working.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pruned: Vec<RemotePruneEntry>,
     },
     Show {
         name: String,
@@ -529,7 +540,7 @@ async fn run_remote(
             value,
         } => run_set_url(name, value, push, add, delete, all).await,
         RemoteCmds::Prune { name, dry_run } => run_prune_remote(name, dry_run).await,
-        RemoteCmds::Update { groups } => run_remote_update(groups, output).await,
+        RemoteCmds::Update { groups, prune } => run_remote_update(groups, prune, output).await,
         RemoteCmds::SetBranches {
             add,
             name,
@@ -791,20 +802,42 @@ async fn resolve_update_remotes(groups: Vec<String>) -> Result<Vec<String>, Remo
     Ok(resolved)
 }
 
-/// `remote update [<group>|<remote>...]`: fetch from each resolved remote. An
-/// unknown remote name is an error; a fetch failure aborts the run.
+/// `remote update [-p|--prune] [<group>|<remote>...]`: fetch from each resolved
+/// remote, then optionally prune. An unknown remote name is an error; a fetch
+/// failure aborts the run before any pruning happens.
 async fn run_remote_update(
     groups: Vec<String>,
+    prune: bool,
     output: &OutputConfig,
 ) -> Result<RemoteOutput, RemoteError> {
     let remotes = resolve_update_remotes(groups).await?;
+    // First pass: fetch every resolved remote. A fetch failure aborts the run
+    // HERE, before any tracking ref is deleted, so `-p` can never delete refs
+    // for an early remote and then strand that destructive side effect behind
+    // an error raised while fetching a later remote.
     let mut updated = Vec::new();
-    for name in remotes {
-        ensure_remote_exists(&name).await?;
-        fetch_remote_by_name(&name, output).await?;
-        updated.push(name);
+    for name in &remotes {
+        ensure_remote_exists(name).await?;
+        fetch_remote_by_name(name, output).await?;
+        updated.push(name.clone());
     }
-    Ok(RemoteOutput::Update { remotes: updated })
+    // Second pass: `-p`/`--prune` drops local remote-tracking branches that no
+    // longer exist on the remote (reuses `run_prune_remote`). Reached only once
+    // every fetch above succeeded.
+    let mut pruned = Vec::new();
+    if prune {
+        for name in &updated {
+            if let RemoteOutput::Prune { stale_branches, .. } =
+                run_prune_remote(name.clone(), false).await?
+            {
+                pruned.extend(stale_branches);
+            }
+        }
+    }
+    Ok(RemoteOutput::Update {
+        remotes: updated,
+        pruned,
+    })
 }
 
 /// Fetch from a configured remote by name. Shared by `remote update` and
@@ -1568,7 +1601,7 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             }
             Ok(())
         }
-        RemoteOutput::Update { remotes } => {
+        RemoteOutput::Update { remotes, pruned } => {
             // The per-remote fetch already streamed its own progress; emit a
             // short confirmation line per updated remote (or a notice when
             // there were none to update).
@@ -1578,6 +1611,10 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
                 for name in remotes {
                     writeln!(writer, "Updated {name}").map_err(write_err)?;
                 }
+            }
+            // `-p`/`--prune`: report any stale remote-tracking branches removed.
+            for entry in pruned {
+                writeln!(writer, " * [pruned] {}", entry.branch).map_err(write_err)?;
             }
             Ok(())
         }

@@ -2197,3 +2197,179 @@ fn remote_add_fetch_flag_registers_then_attempts_fetch() {
     let plain = run_libra_command(&["remote", "add", "other", "https://example.com/x.git"], p);
     assert_cli_success(&plain, "`remote add` without -f registers without fetching");
 }
+
+#[test]
+#[serial]
+fn remote_update_prune_flag_is_wired() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // `-p`/`--prune` parse for `remote update`. With no remotes configured the
+    // command still succeeds with the empty notice (nothing to fetch or prune),
+    // proving the flag is accepted and threaded without a clap conflict. The
+    // prune-after-fetch path itself needs a reachable remote and is covered by
+    // the L2 network/fetch tests.
+    for variant in [["remote", "update", "-p"], ["remote", "update", "--prune"]] {
+        let out = run_libra_command(&variant, p);
+        assert_cli_success(&out, "remote update -p/--prune (no remotes)");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("No remotes to update"),
+            "expected the empty notice for {variant:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    // A configured but unreachable remote with `-p`: still fails at the fetch
+    // step (prune runs only after a successful fetch), proving `-p` does not
+    // alter the fetch-failure behavior.
+    let bogus = p.join("nonexistent-remote.git");
+    assert_cli_success(
+        &run_libra_command(&["remote", "add", "origin", bogus.to_str().unwrap()], p),
+        "remote add origin",
+    );
+    let attempt = run_libra_command(&["remote", "update", "-p"], p);
+    assert!(
+        !attempt.status.success(),
+        "remote update -p of an unreachable remote must still fail at the fetch step"
+    );
+}
+
+/// End-to-end regression that `remote update -p` actually prunes: it fetches a
+/// reachable local remote and then deletes the remote-tracking refs whose
+/// upstream branch is gone. Mirrors `test_remote_prune_removes_stale_branches`
+/// but drives the prune through `run_remote_update` (the `Update { prune }`
+/// path) so the test cannot pass unless `update -p` reaches the prune logic and
+/// deletes the stale refs. (The thin text/JSON renderer just iterates the same
+/// pruned entries.)
+#[tokio::test]
+#[serial]
+async fn remote_update_prune_removes_stale_tracking_branches() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+
+    let git = |dir: &Path, args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+                .success(),
+            "git {args:?} should succeed"
+        );
+    };
+
+    git(
+        temp_root.path(),
+        &["init", "--bare", remote_dir.to_str().unwrap()],
+    );
+    git(temp_root.path(), &["init", work_dir.to_str().unwrap()]);
+    git(&work_dir, &["config", "user.name", "Libra Tester"]);
+    git(&work_dir, &["config", "user.email", "tester@example.com"]);
+    fs::write(work_dir.join("README.md"), "hello libra").unwrap();
+    git(&work_dir, &["add", "README.md"]);
+    git(&work_dir, &["commit", "-m", "initial commit"]);
+
+    let current_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("read current branch")
+            .stdout,
+    )
+    .expect("branch name utf8")
+    .trim()
+    .to_string();
+
+    git(
+        &work_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
+    git(
+        &work_dir,
+        &[
+            "push",
+            "origin",
+            &format!("HEAD:refs/heads/{current_branch}"),
+        ],
+    );
+    let branches = ["feature1", "feature2", "feature3"];
+    for b in &branches {
+        git(&work_dir, &["checkout", "-b", b]);
+        git(&work_dir, &["push", "origin", b]);
+    }
+
+    let repo_dir = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+    test::setup_with_new_libra_in(&repo_dir).await;
+    let _guard = test::ChangeDirGuard::new(&repo_dir);
+
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+    // Default fetch refspec so `remote update` knows what to fetch.
+    ConfigKv::set(
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+        false,
+    )
+    .await
+    .unwrap();
+
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    for b in &branches {
+        assert!(
+            Branch::find_branch_result(&format!("refs/remotes/origin/{b}"), Some("origin"))
+                .await
+                .expect("query tracking branch")
+                .is_some(),
+            "remote-tracking branch origin/{b} should exist after fetch"
+        );
+    }
+
+    // Delete two branches on the remote so their tracking refs become stale.
+    for b in ["feature1", "feature3"] {
+        git(
+            &remote_dir,
+            &["update-ref", "-d", &format!("refs/heads/{b}")],
+        );
+    }
+
+    // `remote update -p`: fetch then prune. Drives the full Update { prune }
+    // path, not the standalone `prune` subcommand.
+    remote::execute(RemoteCmds::Update {
+        groups: vec![],
+        prune: true,
+    })
+    .await;
+
+    for b in ["feature1", "feature3"] {
+        assert!(
+            Branch::find_branch_result(&format!("refs/remotes/origin/{b}"), Some("origin"))
+                .await
+                .expect("query tracking branch")
+                .is_none(),
+            "stale tracking branch origin/{b} should be pruned by `update -p`"
+        );
+    }
+    assert!(
+        Branch::find_branch_result("refs/remotes/origin/feature2", Some("origin"))
+            .await
+            .expect("query tracking branch")
+            .is_some(),
+        "non-stale tracking branch origin/feature2 must survive `update -p`"
+    );
+}

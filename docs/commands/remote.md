@@ -14,7 +14,7 @@ libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
 libra remote set-url [--add | --delete] [--push] [--all] <name> <value>
 libra remote prune [--dry-run] <name>
-libra remote update [<group> | <remote>...]
+libra remote update [-p | --prune] [<group> | <remote>...]
 ```
 
 ## Description
@@ -128,10 +128,13 @@ config entry that expands to that group's member remotes.
 
 | Flag / Argument | Description | Example |
 |-----------------|-------------|---------|
+| `-p`, `--prune` | After fetching, prune remote-tracking branches that no longer exist on the remote (Git's `remote update -p`) | `libra remote update -p` |
 | `[<group> \| <remote>...]` | Remotes or remote groups to fetch (default: all) | `libra remote update origin upstream` |
 
-> `remote update -p` / `--prune` (pruning stale tracking refs after the fetch)
-> is not yet exposed; run `libra remote prune <name>` separately.
+> `-p` / `--prune` runs the same prune logic as `libra remote prune <name>`, but
+> only after every resolved remote has fetched successfully (a two-pass
+> fetch-all-then-prune, so a later fetch failure never strands an earlier
+> prune), reporting any removed refs as `* [pruned] <name>/<branch>`.
 
 ### Subcommand: `set-branches`
 
@@ -159,9 +162,9 @@ Set or delete a remote's default branch pointer (`refs/remotes/<name>/HEAD`).
 > Both `set-head <branch>` and `--auto` require the resolved branch's tracking
 > ref `refs/remotes/<name>/<branch>` to already exist (fetch it first); `--auto`
 > additionally contacts the remote to discover its default branch. `remote
-> update [<group>|<remote>...]` fetches all configured remotes (or the named
-> ones, expanding any `remotes.<group>` config); its `-p`/`--prune` flag is not
-> yet exposed (see `COMPATIBILITY.md`).
+> update [-p|--prune] [<group>|<remote>...]` fetches all configured remotes (or
+> the named ones, expanding any `remotes.<group>` config); `-p`/`--prune` then
+> prunes stale remote-tracking branches after every fetch succeeds.
 
 ## Common Commands
 
@@ -243,6 +246,7 @@ Would prune 2 stale remote-tracking branch(es).
 - `urls`: `name`, `push`, `all`, `urls[]`
 - `set-url`: `name`, `role`, `mode`, `urls[]`, `removed`
 - `prune`: `name`, `dry_run`, `stale_branches[]`
+- `update`: `remotes[]` (names fetched), `pruned[]` (each `{remote_ref, branch}`; present only with `-p`/`--prune` and omitted entirely when nothing was pruned)
 - `show`: `name`, `fetch_urls[]`, `push_urls[]`, `head_branch`, `remote_branches[]` (each `{branch, status, local_oid, remote_oid}`; `status` is `tracked`/`new`/`stale` online or `cached` with `--no-query`), `pull_config[]`, `push_config[]`, `queried` (`true` when the remote was contacted, `false` with `--no-query`)
 - `set-branches`: `name`, `added`, `fetch_refspecs[]`
 - `set-head`: `name`, `mode` (`set`/`delete`), `target`
