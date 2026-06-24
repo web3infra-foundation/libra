@@ -190,6 +190,17 @@ untouched, even with `-a`, which is auto-staged only for the preview). Inert und
 libra commit --porcelain
 ```
 
+### `--no-status`
+
+Do not include the status in the commit-message editor template. Accepted no-op
+for Git parity: Libra's editor template never includes a status section, so it
+already matches `--no-status`. (Git's default `--status` template-status section
+is not implemented.)
+
+```bash
+libra commit --no-status -m "message"
+```
+
 ### `--fixup <COMMIT>`
 
 Create a fixup commit whose message is `fixup! <target subject>`.

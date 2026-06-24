@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、hooks、结构化输出和兼容拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）也已支持，同时对 `--status`、`-t/--template`、`commit.cleanup`/`commit.verbose` 配置等未完成行为明确说明。
+`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、hooks、结构化输出和兼容拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）、`--no-status`（接受式 no-op：Libra 的编辑器模板从不含 status 段）也已支持，同时对 `--status`（模板含状态段）、`-t/--template`、`commit.cleanup`/`commit.verbose` 配置等未完成行为明确说明。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain` 已补齐，`--status`/`-t/--template`/`commit.cleanup`/`commit.verbose` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--no-status`（接受式 no-op）已补齐，`--status`（模板含状态段）/`-t/--template`/`commit.cleanup`/`commit.verbose` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
 - `--amend` 作者归属与 Git 对齐：默认**保留**被修订提交的原作者（name/email/authored date），只有显式 `--reset-author` 或 `--author <AUTHOR>` 才会改写为当前身份；committer 始终取当前身份。此前 `--amend` 会静默把作者改成当前身份、使 `--reset-author` 沦为空操作，已修正（见 `src/command/commit.rs` amend 分支）。
 
 
@@ -59,7 +59,8 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, and `--reset-author` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | ✅ 已实现 | `--porcelain` 机器输出 | 输出 would-be-committed 状态的 porcelain v1（复用 `status::output_porcelain` + 折叠 untracked 目录），替代人类摘要；与 Git 一致 **隐含 `--dry-run`**（不创建提交）；`-a` 仅为预览自动暂存，dry-run 后通过 index 快照还原（不改动 index），`--json` 模式下惰性。带集成测试（`test_commit_porcelain_outputs_status_format`、`test_commit_all_porcelain_shows_autostaged_as_staged`）。 |
-| 功能缺口 | `--status`/`--no-status` 在模板中包含状态、`-t/--template` 初始模板、`commit.cleanup`/`commit.verbose` 配置默认 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 部分实现 | `--no-status` / `--status` | `--no-status` 作为接受式 no-op 已公开（Libra 的编辑器模板从不包含 status 段，故已是默认行为；字段 `no_status` 解析后不被读取）；Git 默认的 `--status`（在模板中包含状态段）仍未实现。 |
+| 功能缺口 | `-t/--template` 初始模板、`commit.cleanup`/`commit.verbose` 配置默认 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

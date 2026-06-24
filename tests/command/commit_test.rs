@@ -1526,3 +1526,31 @@ fn test_commit_all_porcelain_shows_autostaged_as_staged() {
         "the modification must remain unstaged after the preview: {status_out:?}"
     );
 }
+
+#[test]
+fn commit_no_status_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("ns.txt"), "x\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "ns.txt"], repo.path())
+            .status
+            .success()
+    );
+    // `--no-status` is accepted and a no-op: Libra's commit editor template
+    // never includes a status section, so the commit proceeds normally.
+    let output = run_libra_command(
+        &[
+            "commit",
+            "--no-status",
+            "-m",
+            "with no-status",
+            "--no-verify",
+        ],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "commit --no-status succeeds: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

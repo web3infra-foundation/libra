@@ -167,6 +167,13 @@ pub struct CommitArgs {
     /// instead of the human commit summary (mirrors `git commit --porcelain`).
     #[arg(long)]
     pub porcelain: bool,
+
+    /// Do not include the status in the commit-message editor template. Accepted
+    /// for Git parity and is a no-op: Libra's editor template never includes a
+    /// status section, so it already matches `--no-status`. (Git's default
+    /// `--status` template-status section is not implemented.)
+    #[arg(long = "no-status")]
+    pub no_status: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]

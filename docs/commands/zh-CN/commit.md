@@ -110,6 +110,14 @@ libra commit --no-verify -m "WIP: work in progress"
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
+### `--no-status`
+
+不在提交消息编辑器模板中包含状态。为对齐 Git 而接受的 no-op：Libra 的编辑器模板从不包含 status 段，故已是默认行为。（Git 默认的 `--status`（在模板中包含状态段）未实现。）
+
+```bash
+libra commit --no-status -m "message"
+```
+
 ## 常用命令
 
 ```bash

@@ -36,7 +36,7 @@
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |
 | [`code`](code.md) | `intentionally-different` | Libra AI extension, not a Git command |
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |
-| [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer, `-e/--edit` + `-v/--verbose` (editor), and `--porcelain` (status v1) supported; `--status`/`-t/--template` not exposed |
+| [`commit`](commit.md) | `partial` | common commit flags plus cleanup/fixup/squash/trailer, `-e/--edit` + `-v/--verbose` (editor), `--porcelain` (status v1), and `--no-status` (no-op) supported; `--status`/`-t/--template` not exposed |
 | [`config`](config.md) | `partial` | vault-backed local/global config; system scope, editor round-trip, typed conversion, NUL output and section operations incomplete |
 | [`describe`](describe.md) | `partial` | basic describe, `--tags`, `--always`, `--abbrev`, `--exact-match`, `--long`, `--dirty[=<mark>]`, `--first-parent`, `--match`, `--exclude`, `--candidates` (0 ⇒ exact-match), and `--all` (any ref, prefixed) supported; `--contains` not exposed |
 | [`diff`](diff.md) | `partial` | staged/old-new/pathspec/name/stat/shortstat/summary output + `--exit-code`/`-s`/`--no-patch`/`-z`/`--check`/`-R`/`-a`(`--text`, no-op)/`--no-ext-diff`(no-op)/`--no-color-moved`(no-op)/`--no-renames`/`--no-relative`/`--no-indent-heuristic`(no-ops) supported; positional revspec, word diff, `--color-moved`, `--renames`, `--relative`, `--indent-heuristic`, `--binary` patch, whitespace-ignoring(`-w`)/ext-diff drivers incomplete |
