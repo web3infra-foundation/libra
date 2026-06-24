@@ -683,6 +683,54 @@ async fn get_commit_blobs(
     Ok(tree.get_plain_items())
 }
 
+/// Render a Git-style `--stat` block for the changes between two commits'
+/// trees, reusing the same diff engine and `--stat` formatter as `libra diff
+/// --stat`. Used by `libra merge --stat` to show what a merge changed. Returns
+/// an empty string when the two trees are identical.
+pub(crate) async fn diff_stat_between_commits(
+    old_commit: &ObjectHash,
+    new_commit: &ObjectHash,
+) -> Result<String, DiffError> {
+    let old_blobs = get_commit_blobs(old_commit).await?;
+    let new_blobs = get_commit_blobs(new_commit).await?;
+
+    // Capture the first blob-read failure from the (infallible-signature) diff
+    // closure and surface it after, mirroring `run_diff`.
+    let load_error: RefCell<Option<DiffError>> = RefCell::new(None);
+    let diff_output =
+        Diff::diff(
+            old_blobs,
+            new_blobs,
+            Vec::new(),
+            |_path, hash| match load_repo_blob_content(hash) {
+                Ok(data) => data,
+                Err(err) => {
+                    if load_error.borrow().is_none() {
+                        *load_error.borrow_mut() = Some(err);
+                    }
+                    Vec::new()
+                }
+            },
+        );
+    if let Some(err) = load_error.borrow_mut().take() {
+        return Err(err);
+    }
+
+    let files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+    let total_insertions = files.iter().map(|file| file.insertions).sum();
+    let total_deletions = files.iter().map(|file| file.deletions).sum();
+    let files_changed = files.len();
+    let output = DiffOutput {
+        old_ref: old_commit.to_string(),
+        new_ref: new_commit.to_string(),
+        files,
+        total_insertions,
+        total_deletions,
+        files_changed,
+    };
+    Ok(format_diff_stat_output(&output))
+}
+
 fn load_repo_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, DiffError> {
     let blob = load_object::<Blob>(hash).map_err(|e| DiffError::ObjectLoad {
         kind: "blob",

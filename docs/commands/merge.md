@@ -5,7 +5,7 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -31,7 +31,8 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `--squash` | Produce the merged index/working tree but create no commit and do not move HEAD; finish with a plain `libra commit`. |
 | `--no-commit` | Perform the merge and stage the result but stop before committing; finish with `libra merge --continue`. |
 | `--no-edit` | Accept the auto-generated merge message without launching an editor. Libra never opens an editor for merge, so this is a no-op accepted for Git parity. |
-| `-n`, `--no-stat` | Do not show a diffstat at the end of the merge. No-op accepted for Git parity: Libra's merge never prints a diffstat. (Git's default `--stat` diffstat is not implemented.) |
+| `--stat` | Show a diffstat of the merge result (the changes between the pre-merge HEAD and the new commit) after the merge completes. Git shows this by default; Libra defaults to no diffstat, so `--stat` opts in. Last-one-wins toggle with `--no-stat`/`-n`. Human output only. |
+| `-n`, `--no-stat` | Do not show a diffstat at the end of the merge (Libra's default). Last-one-wins toggle with `--stat`. |
 | `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |
 | `--no-verify-signatures` | Do not verify the GPG signature of the merged commits. No-op accepted for Git parity: Libra's merge never verifies commit signatures. (Git's opposite `--verify-signatures` is not implemented.) |
 | `--no-rerere-autoupdate` | Do not update the rerere index after the merge. No-op accepted for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
@@ -133,7 +134,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | No-commit | `--no-commit` | `--no-commit` | N/A |
 | Commit message | `-m <msg>` | `-m <msg>` | N/A |
 | No editor | `--no-edit` (no-op; never edits) | `--no-edit` | N/A |
-| No diffstat | `-n` / `--no-stat` (no-op; never prints one) | `-n` / `--no-stat` | N/A |
+| Post-merge diffstat | `--stat` (prints it); `-n` / `--no-stat` (default: omit) | `--stat` (default) / `-n` / `--no-stat` | N/A |
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
 | No signature verification | `--no-verify-signatures` (no-op; never verifies) | `--no-verify-signatures` | N/A |
 | No rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere) | `--no-rerere-autoupdate` | N/A |

@@ -1138,3 +1138,177 @@ fn test_merge_no_rerere_autoupdate_is_accepted_noop() {
         "merge --no-rerere-autoupdate created a merge commit"
     );
 }
+
+#[test]
+fn test_merge_stat_prints_diffstat_for_three_way() {
+    // `--stat` prints a diffstat of what the merge brought in. Three-way setup:
+    // feature.txt on `feature`, main.txt on `main`, so merging `feature` adds
+    // feature.txt relative to the pre-merge main tip.
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "checkout feature",
+    );
+    commit_file(p, "feature.txt", "feature line\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    commit_file(p, "main.txt", "main line\n", "main change");
+
+    let out = run_libra_command(&["merge", "--stat", "feature"], p);
+    assert_cli_success(&out, "merge --stat feature");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("feature.txt"),
+        "diffstat must name the merged-in file: {stdout}"
+    );
+    assert!(
+        stdout.contains(" | "),
+        "diffstat must have a per-file bar line: {stdout}"
+    );
+    assert!(
+        stdout.contains("file changed") || stdout.contains("files changed"),
+        "diffstat must have a summary line: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_stat_prints_diffstat_for_fast_forward() {
+    // Fast-forward: `main` is strictly behind `feature`, so merging fast-forwards
+    // and `--stat` reports the files feature added.
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "checkout feature",
+    );
+    commit_file(p, "ff.txt", "ff line\n", "ff change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+
+    let out = run_libra_command(&["merge", "--stat", "feature"], p);
+    assert_cli_success(&out, "merge --stat feature (ff)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Fast-forward"),
+        "expected a fast-forward: {stdout}"
+    );
+    assert!(
+        stdout.contains("ff.txt") && stdout.contains(" | "),
+        "fast-forward --stat must print the diffstat: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_stat_no_stat_toggle_last_wins() {
+    // `--stat`/`--no-stat` is a last-one-wins toggle.
+    let make = || -> tempfile::TempDir {
+        let repo = create_committed_repo_via_cli();
+        let p = repo.path();
+        assert_cli_success(
+            &run_libra_command(&["branch", "feature"], p),
+            "branch feature",
+        );
+        assert_cli_success(
+            &run_libra_command(&["checkout", "feature"], p),
+            "checkout feature",
+        );
+        commit_file(p, "feature.txt", "feature line\n", "feature change");
+        assert_cli_success(
+            &run_libra_command(&["checkout", "main"], p),
+            "checkout main",
+        );
+        commit_file(p, "main.txt", "main line\n", "main change");
+        repo
+    };
+
+    // `--no-stat --stat` → stat wins → diffstat printed.
+    let repo = make();
+    let out = run_libra_command(&["merge", "--no-stat", "--stat", "feature"], repo.path());
+    assert_cli_success(&out, "merge --no-stat --stat");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("file changed")
+            || String::from_utf8_lossy(&out.stdout).contains("files changed"),
+        "last --stat wins → diffstat printed"
+    );
+
+    // `--stat --no-stat` → no-stat wins → no diffstat.
+    let repo = make();
+    let out = run_libra_command(&["merge", "--stat", "--no-stat", "feature"], repo.path());
+    assert_cli_success(&out, "merge --stat --no-stat");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(" | ") && !stdout.contains("file changed"),
+        "last --no-stat wins → no diffstat: {stdout}"
+    );
+}
+
+#[test]
+fn test_merge_stat_suppressed_in_json_machine_and_quiet_modes() {
+    // `--stat` must never corrupt structured (`--json`/`--machine`) output or
+    // break `--quiet` silence: the diffstat is human-only.
+    let setup = || -> tempfile::TempDir {
+        let repo = create_committed_repo_via_cli();
+        let p = repo.path();
+        assert_cli_success(
+            &run_libra_command(&["branch", "feature"], p),
+            "branch feature",
+        );
+        assert_cli_success(
+            &run_libra_command(&["checkout", "feature"], p),
+            "checkout feature",
+        );
+        commit_file(p, "feature.txt", "feature line\n", "feature change");
+        assert_cli_success(
+            &run_libra_command(&["checkout", "main"], p),
+            "checkout main",
+        );
+        commit_file(p, "main.txt", "main line\n", "main change");
+        repo
+    };
+    let no_stat_text =
+        |s: &str| !s.contains(" | ") && !s.contains("file changed") && !s.contains("files changed");
+
+    // `--json --stat`: stdout is a single parseable JSON envelope, no diffstat text.
+    let repo = setup();
+    let out = run_libra_command(&["--json", "merge", "--stat", "feature"], repo.path());
+    assert_cli_success(&out, "--json merge --stat");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("--json stdout must be a single JSON record");
+    assert_eq!(json["command"], "merge");
+    assert!(
+        no_stat_text(&stdout),
+        "no diffstat text in JSON stdout: {stdout}"
+    );
+
+    // `--machine --stat`: NDJSON stays clean (machine implies json + quiet).
+    let repo = setup();
+    let out = run_libra_command(&["--machine", "merge", "--stat", "feature"], repo.path());
+    assert_cli_success(&out, "--machine merge --stat");
+    assert!(
+        no_stat_text(&String::from_utf8_lossy(&out.stdout)),
+        "no diffstat text in machine stdout"
+    );
+
+    // `--quiet --stat`: stdout stays empty.
+    let repo = setup();
+    let out = run_libra_command(&["--quiet", "merge", "--stat", "feature"], repo.path());
+    assert_cli_success(&out, "--quiet merge --stat");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "quiet must suppress the diffstat"
+    );
+}

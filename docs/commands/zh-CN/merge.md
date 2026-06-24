@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -31,7 +31,8 @@ Libra 仍未实现 octopus merge、自定义策略、策略选项、交互式消
 | `--squash` | 生成合并后的索引/工作树但不创建提交、不移动 HEAD；随后用普通 `libra commit` 收尾。 |
 | `--no-commit` | 执行合并并暂存结果但停在提交之前；随后用 `libra merge --continue` 收尾。 |
 | `--no-edit` | 接受自动生成的合并消息而不启动编辑器。Libra 从不为 merge 打开编辑器，故此为对齐 Git 而接受的 no-op。 |
-| `-n`, `--no-stat` | 合并结束时不显示 diffstat。为对齐 Git 而接受的 no-op：Libra 的 merge 从不打印 diffstat。（Git 默认的 `--stat` diffstat 未实现。） |
+| `--stat` | 合并完成后显示 diffstat（合并前 HEAD 与新提交之间的变更）。Git 默认显示；Libra 默认不显示，故用 `--stat` 主动开启。与 `--no-stat`/`-n` 构成 last-wins 切换。仅人类输出。 |
+| `-n`, `--no-stat` | 合并结束时不显示 diffstat（Libra 默认）。与 `--stat` 构成 last-wins 切换。 |
 | `--no-progress` | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 merge 从不渲染进度条。 |
 | `--no-verify-signatures` | 不验证被合并提交的 GPG 签名。为对齐 Git 而接受的 no-op：Libra 的 merge 从不验证提交签名。（Git 的反向 `--verify-signatures` 未实现。） |
 | `--no-rerere-autoupdate` | 合并后不更新 rerere 索引。为对齐 Git 而接受的 no-op：Libra 无 rerere。（Git 的 `--rerere-autoupdate` 未公开。） |
@@ -133,7 +134,7 @@ Merge aborted.
 | 不提交 | `--no-commit` | `--no-commit` | N/A |
 | 提交消息 | `-m <msg>` | `-m <msg>` | N/A |
 | 不编辑 | `--no-edit`（no-op；从不编辑） | `--no-edit` | N/A |
-| 不显示 diffstat | `-n` / `--no-stat`（no-op；从不打印） | `-n` / `--no-stat` | N/A |
+| 合并后 diffstat | `--stat`（打印）；`-n` / `--no-stat`（默认：不打印） | `--stat`（默认） / `-n` / `--no-stat` | N/A |
 | 不显示进度条 | `--no-progress`（no-op；从不渲染） | `--no-progress` | N/A |
 | 不验证签名 | `--no-verify-signatures`（no-op；从不验证） | `--no-verify-signatures` | N/A |
 | 不更新 rerere | `--no-rerere-autoupdate`（no-op；无 rerere） | `--no-rerere-autoupdate` | N/A |

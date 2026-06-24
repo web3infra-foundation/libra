@@ -102,10 +102,16 @@ pub struct MergeArgs {
     #[arg(long = "no-edit")]
     pub no_edit: bool,
 
-    /// Do not show a diffstat at the end of the merge. Accepted for Git parity
-    /// and is a no-op: Libra's merge never prints a diffstat. (Git enables the
-    /// diffstat by default via `--stat`, which Libra does not implement.)
-    #[arg(short = 'n', long = "no-stat")]
+    /// Show a diffstat of the merge result at the end (what the merge changed,
+    /// pre-merge HEAD vs the new commit). Git shows this by default; Libra
+    /// defaults to no diffstat, so `--stat` opts in. Toggle pair with
+    /// `--no-stat`/`-n`; the last one wins.
+    #[arg(long = "stat", overrides_with = "no_stat")]
+    pub stat: bool,
+
+    /// Do not show a diffstat at the end of the merge (Libra's default).
+    /// Accepted for Git parity. Toggle pair with `--stat`; the last one wins.
+    #[arg(short = 'n', long = "no-stat", overrides_with = "stat")]
     pub no_stat: bool,
 
     /// Do not show a progress meter. Accepted for Git parity and is a no-op:
@@ -364,8 +370,35 @@ pub async fn execute(args: MergeArgs) {
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
     // Refuse to start a merge while a cherry-pick sequence is in progress.
     crate::command::cherry_pick::ensure_no_cherry_pick_in_progress().await?;
+    // `args` is moved into `run_merge`; capture the diffstat opt-in first.
+    let show_stat = args.stat;
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
-    render_merge_output(&result, output)
+    render_merge_output(&result, output)?;
+    maybe_print_merge_stat(show_stat, &result, output).await;
+    Ok(())
+}
+
+/// `--stat`: print a Git-style diffstat of what the merge changed (pre-merge
+/// HEAD vs the new commit). Human output only — `--json` already exposes
+/// `files_changed`. Skipped when there is no completed new commit (up-to-date,
+/// aborted, conflicted, or squash/no-commit that did not move HEAD). A failure
+/// to compute the stat is non-fatal: the merge already succeeded.
+async fn maybe_print_merge_stat(show_stat: bool, result: &MergeOutput, output: &OutputConfig) {
+    if !show_stat || output.is_json() || output.quiet || !result.conflicted_paths.is_empty() {
+        return;
+    }
+    let (Some(old), Some(new)) = (result.old_commit.as_deref(), result.commit.as_deref()) else {
+        return;
+    };
+    let (Ok(old_hash), Ok(new_hash)) = (ObjectHash::from_str(old), ObjectHash::from_str(new))
+    else {
+        return;
+    };
+    match crate::command::diff::diff_stat_between_commits(&old_hash, &new_hash).await {
+        Ok(stat) if !stat.trim().is_empty() => print!("{stat}"),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "failed to compute merge diffstat"),
+    }
 }
 
 async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
