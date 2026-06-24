@@ -18,9 +18,7 @@ use serde::Serialize;
 
 use super::CleanArgs;
 use crate::{
-    internal::{
-        ai::history::HistoryManager, branch::TRACES_BRANCH, db::get_db_conn_instance,
-    },
+    internal::{ai::history::HistoryManager, branch::TRACES_BRANCH, db::get_db_conn_instance},
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
@@ -68,12 +66,8 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
     let repo_path = util::try_get_storage_path(None)
         .map_err(|e| CliError::fatal(format!("failed to locate .libra directory: {e}")))?;
     let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
-    let history = HistoryManager::new_with_ref(
-        storage,
-        repo_path,
-        Arc::new(conn.clone()),
-        TRACES_BRANCH,
-    );
+    let history =
+        HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
     let prune = history
         .prune_checkpoint_commits(&checkpoint_ids)
         .await

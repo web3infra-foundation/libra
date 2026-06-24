@@ -344,7 +344,11 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     let policy = prune_policy(args)?;
     let objects_dir = path::objects();
     ensure_real_object_directory(&objects_dir)?;
-    let storage = ClientStorage::local(objects_dir);
+    let storage = if args.dry_run {
+        ClientStorage::init_local(objects_dir)
+    } else {
+        ClientStorage::init(objects_dir)
+    };
     let (reflogs, reflog_warnings) = expire_reflogs_for_gc(&storage, args.dry_run).await?;
     let mut reachability = collect_reachability(&storage).await?;
     reachability.warnings.extend(reflog_warnings);
@@ -1257,7 +1261,8 @@ fn is_hex_prefix(prefix: &str) -> bool {
 }
 
 /// Load root object IDs and non-reachability prune protections.
-async fn collect_roots_from_database() -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
+pub(crate) async fn collect_roots_from_database()
+-> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
     ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let mut roots = HashSet::new();
@@ -2005,7 +2010,7 @@ fn load_object_for_gc<T>(hash: &ObjectHash) -> Result<T, GitError>
 where
     T: ObjectTrait,
 {
-    let storage = ClientStorage::local(path::objects());
+    let storage = ClientStorage::init(path::objects());
     load_object_from_storage(&storage, hash)
 }
 
@@ -2050,7 +2055,7 @@ async fn prune_unreachable_loose_objects(
             } else {
                 remove_file(&loose.path)?;
                 remove_empty_parent_dir(&loose.path)?;
-                if !storage.local_exist(&loose.hash) {
+                if !storage.exist_local(&loose.hash) {
                     remove_object_index_rows(&loose.hash).await?;
                 }
                 GcAction::Pruned
@@ -2075,7 +2080,7 @@ async fn prune_unreachable_loose_objects(
 }
 
 /// Remove local cloud-backup index rows for an object no longer present locally.
-async fn remove_object_index_rows(hash: &ObjectHash) -> CliResult<()> {
+pub(crate) async fn remove_object_index_rows(hash: &ObjectHash) -> CliResult<()> {
     ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let repo_id = current_repo_id(&db).await?;
@@ -2451,7 +2456,7 @@ mod tests {
     where
         T: ObjectTrait,
     {
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         save_object_to_storage(&storage, object, obj_id)
     }
 
@@ -2667,7 +2672,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("content");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2704,7 +2709,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("content");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2748,7 +2753,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("content");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2771,7 +2776,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let missing = test_hash(12);
         let mut reachability = Reachability {
             loose: Vec::new(),
@@ -2794,7 +2799,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("keep when graph is incomplete");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2836,7 +2841,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("garbage");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2867,7 +2872,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("garbage");
         save_test_object(&blob, &blob.id).unwrap();
@@ -2898,7 +2903,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("indexed garbage");
         ConfigKv::set("libra.repoid", "repo-a", false)
@@ -2970,7 +2975,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("cloud pending");
         save_test_object(&blob, &blob.id).unwrap();
@@ -3003,7 +3008,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("reachable");
         save_test_object(&blob, &blob.id).unwrap();
@@ -3034,7 +3039,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let idx = pack_dir.join("pack-deadbeef.idx");
@@ -3059,7 +3064,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let idx = pack_dir.join("pack-deadbeef.idx");
@@ -3083,7 +3088,7 @@ mod tests {
     /// Covers pack cleanup when the pack directory is missing.
     async fn clean_pack_directory_returns_empty_when_directory_missing() {
         let dir = tempdir().unwrap();
-        let storage = ClientStorage::local(dir.path().join("objects"));
+        let storage = ClientStorage::init(dir.path().join("objects"));
 
         let stats = clean_pack_directory(&storage, PrunePolicy::Never, false).unwrap();
 
@@ -3098,7 +3103,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let pack = pack_dir.join("pack-deadbeef.pack");
@@ -3146,7 +3151,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let pack = pack_dir.join("pack-deadbeef.pack");
@@ -3177,7 +3182,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let bad_pack = pack_dir.join("pack-bad.pack");
@@ -3220,7 +3225,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let external = tempdir().unwrap();
         let external_file = external.path().join("pack-deadbeef.idx");
         fs::write(&external_file, b"idx").unwrap();
@@ -3258,7 +3263,7 @@ mod tests {
         let objects = path::objects();
         fs::remove_dir_all(&objects).unwrap();
         symlink(external.path(), &objects).unwrap();
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let stats = clean_pack_directory(
             &storage,
@@ -3282,7 +3287,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let pack_dir = path::objects().join("pack");
         fs::create_dir_all(&pack_dir).unwrap();
         let external = tempdir().unwrap();
@@ -3332,7 +3337,7 @@ mod tests {
         .await
         .unwrap();
 
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
@@ -3374,7 +3379,7 @@ mod tests {
         .await
         .unwrap();
 
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let (stats, warnings) = expire_reflogs_for_gc(&storage, true).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
@@ -3434,7 +3439,7 @@ mod tests {
             .unwrap();
         }
 
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
@@ -3480,7 +3485,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
 
         let blob = Blob::from_content("unreachable");
         save_test_object(&blob, &blob.id).unwrap();
@@ -4177,7 +4182,15 @@ mod tests {
         util::working_dir();
         let add = crate::command::add::AddArgs {
             pathspec: vec!["file.txt".into()],
-            ..Default::default()
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
         };
         crate::command::add::execute_safe(add, &OutputConfig::default())
             .await
@@ -5001,7 +5014,7 @@ mod tests {
         let repo = tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let blob = Blob::from_content("stashed");
         save_test_object(&blob, &blob.id).unwrap();
         let stash_ref = util::storage_path().join("refs/stash");
@@ -5279,7 +5292,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(test::setup_with_new_libra_in(repo.path()));
         let _guard = test::ChangeDirGuard::new(repo.path());
-        let storage = ClientStorage::local(path::objects());
+        let storage = ClientStorage::init(path::objects());
         let blob = Blob::from_content("blob");
         save_test_object(&blob, &blob.id).unwrap();
         assert!(object_children(&storage, &blob.id).unwrap().is_empty());

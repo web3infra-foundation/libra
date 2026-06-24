@@ -206,7 +206,7 @@
 | `for-each-ref --points-at <object>` | `cli.object-readback` | 指向指定对象的 branch、lightweight tag、annotated tag 可观察 |
 | `rev-list HEAD` / multi revision / `A..B` / `^A` / `A...B` / `--count` / `-n` / `--skip` / `--since` / `--after` / `--until` / `--before` / `--first-parent` / `--author` / `--committer` / `--grep` / `-- <path>` / `--left-right` / `--left-only` / `--right-only` / `--cherry-pick` / `--cherry-mark` / `--cherry` / `--children` | `cli.object-readback` | 可达提交输出、范围/排除、计数/限制、时间过滤、first-parent、author、committer、message grep、path limitation、side/cherry 过滤、children 元数据和 JSON envelope 可观察 |
 | `fsck` / `fsck --connectivity-only` / `fsck <object>` | `cli.object-readback`、`cli.gc-smoke` | 默认、连通性和指定对象检查可观察 |
-| `gc` / `prune` | `cli.gc-smoke` | 当前顶层命令未注册，runner 断言 JSON unknown-command 错误 |
+| `gc --dry-run` / `prune --dry-run` | `cli.gc-smoke` | 当前顶层命令已公开，runner 断言成功 JSON envelope 和 dry-run 标记 |
 | `maintenance run --dry-run --task gc` | `cli.gc-smoke` | 当前可用 maintenance 路径返回 JSON envelope |
 | `archive` | `cli.archive-smoke` | 当前未注册，runner 断言 JSON unknown-command 错误 |
 | `verify-pack [-v|-s] [--pack <pack>] <idx>...` | `cli.verify-pack-smoke` | idx/pack 对应校验、多 index sibling 推导、verbose 对象行、stat-only 摘要和 `--pack` 多 idx 拒绝路径可观察 |

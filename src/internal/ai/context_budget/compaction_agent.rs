@@ -70,7 +70,8 @@ pub const COMPACTION_AGENT_NAME: &str = "compaction";
 /// cleanly through the profile parser; production code should prefer
 /// [`embedded_compaction_system_prompt`] which extracts only the
 /// system prompt body.
-pub const EMBEDDED_COMPACTION_PROFILE: &str = include_str!("../ai/profile/embedded/compaction.md");
+pub const EMBEDDED_COMPACTION_PROFILE: &str =
+    include_str!("../agent/profile/embedded/compaction.md");
 
 /// Extract the system-prompt body from
 /// [`EMBEDDED_COMPACTION_PROFILE`] at runtime — the markdown still

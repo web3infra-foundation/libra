@@ -44,6 +44,7 @@
 | [`for-each-ref`](for-each-ref.md) | `partial` | `--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort` (`refname`/`objectname`/`version:refname`, each reversible) / `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `--exclude` / `<pattern>` supported; full Git atom language, remaining sort keys, and shell quoting modes are not exposed |
 | [`format-patch`](format-patch.md) | `partial` | `-o`/`--output-directory`, `--stdout`, `-n`/`--numbered`, `--start-number`, `--subject-prefix`, `--cover-letter`, `--thread`/`--no-thread`, `--in-reply-to`, `-v`/`--reroll-count`, `-s`/`--signoff`, `--full-index`, `--no-stat`, `--keep-subject`, `--suffix`, `--zero-commit`, `--signature`/`--no-signature`, `--signature-file`, `--encode-email-headers`/`--no-encode-email-headers`, `--numbered-files`, and `A..B`/single-commit revision range supported; merge commits are skipped; `--attach`, `--inline`, `--from`, `--to`, `--cc`, `--base`, `--interdiff`, `--range-diff`, `--notes`, and `--force` are not exposed |
 | [`fsck`](fsck.md) | `partial` | object/ref/index/reflog/connectivity checks supported; JSON/machine output, strict mode and pack verification surface incomplete |
+| [`gc`](gc.md) | `partial` | reachable-object tracing, reflog expiry, eligible loose-object pruning, stale pack sidecar cleanup, JSON/machine output, and accepted `--aggressive`/`--auto` no-ops supported; valid packs are verified but not rewritten or repacked |
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
 | [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags, context lines, `-E`/`-G`, `-P` rejection, `-a`/`-I` binary controls, `--heading`/`--break`/`-z` output grouping, `-m`/`--max-count`, and `-o`/`--only-matching` supported; untracked/no-index search not exposed |
 | [`hash-object`](hash-object.md) | `partial` | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte... |
@@ -61,6 +62,7 @@
 | [`notes`](notes.md) | `partial` | `add` / `append` / `copy` / `edit` / `show` / `list` / `remove` supported; `--ref` supported; merge/prune and the interactive editor not implemented |
 | [`op`](op.md) | `intentionally-different` | Libra command-level operation history inspection/restore extension, not a Git command |
 | [`open`](open.md) | `supported` | 见命令文档。 |
+| [`prune`](prune.md) | `partial` | removes eligible unreachable loose objects with dry-run, verbose, expire, extra head arguments, and JSON/machine output; direct use retains Git-like concurrent-writer caveats |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--no-rebase` (countermands `--rebase`, last wins) / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, `--no-commit`, `--commit`, `--autostash`, and `--no-progress` (forwarded to the fetch) exposed |
 | [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete (`-d`/`--delete`), `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
@@ -90,9 +92,7 @@
 
 以下命令曾有开发设计资料，但已明确决定不接入公开 CLI；它们降级为内部历史资料，不承诺用户可见兼容面：
 
-- `gc`：功能由 `libra maintenance run --task gc` 覆盖（见 `docs/development/internal/gc.md`）
 - `package`：内部设计资料保留（见 `docs/development/internal/package.md`）
-- `prune`：内部设计资料保留（见 `docs/development/internal/prune.md`）
 - `stats`：内部设计资料保留（见 `docs/development/internal/stats.md`）
 
 若未来需要发布其中任一命令，必须重新走完整的 CLI 接入、`COMPATIBILITY.md` 登记、用户文档和回归测试流程。

@@ -402,10 +402,10 @@ scenarios:
   - id: cli.gc-smoke
     wave: 2
     group: maintenance
-    purpose: "Document current top-level gc/prune command gaps while covering reachable plumbing around unreachable loose blobs and the supported `maintenance run --dry-run --task gc` JSON path, then verifies connectivity."
+    purpose: "Cover public top-level gc/prune dry-run behavior around unreachable loose blobs plus the supported `maintenance run --dry-run --task gc` JSON path, then verifies connectivity."
     gh_required: false
     requires_git: false
-    key_assertion_categories: [json_envelope, fsck, negative_exit, lbr_error]
+    key_assertion_categories: [json_envelope, fsck]
     doc_section: "cli.gc-smoke"
   - id: cli.archive-smoke
     wave: 2

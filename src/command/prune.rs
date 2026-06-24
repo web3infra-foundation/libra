@@ -27,7 +27,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
-    command::load_object,
+    command::{gc, load_object, verify_pack},
     internal::{
         db,
         head::Head,
@@ -145,14 +145,20 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
     let storage = ClientStorage::init(path::objects());
     let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
 
-    let reachable = collect_reachable_objects(&storage, &args.heads).await?;
+    let (reachable, protected) = collect_reachable_objects(&storage, &args.heads).await?;
     let packed = collect_packed_objects(&storage).await?;
     let needs_mtime = matches!(expire_before, PrunePolicy::ExpiredBy(_));
     let loose_objects = list_loose_objects(&storage, needs_mtime)?;
-    let plan = build_prune_plan(loose_objects, &reachable, &packed, expire_before);
+    let plan = build_prune_plan(
+        loose_objects,
+        &reachable,
+        &packed,
+        &protected,
+        expire_before,
+    );
 
     let should_report = (args.verbose || args.dry_run) && (!output.is_json() && !output.quiet);
-    apply_prune_plan(&plan, &storage, args.dry_run, should_report)?;
+    apply_prune_plan(&plan, &storage, args.dry_run, should_report).await?;
 
     if output.is_json() {
         let prune_output = PruneOutput {
@@ -225,9 +231,12 @@ fn system_time_from_unix_seconds(seconds: i64) -> SystemTime {
 async fn collect_reachable_objects(
     storage: &ClientStorage,
     heads: &[String],
-) -> CliResult<HashSet<ObjectHash>> {
-    let starting_points = collect_starting_points(storage, heads).await?;
-    bfs_mark_reachable(&starting_points, storage)
+) -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
+    let mut starting_points = collect_starting_points(storage, heads).await?;
+    let (gc_roots, protected) = gc::collect_roots_from_database().await?;
+    starting_points.extend(gc_roots);
+    let reachable = bfs_mark_reachable(&starting_points, storage)?;
+    Ok((reachable, protected))
 }
 
 /// Collect objects already in packfiles.
@@ -245,6 +254,10 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "idx") {
+                let pack_path = path.with_extension("pack");
+                if verify_pack::inspect_pack_files(&path, &pack_path).is_err() {
+                    continue;
+                }
                 let packed = list_idx_objects(&path).map_err(|error| {
                     CliError::fatal(format!(
                         "failed to read pack index '{}': {error}",
@@ -475,12 +488,14 @@ fn build_prune_plan(
     loose_objects: Vec<LooseObjectInfo>,
     reachable: &HashSet<ObjectHash>,
     packed: &HashSet<ObjectHash>,
+    protected: &HashSet<ObjectHash>,
     expire_before: PrunePolicy,
 ) -> PrunePlan {
     let prunable = loose_objects
         .into_iter()
         .filter(|info| {
             (reachable.contains(&info.hash) == packed.contains(&info.hash))
+                && !protected.contains(&info.hash)
                 && is_expired(info.modified, expire_before)
         })
         .collect();
@@ -489,7 +504,7 @@ fn build_prune_plan(
 }
 
 /// Apply the prune plan by removing loose objects (or reporting in dry-run mode).
-fn apply_prune_plan(
+async fn apply_prune_plan(
     plan: &PrunePlan,
     storage: &ClientStorage,
     dry_run: bool,
@@ -509,6 +524,9 @@ fn apply_prune_plan(
         }
 
         remove_loose_object(info, objects_dir)?;
+        if !storage.exist_local(&info.hash) {
+            gc::remove_object_index_rows(&info.hash).await?;
+        }
     }
 
     Ok(())

@@ -1,24 +1,24 @@
-# `libra gc` 内部设计资料
+# `libra gc` 设计资料
 
-> Status: **declined / historical**. This command was not published to the public CLI.
-> The maintenance entry point `libra maintenance run --task gc` provides the same safe garbage-collection pass.
+> Status: **public / partial**. `libra gc` is registered in the public CLI.
+> `libra maintenance run --task gc` remains available as the scheduled maintenance entry point.
 
-This document preserves the original design notes for the unpublished `gc` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
+This document preserves implementation design notes for `gc`. The user-visible command contract is tracked in [`docs/commands/gc.md`](../../commands/gc.md) and [`COMPATIBILITY.md`](../../../COMPATIBILITY.md).
 
 ## 命令实现目标
 
-`libra gc` 的目标是提供安全的仓库维护入口，用于清理不可达对象或执行保守维护任务。当前实现资料存在但顶层 CLI 尚未公开接入，因此目标是先保留安全维护语义，再决定是否进入公开命令面。
+`libra gc` 的目标是提供安全的仓库维护入口，用于清理不可达对象或执行保守维护任务。当前顶层 CLI 已公开接入。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`unpublished`。未进入 COMPATIBILITY.md；以代码接入状态为准。
+- 兼容级别：`partial`。以 `COMPATIBILITY.md` 与用户命令文档为准。
 
-- 该资料未对应公开 CLI 命令；用户可见状态按未发布处理。
+- 该资料对应公开 CLI 命令；本文只保留实现设计和维护背景。
 
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；`src/` 树中没有任何 `mod gc` 声明（`src/command/mod.rs` 未声明该模块），该文件尚未被编译进二进制。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：`src/cli.rs::Commands::Gc` 公开接入顶层命令，`src/command/mod.rs` 导出 `gc` 模块。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/gc.rs`。参数/子命令类型包括：`GcArgs`；输出、错误或状态类型包括：源码未暴露独立输出/错误类型，错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog；网络路径会解析 remote 配置、协商协议并处理 pack/idx 数据；数据库路径会通过 SeaORM/SQLite 持久化元数据。
 
@@ -42,12 +42,12 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-10 `a4bbe28b`（`feat(gc): add safe repository maintenance command (#386)`）：基础实现节点：add safe repository maintenance command (#386)；当前实现的主要轮廓可追溯到该提交。
-- 历史结论：`src/command/gc.rs` 或配套测试/文档已有历史节点，但当前 `src/cli.rs::Commands` 未公开 `gc` 入口；实现历史不改变当前状态章节中的未接入结论。
+- 历史结论：`src/command/gc.rs` 或配套测试/文档已有历史节点，当前 `src/cli.rs::Commands` 已公开 `gc` 入口。
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：`src/command/gc.rs` 源文件存在，但 `src/` 树中没有任何 `mod gc` 声明（`src/command/mod.rs` 未声明该模块），因此该文件尚未被编译进二进制。
-- 用户文档：`docs/commands/gc.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约；已发布维护入口是 `libra maintenance run --dry-run --task gc`。
+- 公开状态：已公开；模块状态：`src/command/gc.rs` 由 `src/command/mod.rs` 导出，并通过 `src/cli.rs::Commands::Gc` 分发。
+- 用户文档：`docs/commands/gc.md`；维护入口 `libra maintenance run --dry-run --task gc` 仍可用。
 - Synopsis：`libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--force]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。
 
@@ -56,8 +56,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵 | `COMPATIBILITY.md` 尚未登记该命令行。 | 需要决定是否纳入用户可见兼容矩阵和矩阵守卫。 |
-| CLI 接入 | `src/cli.rs::Commands` 尚未公开该顶层命令。 | 需要决定接入 CLI、降级为内部设计资料，或移出用户命令文档。 |
+| 打包能力 | 尚不 repack、delta-compress、创建 cruft pack 或重写有效 pack。 | 作为兼容矩阵中的 partial 缺口保留。 |
 | 功能缺口 | 当 reachability 遍历不完整时跳过 loose-object 清理（warning：`reachability traversal was incomplete; loose-object pruning was skipped`）。 | 这是保守的安全行为而非缺陷；原因写入 `warnings[]`，后续如需更完整遍历再同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | 重打包有效对象 | 原始对照：不支持；相关参数/替代：支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | cruft packs | 原始对照：不支持；相关参数/替代：支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

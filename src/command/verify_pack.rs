@@ -134,6 +134,18 @@ fn verify_pack(args: &VerifyPackArgs, idx_file: &Path) -> CliResult<VerifyPackOu
     })
 }
 
+pub(crate) fn inspect_pack_files(idx_file: &Path, pack_file: &Path) -> CliResult<VerifyPackOutput> {
+    verify_pack(
+        &VerifyPackArgs {
+            idx_files: vec![idx_file.to_path_buf()],
+            pack: Some(pack_file.to_path_buf()),
+            verbose: false,
+            stat_only: false,
+        },
+        idx_file,
+    )
+}
+
 const fn render_mode(args: &VerifyPackArgs) -> VerifyPackRenderMode {
     if args.stat_only {
         VerifyPackRenderMode::StatOnly

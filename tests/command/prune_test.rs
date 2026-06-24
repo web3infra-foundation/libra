@@ -18,7 +18,7 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -48,6 +48,57 @@ fn create_unreachable_blob(repo: &Path, content: &str) -> ObjectHash {
     let blob = Blob::from_content(content);
     save_object(&blob, &blob.id).expect("failed to save blob");
     blob.id
+}
+
+/// Resolve the repository id stored in local config.
+fn repo_id(repo: &Path) -> String {
+    let output = run_libra_command(&["config", "--get", "libra.repoid"], repo);
+    assert_cli_success(&output, "failed to read libra.repoid");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Enable the repository cloud-backup config path used by prune protections.
+fn enable_cloud_backup(repo: &Path) {
+    let output = run_libra_command(
+        &["config", "set", "vault.env.LIBRA_STORAGE_TYPE", "r2"],
+        repo,
+    );
+    assert_cli_success(&output, "failed to set cloud storage type");
+}
+
+/// Insert an object_index row for the provided object.
+fn insert_object_index_row(repo: &Path, hash: &ObjectHash, repo_id: &str, is_synced: i32) {
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let db_conn = libra::internal::db::get_db_conn_instance().await;
+        let model = libra::internal::model::object_index::ActiveModel {
+            o_id: Set(hash.to_string()),
+            o_type: Set("blob".to_string()),
+            o_size: Set(1),
+            repo_id: Set(repo_id.to_string()),
+            created_at: Set(1),
+            is_synced: Set(is_synced),
+            ..Default::default()
+        };
+        model.insert(&db_conn).await.expect("insert object_index");
+    });
+}
+
+/// Return whether an object_index row exists for the provided object and repo.
+fn object_index_row_exists(repo: &Path, hash: &ObjectHash, repo_id: &str) -> bool {
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let db_conn = libra::internal::db::get_db_conn_instance().await;
+        libra::internal::model::object_index::Entity::find()
+            .filter(libra::internal::model::object_index::Column::OId.eq(hash.to_string()))
+            .filter(libra::internal::model::object_index::Column::RepoId.eq(repo_id))
+            .one(&db_conn)
+            .await
+            .expect("query object_index")
+            .is_some()
+    })
 }
 
 /// Create an unreachable commit (and its tree/blob) stored as loose objects.
@@ -133,6 +184,16 @@ fn insert_reflog_entry(repo: &Path, new_oid: &ObjectHash) {
         };
         model.insert(&db_conn).await.expect("insert reflog");
     });
+}
+
+/// Write merge recovery metadata that references the provided object.
+fn write_merge_state(repo: &Path, target: &ObjectHash) {
+    let state_path = repo.join(".libra").join("merge-state.json");
+    fs::write(
+        state_path,
+        format!(r#"{{"orig_head":null,"target":"{target}","base":null}}"#),
+    )
+    .expect("write merge-state.json");
 }
 
 /// Insert an invalid reference row to exercise parse errors in prune.
@@ -231,6 +292,47 @@ fn test_prune_removes_unreachable_blob() {
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should succeed");
     assert!(!blob_path.exists());
+}
+
+#[test]
+#[serial]
+/// Tests direct prune preserves cloud-pending objects until backup sync completes.
+fn test_prune_keeps_unsynced_cloud_backup_object() {
+    let repo = create_committed_repo_via_cli();
+    enable_cloud_backup(repo.path());
+    let repo_id = repo_id(repo.path());
+    let blob = create_unreachable_blob(repo.path(), "cloud-pending");
+    let blob_path = loose_object_path(repo.path(), &blob.to_string());
+    insert_object_index_row(repo.path(), &blob, &repo_id, 0);
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should succeed");
+
+    assert!(
+        blob_path.exists(),
+        "unsynced object_index rows should protect loose objects from prune"
+    );
+}
+
+#[test]
+#[serial]
+/// Tests direct prune removes local object_index rows after deleting synced garbage.
+fn test_prune_removes_synced_object_index_row() {
+    let repo = create_committed_repo_via_cli();
+    let repo_id = repo_id(repo.path());
+    let blob = create_unreachable_blob(repo.path(), "synced-garbage");
+    let blob_path = loose_object_path(repo.path(), &blob.to_string());
+    insert_object_index_row(repo.path(), &blob, &repo_id, 1);
+    assert!(object_index_row_exists(repo.path(), &blob, &repo_id));
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should succeed");
+
+    assert!(!blob_path.exists());
+    assert!(
+        !object_index_row_exists(repo.path(), &blob, &repo_id),
+        "synced object_index row should be removed after local prune"
+    );
 }
 
 #[test]
@@ -388,6 +490,22 @@ fn test_prune_keeps_reflog_reachable_commit() {
 
 #[test]
 #[serial]
+/// Tests merge-state roots are preserved by direct prune.
+fn test_prune_keeps_merge_state_commit() {
+    let repo = create_committed_repo_via_cli();
+    let (commit, tree, blob) = create_unreachable_commit(repo.path(), "merge-state-commit");
+    write_merge_state(repo.path(), &commit);
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should preserve merge-state roots");
+
+    assert!(object_exists(repo.path(), &commit.to_string()));
+    assert!(object_exists(repo.path(), &tree.to_string()));
+    assert!(object_exists(repo.path(), &blob.to_string()));
+}
+
+#[test]
+#[serial]
 /// Tests multiple head arguments keep their objects reachable.
 fn test_prune_multiple_heads_keep_manual_commit() {
     let repo = create_committed_repo_via_cli();
@@ -417,8 +535,8 @@ fn test_prune_head_arg_tag_is_accepted() {
 
 #[test]
 #[serial]
-/// Tests packed v2 indexes trigger pruning of loose duplicates.
-fn test_prune_packed_v2_prunes_reachable_duplicate() {
+/// Tests orphan v2 pack indexes do not trigger pruning of reachable loose copies.
+fn test_prune_orphan_packed_v2_keeps_reachable_duplicate() {
     let repo = create_committed_repo_via_cli();
     let head = head_commit_hash(repo.path());
     assert!(object_exists(repo.path(), &head));
@@ -430,13 +548,13 @@ fn test_prune_packed_v2_prunes_reachable_duplicate() {
 
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should succeed");
-    assert!(!object_exists(repo.path(), &head));
+    assert!(object_exists(repo.path(), &head));
 }
 
 #[test]
 #[serial]
-/// Tests packed v1 indexes trigger pruning of loose duplicates.
-fn test_prune_packed_v1_prunes_reachable_duplicate() {
+/// Tests orphan v1 pack indexes do not trigger pruning of reachable loose copies.
+fn test_prune_orphan_packed_v1_keeps_reachable_duplicate() {
     let repo = create_committed_repo_via_cli();
     let head = head_commit_hash(repo.path());
     assert!(object_exists(repo.path(), &head));
@@ -448,7 +566,7 @@ fn test_prune_packed_v1_prunes_reachable_duplicate() {
 
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should succeed");
-    assert!(!object_exists(repo.path(), &head));
+    assert!(object_exists(repo.path(), &head));
 }
 
 #[test]

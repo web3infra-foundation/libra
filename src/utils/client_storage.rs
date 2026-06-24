@@ -173,6 +173,16 @@ impl ClientStorage {
         ClientStorage { storage, base_path }
     }
 
+    /// Construct a local-only `ClientStorage` rooted at `base_path`.
+    ///
+    /// This bypasses remote/tiered storage configuration entirely. Use it for
+    /// read-only scans that must not promote remote objects into the local object
+    /// directory, such as `gc --dry-run`.
+    pub fn init_local(base_path: PathBuf) -> ClientStorage {
+        let storage = Arc::new(LocalStorage::new(base_path.clone()));
+        ClientStorage { storage, base_path }
+    }
+
     /// Create a storage backend.
     ///
     /// # Remote Storage
@@ -568,6 +578,18 @@ impl ClientStorage {
         let storage = self.storage.clone();
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist(&hash).await })
+    }
+
+    /// Check whether an object exists in the local object store only.
+    ///
+    /// This ignores any configured remote tier, but still checks local loose
+    /// objects and local packfiles. Callers that are cleaning local metadata
+    /// should use this instead of [`Self::exist`] so remote backup presence does
+    /// not make a deleted local object look locally indexed.
+    pub fn exist_local(&self, obj_id: &ObjectHash) -> bool {
+        let local = LocalStorage::new(self.base_path.clone());
+        let hash = *obj_id;
+        self.block_on_storage(async move { local.exist(&hash).await })
     }
 
     /// Read just the `ObjectType` for `obj_id`.

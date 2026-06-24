@@ -37,7 +37,7 @@ flowchart TD
 
 | 命令 | 当前 tier | 治理结论 | 说明 |
 |---|---|---|---|
-| merge | partial | partial | fast-forward and single-head three-way merge supported; `-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit` supported; octopus/custom strategies and `--verify-signatures` deferred |
+| merge | partial | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |
 | pull | partial | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |
 | push | partial | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |
 | checkout | partial | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |
@@ -48,7 +48,7 @@ flowchart TD
 
 | 范围 | 全局未实现项 | 代码核对 | 最后确认/处理 |
 |---|---|---|---|
-| 命令接入治理 | `gc`、`package`、`prune`、`stats` 的开发文档或源码文件存在，但用户可见 CLI 与 `COMPATIBILITY.md` 未公开。 | `for-each-ref`、`ls-files`、`ls-tree`、`archive` 和 `notes` 已在 `src/cli.rs::Commands`、`COMPATIBILITY.md` 和命令开发文档中公开，不能再列为未公开命令。其余命令仍需按当前 CLI surface 核对是否返回 `LBR-CLI-001` 或应降级为内部资料。 | 作为全局未收口项保留；后续必须二选一：接入 CLI 并同步 `COMPATIBILITY.md`、命令文档和集成场景，或把对应命令文档降级为内部/历史资料。 |
+| 命令接入治理 | `package`、`stats` 的开发文档或源码文件存在，但用户可见 CLI 与 `COMPATIBILITY.md` 未公开。 | `for-each-ref`、`ls-files`、`ls-tree`、`archive`、`notes`、`gc` 和 `prune` 已在 `src/cli.rs::Commands`、`COMPATIBILITY.md` 和命令文档中公开，不能再列为未公开命令。其余命令仍需按当前 CLI surface 核对是否返回 `LBR-CLI-001` 或应降级为内部资料。 | 作为全局未收口项保留；后续必须二选一：接入 CLI 并同步 `COMPATIBILITY.md`、命令文档和集成场景，或把对应命令文档降级为内部/历史资料。 |
 | 兼容证据治理 | 参数级缺口不能只停留在文字说明；需要在命令开发文档、用户文档和 compat/integration 测试之间闭环。 | 删除独立参数 YAML 后，不再存在 `test_evidence`/`last_verified` 字段；证据必须落到具体测试、脚本或 D 编号说明中。 | 不允许把未验证参数当作完成承诺；新增兼容项时补测试证据，或把状态改为拒绝、延后、有意差异并给出 D 编号。 |
 | 拒绝/延后决策 | submodule family、本地 file remote push、Git hooks bridge、clone recurse-submodules、Git LFS filter/hooks bridge、bisect replay/terms、stash create/store、sparse checkout、patch mode、interactive rebase/todo、clean pathspec、empty commit message。 | 对应 D1-D10、D15、D16、D-clean-pathspec、D-empty-message；源码/CLI 未暴露或显式拒绝这些 surface。 | 维持 D 编号；只有出现明确需求、设计和测试方案时再重启。 |
 | staging/worktree Git surface | `add --intent-to-add`、`clean -i`、`clean <pathspec>`、`restore --overlay/--ours/--theirs/--merge/--progress`、`reset --merge/--keep`、`rm --sparse`、`checkout -p` 以及跨命令 patch mode。 | `mv -k` / `--skip-errors` 已实现，`mv --sparse` 已作为 no-op 暴露；`add`、`clean`、`restore`、`reset`、`rm` 的参数结构仍未暴露这些剩余 flag；patch mode 由 D15 拒绝；`switch --detach` 已实现，不能再把 detached HEAD 作为全局缺口。 | 作为命令级 Git 兼容缺口保留；实现时同步命令文档、`COMPATIBILITY.md` 和 integration scenarios。 |

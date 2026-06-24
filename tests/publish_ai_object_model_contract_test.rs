@@ -12,7 +12,7 @@ fn fixture(name: &str) -> serde_json::Value {
 
 #[test]
 fn publish_ai_object_model_contract_test_fixtures_cover_reference_layers() {
-    let reference = include_str!("../docs/agent/ai-object-model-reference.md");
+    let reference = include_str!("../docs/ai/object-model-reference.md");
     let snapshot: PublishAiObject = serde_json::from_value(fixture("ai-object.json")).unwrap();
     let event: PublishAiObject = serde_json::from_value(fixture("ai-object-event.json")).unwrap();
     let projection: PublishAiObject =

@@ -114,7 +114,9 @@
 |------|------|------|------|
 | `libra cat-file` | | 按类型、大小或漂亮打印内容检查 Git 对象和 AI 对象 | [cat-file.md](cat-file.md) |
 | `libra fsck` | | 校验 Libra 仓库中对象、refs 和索引的完整性 | [fsck.md](fsck.md) |
+| `libra gc` | | 清理不可达 loose object 和陈旧 pack 辅助文件 | [gc.md](gc.md) |
 | `libra hash-object` | | 从文件或标准输入计算 Git 兼容 blob 对象 ID | [hash-object.md](hash-object.md) |
+| `libra prune` | | 从仓库移除不可达 loose object | [prune.md](prune.md) |
 | `libra verify-pack` | | 对照 pack 归档验证 pack index 文件 | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | 列出本地 refs（分支、标签、HEAD）及其对象 ID | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | 读取或更新符号 HEAD 引用 | [symbolic-ref.md](symbolic-ref.md) |

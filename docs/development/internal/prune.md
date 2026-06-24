@@ -1,23 +1,23 @@
-# `libra prune` 内部设计资料
+# `libra prune` 设计资料
 
-> Status: **declined / historical**. This command was not published to the public CLI.
+> Status: **public / partial**. `libra prune` is registered in the public CLI.
 
-This document preserves the original design notes for the unpublished `prune` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
+This document preserves implementation design notes for `prune`. The user-visible command contract is tracked in [`docs/commands/prune.md`](../../commands/prune.md) and [`COMPATIBILITY.md`](../../../COMPATIBILITY.md).
 
 ## 命令实现目标
 
-`libra prune` 的目标是清理不可达对象或生成安全预览，服务于仓库维护和对象存储收敛。当前实现资料存在但顶层 CLI 尚未公开接入，后续需要决定它作为独立命令还是维护子任务公开。
+`libra prune` 的目标是清理不可达对象或生成安全预览，服务于仓库维护和对象存储收敛。当前顶层 CLI 已公开接入；日常维护仍建议优先使用 `libra gc`。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`unpublished`。未进入 COMPATIBILITY.md；以代码接入状态为准。
+- 兼容级别：`partial`。以 `COMPATIBILITY.md` 与用户命令文档为准。
 
-- 该资料未对应公开 CLI 命令；用户可见状态按未发布处理。
+- 该资料对应公开 CLI 命令；本文只保留实现设计和维护背景。
 
 
 ## 设计方案
 
-- 入口与分发：源码资料存在但尚未公开接入 `src/cli.rs::Commands`；当前未由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
+- 入口与分发：`src/cli.rs::Commands::Prune` 公开接入顶层命令，`src/command/mod.rs` 导出 `prune` 模块。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
 - 源码分层：主要实现文件为 `src/command/prune.rs`。参数/子命令类型包括：`PruneArgs`；输出、错误或状态类型包括：`PruneOutput`、`PruneObjectInfo`（`--json` 序列化的独立输出类型，模块私有），错误通过 `CliError` / `CliResult` 传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`；对象路径会解析 revision 并读写 blob/tree/commit/tag 等对象；引用路径会读取或更新 SQLite refs、HEAD 与 reflog；网络路径会解析 remote 配置、协商协议并处理 pack/idx 数据；数据库路径会通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
 
@@ -41,12 +41,12 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-10 `75482996`（`feat(prune): implement prune command (#381)`）：基础实现节点：implement prune command (#381)；当前实现的主要轮廓可追溯到该提交。
-- 历史结论：`src/command/prune.rs` 或配套测试/文档已有历史节点，但当前 `src/cli.rs::Commands` 未公开 `prune` 入口；实现历史不改变当前状态章节中的未接入结论。
+- 历史结论：`src/command/prune.rs` 或配套测试/文档已有历史节点，当前 `src/cli.rs::Commands` 已公开 `prune` 入口。
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：未从 `src/command/mod.rs` 导出。
-- 用户文档：`docs/commands/prune.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约。
+- 公开状态：已公开；模块状态：`src/command/prune.rs` 由 `src/command/mod.rs` 导出，并通过 `src/cli.rs::Commands::Prune` 分发。
+- 用户文档：`docs/commands/prune.md`。
 - Synopsis：`libra prune [OPTIONS] [HEAD]...`。
 - 公开参数/子命令包括：`-n, --dry-run`、`-v, --verbose`、`--expire <TIME>`、`[HEAD]...`。
 
@@ -55,8 +55,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵 | `COMPATIBILITY.md` 尚未登记该命令行。 | 需要决定是否纳入用户可见兼容矩阵和矩阵守卫。 |
-| CLI 接入 | `src/cli.rs::Commands` 尚未公开该顶层命令。 | 需要决定接入 CLI、降级为内部设计资料，或移出用户命令文档。 |
+| 并发写入保护 | 直接 prune 仍保留 Git-like 并发 writer 风险。 | 用户文档提示优先 dry-run 与 `--expire`，日常维护优先 `libra gc`。 |
 
 ## 维护要求
 

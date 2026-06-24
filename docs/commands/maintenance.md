@@ -104,5 +104,5 @@ libra --json maintenance status
 
 ## See Also
 
-- [`libra gc`](./gc.md) (not yet implemented)
+- [`libra gc`](./gc.md)
 - [`libra fsck`](./fsck.md)
