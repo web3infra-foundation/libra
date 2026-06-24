@@ -91,6 +91,21 @@ pub struct ShowArgs {
     #[clap(long)]
     pub stat: bool,
 
+    /// Do not expand tabs in the commit message. Accepted for Git parity and is
+    /// a no-op: Libra's show never expands tabs (it prints them verbatim).
+    #[clap(long = "no-expand-tabs")]
+    pub no_expand_tabs: bool,
+
+    /// Do not show commit notes. Accepted for Git parity and is a no-op: Libra's
+    /// show never displays notes inline. (Use `libra notes show <commit>`.)
+    #[clap(long = "no-notes")]
+    pub no_notes: bool,
+
+    /// Do not use a `.mailmap` to rewrite identities. Accepted for Git parity
+    /// and is a no-op: Libra's show never applies a mailmap.
+    #[clap(long = "no-mailmap")]
+    pub no_mailmap: bool,
+
     /// Limit output to matching paths.
     #[clap(value_name = "PATHS", num_args = 0..)]
     pub pathspec: Vec<String>,

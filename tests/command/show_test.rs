@@ -245,6 +245,9 @@ async fn test_show_non_quiet_uses_forced_pager() {
     let _pager = ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
     let args = ShowArgs {
+        no_expand_tabs: false,
+        no_notes: false,
+        no_mailmap: false,
         object: Some("HEAD".to_string()),
         no_patch: true,
         oneline: false,
@@ -296,6 +299,9 @@ async fn test_show_quiet_still_validates_patch_generation() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_expand_tabs: false,
+        no_notes: false,
+        no_mailmap: false,
         object: Some("HEAD".to_string()),
         no_patch: false,
         oneline: false,
@@ -348,6 +354,9 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_expand_tabs: false,
+        no_notes: false,
+        no_mailmap: false,
         object: Some("HEAD".to_string()),
         no_patch: false,
         oneline: false,
@@ -809,6 +818,9 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_expand_tabs: false,
+        no_notes: false,
+        no_mailmap: false,
         object: Some("nonexistent_ref_abc123".to_string()),
         no_patch: false,
         oneline: false,
@@ -852,6 +864,9 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_expand_tabs: false,
+        no_notes: false,
+        no_mailmap: false,
         object: Some("HEAD:nonexistent_file.txt".to_string()),
         no_patch: false,
         oneline: false,
@@ -1044,4 +1059,38 @@ fn show_format_aliases_pretty_and_abbrev_commit_shortens_hash() {
         !abbrev_s.contains(&full_hash),
         "full 40-char hash must not appear: {abbrev_s:?}"
     );
+}
+
+#[test]
+fn show_log_display_no_op_flags_are_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let plain = run_libra_command(&["show"], p);
+    assert_cli_success(&plain, "show");
+    let plain_hdr = String::from_utf8_lossy(&plain.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        plain_hdr.starts_with("commit "),
+        "show prints a commit header"
+    );
+
+    // `--no-expand-tabs`/`--no-notes`/`--no-mailmap` (Git's log/show display
+    // options) are accepted no-ops: Libra's show expands no tabs, displays no
+    // notes inline, and applies no mailmap. They are parsed-but-unread, so each
+    // still produces the same commit header. (The per-file diff ordering of
+    // `show` itself is not stable across invocations, so only the header is
+    // compared.)
+    for flag in ["--no-expand-tabs", "--no-notes", "--no-mailmap"] {
+        let out = run_libra_command(&["show", flag], p);
+        assert_cli_success(&out, &format!("show {flag}"));
+        let hdr = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(hdr, plain_hdr, "show {flag} prints the same commit header");
+    }
 }

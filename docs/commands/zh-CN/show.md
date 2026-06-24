@@ -26,6 +26,9 @@ libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 | `--abbrev-commit` | | 把默认 header 的 commit 对象名缩写为 7 位前缀。 |
 | `--name-only` | | 只显示已更改文件名（没有 diff hunk）。 |
 | `--stat` | | 显示 diff 统计（每个文件的插入 / 删除）。 |
+| `--no-expand-tabs` | | 不在提交消息中展开 tab。接受式 no-op：Libra 的 show 逐字打印 tab。 |
+| `--no-notes` | | 不显示提交 notes。接受式 no-op：Libra 的 show 从不内联显示 notes。 |
+| `--no-mailmap` | | 不应用 `.mailmap`。接受式 no-op：Libra 的 show 显示记录的原始身份。 |
 | `<PATHS>...` | | 将输出限制为匹配路径（提交 diff 的 pathspec 过滤器）。 |
 
 ### 示例

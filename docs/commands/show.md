@@ -34,6 +34,9 @@ list their entries and blobs print their text content (or a binary summary).
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
+| `--no-expand-tabs` | | Do not expand tabs in the commit message. Accepted no-op: Libra's show prints tabs verbatim. |
+| `--no-notes` | | Do not show commit notes. Accepted no-op: Libra's show never displays notes inline. |
+| `--no-mailmap` | | Do not apply a `.mailmap`. Accepted no-op: Libra's show shows the raw recorded identities. |
 | `<PATHS>...` | | Limit output to matching paths (pathspec filter for commit diffs). |
 
 ### Examples

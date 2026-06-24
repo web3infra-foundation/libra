@@ -46,7 +46,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show.md`。
 - Synopsis：`libra show [OPTIONS] [OBJECT] [PATHS]...`。
-- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--format <FORMAT>`、`--abbrev-commit`、`--name-only`、`--name-status`、`--stat`、`[PATHS]...`。`--pretty=<fmt>`/`--format=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）；`--abbrev-commit` 把默认 header 的 `commit <hash>` 缩写为 7 位。
+- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--format <FORMAT>`、`--abbrev-commit`、`--name-only`、`--name-status`、`--stat`、`--no-expand-tabs`/`--no-notes`/`--no-mailmap`（接受式 no-op：Libra 的 show 从不展开 tab、从不内联显示 notes、从不应用 mailmap；三个字段解析后不被读取。Git 的反向 `--expand-tabs`/`--notes`/`--mailmap` 未实现）、`[PATHS]...`。`--pretty=<fmt>`/`--format=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）；`--abbrev-commit` 把默认 header 的 `commit <hash>` 缩写为 7 位。
 
 
 ## 还未实现的功能
