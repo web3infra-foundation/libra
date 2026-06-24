@@ -951,3 +951,19 @@ fn pull_autostash_flag_is_accepted() {
         "--autostash reaches the tracking check: {err:?}"
     );
 }
+
+#[test]
+fn pull_no_progress_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `--no-progress` parses and reaches the runtime (the fetch progress
+    // suppression is covered by fetch's `apply_no_progress` unit test, which
+    // pull reuses). With no upstream it fails with a tracking error, not clap.
+    let out = run_libra_command(&["pull", "--no-progress"], p);
+    assert!(!out.status.success(), "pull without an upstream fails");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("unexpected argument"),
+        "--no-progress is accepted by the parser: {err}"
+    );
+}

@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/pull.md`。
-- Synopsis：`libra pull [--ff-only] [--ff] [--no-ff] [--rebase] [--depth <n>] [--squash] [--no-commit] [--commit] [--autostash] [<repository> [<refspec>]]`。
-- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`、`--ff`、`--no-ff`、`--depth <n>`、`--squash`、`--no-commit`、`--commit`、`--autostash`。`--autostash` 在 fetch 之后、整合（merge/rebase）之前 stash 已跟踪改动（`stash::autostash_push`，无改动时返回 false 不 stash），整合完成（成功或失败）后再 `stash::autostash_pop` 回；为此 `run_pull` 把整合结果捕获为 `integrate_result` 以便失败时也能先 pop 再传播错误。pop 失败映射为 `PullError::Autostash`，提示用 `libra stash pop` 恢复。
+- Synopsis：`libra pull [--ff-only] [--ff] [--no-ff] [--rebase] [--depth <n>] [--squash] [--no-commit] [--commit] [--autostash] [--no-progress] [<repository> [<refspec>]]`。
+- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-r, --rebase`、`--ff-only`、`--ff`、`--no-ff`、`--depth <n>`、`--squash`、`--no-commit`、`--commit`、`--autostash`、`--no-progress`。`--autostash` 在 fetch 之后、整合（merge/rebase）之前 stash 已跟踪改动（`stash::autostash_push`，无改动时返回 false 不 stash），整合完成（成功或失败）后再 `stash::autostash_pop` 回；为此 `run_pull` 把整合结果捕获为 `integrate_result` 以便失败时也能先 pop 再传播错误。pop 失败映射为 `PullError::Autostash`，提示用 `libra stash pop` 恢复。`--no-progress` 把进度抑制转发给 fetch：`run_pull` 用 `fetch::apply_no_progress` 把传给 fetch 的 child output 的 `progress` 强制为 `ProgressMode::None`，从而抑制 fetch 的 “Receiving objects” 进度条，对齐 `git pull --no-progress`。
 - `--commit`：强制生成 merge commit（merge 模式的默认行为）；与 `--no-commit` 互为 last-one-wins（命令行最后出现者生效，复用既有 `no_commit` 透传，无新逻辑），与 `--squash`/`--rebase` 冲突（对齐 Git `merge --squash --commit` 报错）。
 
 

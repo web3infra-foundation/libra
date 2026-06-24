@@ -914,8 +914,9 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
 /// Force progress reporting off when `--no-progress` is set (mirroring
 /// `git fetch --no-progress`), preserving every other output setting. Returns
 /// `Some(modified)` when something changed, or `None` when progress was already
-/// off — letting the caller keep borrowing the original `OutputConfig`.
-fn apply_no_progress(output: &OutputConfig, no_progress: bool) -> Option<OutputConfig> {
+/// off — letting the caller keep borrowing the original `OutputConfig`. Shared
+/// with `pull --no-progress`, which forwards the same suppression to its fetch.
+pub(crate) fn apply_no_progress(output: &OutputConfig, no_progress: bool) -> Option<OutputConfig> {
     if no_progress && !matches!(output.progress, ProgressMode::None) {
         let mut suppressed = output.clone();
         suppressed.progress = ProgressMode::None;
@@ -2698,8 +2699,10 @@ mod tests {
     /// when the flag is absent (and short-circuits when it is already off).
     #[test]
     fn apply_no_progress_forces_progress_mode_off() {
-        let mut text = OutputConfig::default();
-        text.progress = ProgressMode::Text;
+        let text = OutputConfig {
+            progress: ProgressMode::Text,
+            ..OutputConfig::default()
+        };
         let suppressed = apply_no_progress(&text, true).expect("Text + no_progress changes output");
         assert!(matches!(suppressed.progress, ProgressMode::None));
         assert!(matches!(
@@ -2711,8 +2714,10 @@ mod tests {
         assert!(apply_no_progress(&text, false).is_none());
 
         // Already-off progress needs no change.
-        let mut off = OutputConfig::default();
-        off.progress = ProgressMode::None;
+        let off = OutputConfig {
+            progress: ProgressMode::None,
+            ..OutputConfig::default()
+        };
         assert!(apply_no_progress(&off, true).is_none());
     }
 

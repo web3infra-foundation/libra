@@ -89,6 +89,10 @@ pub struct PullArgs {
     /// afterwards, so `pull` works on a dirty working tree.
     #[clap(long)]
     autostash: bool,
+
+    /// Do not show the fetch progress meter, matching `git pull --no-progress`.
+    #[clap(long = "no-progress")]
+    no_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,6 +230,7 @@ impl PullArgs {
             no_commit: false,
             commit: false,
             autostash: false,
+            no_progress: false,
         }
     }
 }
@@ -267,7 +272,11 @@ pub(crate) async fn run_pull(
     output: &OutputConfig,
 ) -> Result<PullOutput, PullError> {
     let target = resolve_pull_target(&args).await?;
+    // `--no-progress` forwards to the fetch: suppress its "Receiving objects"
+    // meter just like `git pull --no-progress`.
     let child_output = child_output_for_pull(output);
+    let child_output =
+        fetch::apply_no_progress(&child_output, args.no_progress).unwrap_or(child_output);
 
     let fetch_result = fetch::fetch_repository_with_result(
         target.remote_config.clone(),

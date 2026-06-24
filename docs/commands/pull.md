@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--rebase] [--depth <n>] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--no-progress] [--rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -41,6 +41,7 @@ With `--autostash`, pull stashes your tracked working-tree changes before integr
 | `--no-commit` | Merge and stage but stop before committing, recording merge state to finalize with `libra merge --continue`. Conflicts with `--squash`, `--rebase`. | `libra pull --no-commit` |
 | `--commit` | Force a merge commit (the default); last-one-wins with `--no-commit`. Conflicts with `--squash`, `--rebase`. | `libra pull --commit` |
 | `--autostash` | Stash tracked changes before integrating and re-apply them afterwards (even on failure), so `pull` works on a dirty tree. Untracked/ignored files are left in place. | `libra pull --autostash` |
+| `--no-progress` | Suppress the fetch progress meter (the "Receiving objects" spinner), matching `git pull --no-progress`. | `libra pull --no-progress` |
 | `--depth <n>` | Limit the fetch phase to a shallow history of `n` commits per tip. Conflicts with `--rebase`. | `libra pull --depth 1` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
@@ -191,6 +192,7 @@ Rebase output omits `merge` and includes `rebase`:
 | No-commit | `libra pull --no-commit` (finalize with `libra merge --continue`) | `git pull --no-commit` | N/A |
 | Force-commit override | `libra pull --commit` (last-one-wins with `--no-commit`) | `git pull --commit` | N/A |
 | Autostash | `libra pull --autostash` | `git pull --autostash` | N/A |
+| Suppress progress | `libra pull --no-progress` | `git pull --no-progress` | N/A |
 | Structured output | `--json` / `--machine` | No | No |
 | Phase diagnostics | `phase` detail in error JSON | No | No |
 
