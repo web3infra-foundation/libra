@@ -273,6 +273,13 @@ pub struct LogArgs {
     #[clap(long = "no-expand-tabs")]
     pub no_expand_tabs: bool,
 
+    /// Do not show commit notes. Accepted for Git parity and is a no-op: Libra's
+    /// log never displays notes inline, so this already matches the default.
+    /// (Git's opposite `--notes[=<ref>]` is not implemented; use `libra notes
+    /// show <commit>` to read a note.)
+    #[clap(long = "no-notes")]
+    pub no_notes: bool,
+
     /// Pretend as if all the refs in refs/, along with HEAD, are listed on the command line.
     #[clap(long)]
     pub all: bool,

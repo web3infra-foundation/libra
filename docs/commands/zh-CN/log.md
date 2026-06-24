@@ -240,6 +240,14 @@ libra log --date-order --oneline
 libra log --no-expand-tabs
 ```
 
+### `--no-notes`
+
+不显示提交 notes。为对齐 Git 而接受的 no-op：Libra 的 log 从不内联显示 notes，故该标志已是默认行为。（Git 的反向标志 `--notes[=<ref>]` 未实现；读 note 用 `libra notes show <commit>`。）
+
+```bash
+libra log --no-notes
+```
+
 ### `--follow <FILE>`
 
 Best-effort 跨重命名追踪单个文件历史。文件路径相对于当前目录解析。

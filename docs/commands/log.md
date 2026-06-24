@@ -263,6 +263,17 @@ matches the default. (Git's opposite `--expand-tabs[=<n>]` is not implemented.)
 libra log --no-expand-tabs
 ```
 
+### `--no-notes`
+
+Do not show commit notes. Accepted no-op for Git parity: Libra's log never
+displays notes inline, so this already matches the default. (Git's opposite
+`--notes[=<ref>]` is not implemented; use `libra notes show <commit>` to read a
+note.)
+
+```bash
+libra log --no-notes
+```
+
 ### `--follow <FILE>`
 
 Best-effort continuation of a file's history across renames. The file is resolved

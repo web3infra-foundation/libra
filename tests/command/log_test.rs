@@ -2594,3 +2594,31 @@ fn log_no_expand_tabs_flag_is_accepted_noop() {
         "log --no-expand-tabs matches plain log (no-op)"
     );
 }
+
+#[test]
+fn log_no_notes_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Attach a note; Libra's log never displays notes inline, so the flag is a
+    // no-op whether or not a note exists.
+    assert!(
+        run_libra_command(&["notes", "add", "-m", "a note", "HEAD"], p)
+            .status
+            .success()
+    );
+
+    let plain = run_libra_command(&["log"], p);
+    assert_cli_success(&plain, "log");
+    let out = run_libra_command(&["log", "--no-notes"], p);
+    assert_cli_success(&out, "log --no-notes");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "log --no-notes matches plain log (no-op)"
+    );
+    // Sanity: the note is not shown by plain log either.
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("a note"),
+        "Libra log does not display notes inline"
+    );
+}
