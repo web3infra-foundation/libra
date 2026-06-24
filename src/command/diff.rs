@@ -152,6 +152,24 @@ pub struct DiffArgs {
     /// opposite `--color-moved[=<mode>]` is not implemented.)
     #[clap(long = "no-color-moved")]
     pub no_color_moved: bool,
+
+    /// Turn off rename detection. Accepted for Git parity and is a no-op:
+    /// Libra's diff never detects renames (a rename shows as delete + create),
+    /// so this already matches the default. (Git's `--renames` is not exposed.)
+    #[clap(long = "no-renames")]
+    pub no_renames: bool,
+
+    /// Show paths relative to the repository root, not the current directory.
+    /// Accepted for Git parity and is a no-op: Libra's diff always shows
+    /// repo-root-relative paths. (Git's `--relative[=<path>]` is not exposed.)
+    #[clap(long = "no-relative")]
+    pub no_relative: bool,
+
+    /// Disable the indent heuristic for hunk boundaries. Accepted for Git parity
+    /// and is a no-op: Libra's diff does not apply Git's indent heuristic.
+    /// (Git's `--indent-heuristic` is not exposed.)
+    #[clap(long = "no-indent-heuristic")]
+    pub no_indent_heuristic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -956,6 +974,9 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         text: false,
         no_ext_diff: false,
         no_color_moved: false,
+        no_renames: false,
+        no_relative: false,
+        no_indent_heuristic: false,
     };
     let result = run_diff(&args).await?;
     Ok(format_unified_diff(&result))

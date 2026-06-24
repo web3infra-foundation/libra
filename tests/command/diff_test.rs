@@ -1234,3 +1234,27 @@ fn diff_no_color_moved_flag_is_accepted_noop() {
         "diff --no-color-moved matches plain diff (no-op)"
     );
 }
+
+#[test]
+fn diff_rename_relative_indent_noop_flags_are_accepted() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("n.txt"), "x\ny\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "n.txt"], p), "stage n.txt");
+
+    let plain = run_libra_command(&["diff", "--cached"], p);
+    assert_cli_success(&plain, "diff --cached");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    // `--no-renames`/`--no-relative`/`--no-indent-heuristic` are accepted no-ops:
+    // Libra's diff never detects renames, always shows repo-root-relative paths,
+    // and applies no indent heuristic, so output is unchanged.
+    for flag in ["--no-renames", "--no-relative", "--no-indent-heuristic"] {
+        let out = run_libra_command(&["diff", "--cached", flag], p);
+        assert_cli_success(&out, &format!("diff --cached {flag}"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            plain_out,
+            "diff {flag} matches plain diff (no-op)"
+        );
+    }
+}

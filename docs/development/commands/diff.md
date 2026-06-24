@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/shortstat/summary/output/algorithm、`--exit-code`/`-s`(`--no-patch`)/`-z`(`--null`)/`--check`（在新增行检测尾随空白与 indent 中 space-before-tab，发现即退出码 2）/`-R`(`--reverse`，交换两侧得到反向 diff)与位置性两点范围 `A..B`（`diff A..B`）已支持；`--no-ext-diff`（接受式 no-op：Libra 无外部 diff 驱动，始终使用内建引擎）与 `--no-color-moved`（接受式 no-op：Libra 从不对移动行着色）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、word/binary diff、whitespace-ignoring（`-w`）、外部 diff 驱动（`--ext-diff` / `diff.external`）和移动行着色（`--color-moved`）尚未公开。
+- 兼容级别：`partial`。staged/old-new/pathspec/name/stat/numstat/shortstat/summary/output/algorithm、`--exit-code`/`-s`(`--no-patch`)/`-z`(`--null`)/`--check`（在新增行检测尾随空白与 indent 中 space-before-tab，发现即退出码 2）/`-R`(`--reverse`，交换两侧得到反向 diff)与位置性两点范围 `A..B`（`diff A..B`）已支持；`--no-ext-diff`（接受式 no-op：Libra 无外部 diff 驱动，始终使用内建引擎）与 `--no-color-moved`（接受式 no-op：Libra 从不对移动行着色）、`--no-renames`/`--no-relative`/`--no-indent-heuristic`（接受式 no-op：Libra 不检测重命名、始终用仓库根相对路径、不使用 indent 启发式）已支持；位置性 `diff A B`（空格分隔双 rev）、三点范围 `A...B`（merge-base）、word/binary diff、whitespace-ignoring（`-w`）、外部 diff 驱动（`--ext-diff` / `diff.external`）、移动行着色（`--color-moved`）、重命名检测（`--renames`/`-M`）、相对路径（`--relative`）和 indent 启发式（`--indent-heuristic`）尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/diff.md`。
-- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --shortstat | --name-only | --name-status | --summary] [-s | --no-patch] [--exit-code] [--check] [-R] [-a | --text] [--no-ext-diff] [--no-color-moved] [-z] [<pathspec>...]`。
-- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`、`--shortstat`、`--summary`、`--exit-code`、`-s`/`--no-patch`、`-z`/`--null`、`--check`（`render_diff_check`：扫描每个文件 `raw_diff` 的新增行，按 hunk 头追踪新文件行号，对尾随空白/space-before-tab 报 `<path>:<line>: <msg>`，有问题则 `silent_exit(2)`；不检测 Git 的 blank-at-eof；优先于其他输出模式）、`-R`/`--reverse`（在 `run_diff` 内交换 `old_side`/`new_side` 的 blobs 与 label 后再调 `Diff::diff`，加减号与 status 随之反转；loader 按 hash 内容寻址，交换后仍正确）、`-a`/`--text`（接受式 no-op：Libra 的 diff 从不做二进制检测，始终输出内容 diff，故 `--text` 请求的“按文本处理”已是默认行为；字段 `text` 解析后不被读取。注意与 `--binary`（输出二进制 patch 格式）不同，后者仍未公开）、`--no-ext-diff`（接受式 no-op：Libra 无外部 diff 驱动、始终用内建引擎，故“禁用外部 diff”已是默认行为；字段 `no_ext_diff` 解析后不被读取。外部 diff 驱动本身 `--ext-diff` / `diff.external` 仍未公开）、`--no-color-moved`（接受式 no-op：Libra 的 diff 从不做移动行检测/着色，故已是默认行为；字段 `no_color_moved` 解析后不被读取。Git 的反向 `--color-moved[=<mode>]` 未实现）。`--shortstat` 只输出 `--stat` 的汇总行（零项省略）；`--exit-code` 仍打印 diff 但有差异时退出码为 1（区别于 `--quiet` 的静默）；`-s`/`--no-patch` 抑制 patch 主体（与 `--exit-code` 组合做状态检查）；`-z`/`--null` 对 `--name-only`/`--name-status`/`--numstat` 用 NUL 终止每条记录（且 `--name-status` 的状态与路径以 NUL 分隔、无尾随换行；由 `join_diff_records` 实现），其他模式不受影响。
+- Synopsis：`libra diff [--staged | --cached] [--old <COMMIT> --new <COMMIT>] [<commit>..<commit>] [--stat | --numstat | --shortstat | --name-only | --name-status | --summary] [-s | --no-patch] [--exit-code] [--check] [-R] [-a | --text] [--no-ext-diff] [--no-color-moved] [--no-renames] [--no-relative] [--no-indent-heuristic] [-z] [<pathspec>...]`。
+- 公开参数/子命令包括：`--old <COMMIT>`、`--new <COMMIT>`、`--staged`（`--cached` 为 Git 兼容别名）、`[<pathspec>...]`、`--algorithm <NAME>`、`--output <FILENAME>`、`--name-only`、`--name-status`、`--numstat`、`--stat`、`--shortstat`、`--summary`、`--exit-code`、`-s`/`--no-patch`、`-z`/`--null`、`--check`（`render_diff_check`：扫描每个文件 `raw_diff` 的新增行，按 hunk 头追踪新文件行号，对尾随空白/space-before-tab 报 `<path>:<line>: <msg>`，有问题则 `silent_exit(2)`；不检测 Git 的 blank-at-eof；优先于其他输出模式）、`-R`/`--reverse`（在 `run_diff` 内交换 `old_side`/`new_side` 的 blobs 与 label 后再调 `Diff::diff`，加减号与 status 随之反转；loader 按 hash 内容寻址，交换后仍正确）、`-a`/`--text`（接受式 no-op：Libra 的 diff 从不做二进制检测，始终输出内容 diff，故 `--text` 请求的“按文本处理”已是默认行为；字段 `text` 解析后不被读取。注意与 `--binary`（输出二进制 patch 格式）不同，后者仍未公开）、`--no-ext-diff`（接受式 no-op：Libra 无外部 diff 驱动、始终用内建引擎，故“禁用外部 diff”已是默认行为；字段 `no_ext_diff` 解析后不被读取。外部 diff 驱动本身 `--ext-diff` / `diff.external` 仍未公开）、`--no-color-moved`（接受式 no-op：Libra 的 diff 从不做移动行检测/着色，故已是默认行为；字段 `no_color_moved` 解析后不被读取。Git 的反向 `--color-moved[=<mode>]` 未实现）、`--no-renames`/`--no-relative`/`--no-indent-heuristic`（接受式 no-op：Libra 不检测重命名（重命名显示为 delete+create）、始终用仓库根相对路径、不使用 Git 的 indent 启发式；三个字段解析后不被读取。对应的正向 `--renames`/`-M`、`--relative[=<path>]`、`--indent-heuristic` 均未公开）。`--shortstat` 只输出 `--stat` 的汇总行（零项省略）；`--exit-code` 仍打印 diff 但有差异时退出码为 1（区别于 `--quiet` 的静默）；`-s`/`--no-patch` 抑制 patch 主体（与 `--exit-code` 组合做状态检查）；`-z`/`--null` 对 `--name-only`/`--name-status`/`--numstat` 用 NUL 终止每条记录（且 `--name-status` 的状态与路径以 NUL 分隔、无尾随换行；由 `join_diff_records` 实现），其他模式不受影响。
 - 位置性两点范围 `diff A..B`：未给 `--old`/`--new`/`--staged` 且首个位置参数是两点范围、且两侧均能解析为提交时，由 `normalize_diff_range` 重写为 `--old A --new B`（`A..` 对工作树，`..B` 以 HEAD 为 old）；任一侧无法解析为提交则原样作为 pathspec（含 `..` 的真实路径不受影响）。三点 `A...B` 暂不处理。
 
 
@@ -62,6 +62,9 @@ flowchart TD
 | 兼容差异项 | Ignore whitespace | 原始对照：不支持；相关参数/替代：-w / --ignore-all-space；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 部分实现 | External diff tool | `--no-ext-diff` 作为接受式 no-op 已公开（Libra 无外部 diff 驱动、始终用内建引擎）；外部 diff 驱动本身（`--ext-diff` / `diff.external`）仍不支持。 |
 | 部分实现 | 移动行着色 | `--no-color-moved` 作为接受式 no-op 已公开（Libra 从不检测/着色移动行）；着色本身（`--color-moved[=<mode>]`）仍不支持。 |
+| 部分实现 | 重命名检测 | `--no-renames` 作为接受式 no-op 已公开（Libra 从不检测重命名，重命名显示为 delete+create）；检测本身（`--renames`/`-M`）仍不支持。 |
+| 部分实现 | 相对路径 | `--no-relative` 作为接受式 no-op 已公开（Libra 始终用仓库根相对路径）；`--relative[=<path>]` 仍不支持。 |
+| 部分实现 | Indent 启发式 | `--no-indent-heuristic` 作为接受式 no-op 已公开（Libra 不使用 Git 的 indent 启发式）；`--indent-heuristic` 仍不支持。 |
 
 ## 维护要求
 
