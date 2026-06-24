@@ -62,7 +62,7 @@
 | [`op`](op.md) | `intentionally-different` | Libra command-level operation history inspection/restore extension, not a Git command |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
-| [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, `--no-commit`, `--commit`, `--autostash`, and `--no-progress` (forwarded to the fetch) exposed |
+| [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--no-rebase` (countermands `--rebase`, last wins) / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, `--no-commit`, `--commit`, `--autostash`, and `--no-progress` (forwarded to the fetch) exposed |
 | [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete (`-d`/`--delete`), `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
 | [`rebase`](rebase.md) | `partial` | `--onto <newbase> [<upstream>] [<branch>]` supported; `--autosquash` / `--reapply-cherry-picks` not supported |
 | [`reflog`](reflog.md) | `supported` | show/delete/exists/expire supported; expire has documented intentional differences around no-ref handling, stale-fix depth, and updateref skips |

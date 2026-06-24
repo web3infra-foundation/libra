@@ -5,7 +5,7 @@ Fetch objects from a remote and integrate the fetched branch into the current br
 ## Synopsis
 
 ```text
-libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--no-progress] [--rebase] [--depth <n>] [<repository> [<refspec>]]
+libra pull [--ff-only] [--ff] [--no-ff] [--squash] [--no-commit] [--commit] [--autostash] [--no-progress] [--rebase] [--no-rebase] [--depth <n>] [<repository> [<refspec>]]
 ```
 
 ## Description
@@ -44,6 +44,7 @@ With `--autostash`, pull stashes your tracked working-tree changes before integr
 | `--no-progress` | Suppress the fetch progress meter (the "Receiving objects" spinner), matching `git pull --no-progress`. | `libra pull --no-progress` |
 | `--depth <n>` | Limit the fetch phase to a shallow history of `n` commits per tip. Conflicts with `--rebase`. | `libra pull --depth 1` |
 | `-r`, `--rebase` | After fetching, rebase the current branch onto the upstream tip instead of merging. | `libra pull --rebase` |
+| `--no-rebase` | Merge instead of rebasing (the default), countermanding an earlier `--rebase`/`-r` (last one wins). Pull merges by default, so on its own this is a no-op. | `libra pull --no-rebase` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra pull --json` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra pull --machine` |
 | `--quiet` | Suppress all progress and merge summary output. | `libra pull --quiet` |

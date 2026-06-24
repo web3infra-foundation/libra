@@ -160,6 +160,30 @@ fn test_pull_ff_only_conflicts_with_rebase_at_parse_time() {
     );
 }
 
+#[test]
+fn test_pull_no_rebase_countermands_rebase_at_parse_time() {
+    let repo = tempdir().expect("failed to create local repo");
+
+    // `--rebase --no-rebase` (last wins) is NOT a clap conflict: `--no-rebase`
+    // countermands `--rebase` via the symmetric override, so it parses and
+    // fails later at remote/tracking resolution, not at clap.
+    let output = run_libra_command(&["pull", "--rebase", "--no-rebase"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("cannot be used with") && !stderr.contains("unexpected argument"),
+        "pull --rebase --no-rebase parses (override, no conflict): {stderr}"
+    );
+
+    // `--no-rebase` is compatible with merge options like `--no-ff` (unlike
+    // `--rebase`, which conflicts with them).
+    let merge_opts = run_libra_command(&["pull", "--no-ff", "--no-rebase"], repo.path());
+    let merge_stderr = String::from_utf8_lossy(&merge_opts.stderr);
+    assert!(
+        !merge_stderr.contains("cannot be used with"),
+        "pull --no-ff --no-rebase parses (merge path): {merge_stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_pull_fast_forward_updates_head_from_tracking_remote() {

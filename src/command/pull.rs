@@ -54,8 +54,14 @@ pub struct PullArgs {
     refspec: Option<String>,
 
     /// Rebase the current branch onto the upstream after fetching instead of merging
-    #[clap(long, short = 'r')]
+    #[clap(long, short = 'r', overrides_with = "no_rebase")]
     rebase: bool,
+
+    /// Merge instead of rebasing (the default), countermanding an earlier
+    /// `--rebase`/`-r` (last one on the command line wins), matching `git pull
+    /// --no-rebase`. Pull merges by default, so on its own this is a no-op.
+    #[clap(long = "no-rebase", overrides_with = "rebase")]
+    no_rebase: bool,
 
     /// Refuse to merge unless the upstream can be fast-forwarded
     #[clap(long = "ff-only", conflicts_with_all = ["rebase", "ff", "no_ff"])]
@@ -222,6 +228,7 @@ impl PullArgs {
             repository,
             refspec,
             rebase: false,
+            no_rebase: false,
             ff_only: false,
             ff: false,
             no_ff: false,
