@@ -1080,3 +1080,26 @@ fn checkout_track_flag_is_accepted() {
         "checkout --track switched to main"
     );
 }
+
+#[test]
+fn test_checkout_ignore_other_worktrees_is_accepted_noop() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "create feature",
+    );
+
+    // `--ignore-other-worktrees` is accepted and a no-op: Libra worktrees share a
+    // single HEAD/refs store, so a branch is never locked to one worktree and the
+    // checkout proceeds normally.
+    let output = run_libra_command(&["checkout", "--ignore-other-worktrees", "feature"], p);
+    assert_cli_success(&output, "checkout --ignore-other-worktrees feature");
+    let current = run_libra_command(&["branch", "--show-current"], p);
+    assert!(
+        String::from_utf8_lossy(&current.stdout).contains("feature"),
+        "checkout switched to feature"
+    );
+}

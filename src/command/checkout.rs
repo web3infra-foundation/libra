@@ -77,6 +77,13 @@ pub struct CheckoutArgs {
     #[clap(short = 't', long = "track")]
     track: bool,
 
+    /// Check out a branch even if it is already checked out in another worktree.
+    /// Accepted for Git parity and is a no-op: Libra worktrees share a single
+    /// `HEAD`/refs store, so a branch is never locked to one worktree and there
+    /// is no other-worktree restriction to override.
+    #[clap(long = "ignore-other-worktrees")]
+    ignore_other_worktrees: bool,
+
     /// Paths to restore after an explicit `--` separator
     #[clap(last = true, value_name = "pathspec")]
     pathspec: Vec<String>,
