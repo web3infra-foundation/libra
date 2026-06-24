@@ -32,6 +32,7 @@ matching files or directories inside that committed tree are archived.
 | `--output <FILE>` | `-o` | Write archive bytes to a file instead of stdout | stdout |
 | `--prefix <PREFIX>` | | Prepend a relative directory prefix to each archived path | none |
 | `--verbose` | `-v` | Report each archived path (prefix applied) to stderr as progress | false |
+| `--add-file=<file>` | | Add an untracked working-tree file to the archive at its basename (under `--prefix`). Repeatable; not subject to the `[PATH]...` filter. Must appear before `[TREEISH]`. | none |
 
 `--prefix <PREFIX>` must be relative. Absolute prefixes and prefixes containing
 `..` path components are rejected to prevent archive path traversal.
@@ -60,6 +61,9 @@ libra archive --list
 
 # Archive only files under src/ from HEAD.
 libra archive -o src.tar HEAD src/
+
+# Include an untracked file (e.g. release notes) alongside the tree.
+libra archive --add-file=RELEASE_NOTES.txt -o release.tar HEAD
 ```
 
 ## Output
@@ -80,6 +84,8 @@ requested destination.
 | `PATH` does not match any archived file | `LBR-CLI-003` |
 | Unknown `--format <FMT>` value | `LBR-CLI-002` |
 | Unsafe `--prefix <PREFIX>` | `LBR-CLI-002` |
+| `--add-file=<file>` path is missing or unreadable | `LBR-IO-001` |
+| `--add-file=<file>` is not a regular file (e.g. a directory) | `LBR-CLI-002` |
 | Unsafe `PATH` pathspec | `LBR-CLI-002` |
 | Referenced repository object cannot be read | `LBR-REPO-002` |
 | Blob content cannot be read | `LBR-IO-001` |

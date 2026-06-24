@@ -125,6 +125,74 @@ fn archive_pathspec_limits_tar_entries_to_matching_file() {
 }
 
 #[test]
+fn archive_add_file_includes_untracked_working_tree_file() {
+    let repo = create_archive_test_repo();
+    let p = repo.path();
+    // An untracked file in the working tree (never committed).
+    std::fs::write(p.join("EXTRA.txt"), "added bytes\n").expect("write untracked file");
+
+    // `--add-file` must precede the tree-ish (the `paths` positional is
+    // trailing_var_arg), matching `git archive --add-file=<file> <tree>`.
+    let out = p.join("with-extra.tar");
+    let output = run_libra_command(
+        &[
+            "archive",
+            "-o",
+            out.to_str().unwrap(),
+            "--add-file=EXTRA.txt",
+            "HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&output, "archive --add-file");
+    let text = String::from_utf8_lossy(&read_bytes(&out)).to_string();
+    assert!(
+        text.contains("README.md"),
+        "tracked tree files must still be archived"
+    );
+    assert!(
+        text.contains("EXTRA.txt") && text.contains("added bytes"),
+        "the added file's name and content must be in the archive"
+    );
+
+    // Under --prefix the added file sits at <prefix><basename>.
+    let prefixed = p.join("prefixed.tar");
+    let output = run_libra_command(
+        &[
+            "archive",
+            "-o",
+            prefixed.to_str().unwrap(),
+            "--prefix=proj/",
+            "--add-file=EXTRA.txt",
+            "HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&output, "archive --add-file --prefix");
+    let prefixed_text = String::from_utf8_lossy(&read_bytes(&prefixed)).to_string();
+    assert!(
+        prefixed_text.contains("proj/EXTRA.txt"),
+        "added file must sit under the prefix at its basename"
+    );
+
+    // A missing --add-file path is a hard error, not a silent skip.
+    let missing = run_libra_command(
+        &[
+            "archive",
+            "-o",
+            out.to_str().unwrap(),
+            "--add-file=nope.txt",
+            "HEAD",
+        ],
+        p,
+    );
+    assert!(
+        !missing.status.success(),
+        "a non-existent --add-file path must fail"
+    );
+}
+
+#[test]
 fn archive_supports_compressed_and_zip_formats() {
     let repo = create_archive_test_repo();
 

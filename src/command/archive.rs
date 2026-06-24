@@ -33,6 +33,7 @@ EXAMPLES:
     libra archive --format=tar.gz --prefix=project-v1/ -o project-v1.tar.gz v1.0
     libra archive --format=zip -o feature.zip feature-branch
     libra archive -v -o project.tar HEAD   List archived paths on stderr
+    libra archive --add-file=NOTES.txt -o release.tar HEAD   Include an untracked file
     libra archive --list";
 
 /// Supported archive output formats.
@@ -102,15 +103,29 @@ pub struct ArchiveArgs {
     /// Report each archived path to stderr as progress.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    /// Add an untracked file (read from the working tree) to the archive at its
+    /// basename, under the optional prefix, like `git archive --add-file=<file>`.
+    /// Repeatable; added files are not subject to the `<path>` pathspec filter.
+    #[arg(long = "add-file", value_name = "FILE", action = clap::ArgAction::Append)]
+    pub add_file: Vec<String>,
 }
 
-/// Collected metadata about a single tree entry for archiving.
+/// Where an archive entry's bytes come from.
+enum ArchiveSource {
+    /// A tracked blob in the object store, read on demand by hash.
+    Blob(ObjectHash),
+    /// Inline bytes for an untracked file added via `--add-file`.
+    Inline(Vec<u8>),
+}
+
+/// Collected metadata about a single entry for archiving.
 struct ArchiveEntry {
     /// The logical path within the archive before the optional prefix is applied.
     path: PathBuf,
-    /// The blob hash to read content from.
-    hash: ObjectHash,
-    /// The file mode from the tree entry.
+    /// Where the entry's content comes from.
+    source: ArchiveSource,
+    /// The file mode (regular or executable) for the archive header.
     mode: TreeItemMode,
 }
 
@@ -157,7 +172,7 @@ fn collect_tree_entries(
             }
             _ => entries.push(ArchiveEntry {
                 path,
-                hash: item.id,
+                source: ArchiveSource::Blob(item.id),
                 mode: item.mode,
             }),
         }
@@ -168,8 +183,67 @@ fn collect_tree_entries(
 
 fn entry_has_archive_metadata(entry: &ArchiveEntry) -> bool {
     !entry.path.as_os_str().is_empty()
-        && !entry.hash.to_string().is_empty()
         && !matches!(entry.mode, TreeItemMode::Tree | TreeItemMode::Commit)
+}
+
+/// Read an entry's bytes — from its blob (tracked) or its inline buffer (an
+/// `--add-file` untracked file).
+fn load_entry_content(entry: &ArchiveEntry) -> Result<Vec<u8>, CliError> {
+    match &entry.source {
+        ArchiveSource::Blob(hash) => load_blob_content(hash),
+        ArchiveSource::Inline(data) => Ok(data.clone()),
+    }
+}
+
+/// Map a working-tree file's metadata to the archive header mode: executable
+/// when any execute bit is set (Unix), otherwise a regular file.
+#[cfg(unix)]
+fn add_file_mode(metadata: &std::fs::Metadata) -> TreeItemMode {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o111 != 0 {
+        TreeItemMode::BlobExecutable
+    } else {
+        TreeItemMode::Blob
+    }
+}
+
+/// On non-Unix platforms there is no execute bit to honor; added files are
+/// archived as regular files.
+#[cfg(not(unix))]
+fn add_file_mode(_metadata: &std::fs::Metadata) -> TreeItemMode {
+    TreeItemMode::Blob
+}
+
+/// Build an archive entry for an untracked `--add-file=<file>`: read the file
+/// from the working tree and place it at its basename. The optional `--prefix`
+/// is applied later by the writers, matching `git archive --add-file`.
+fn build_add_file_entry(spec: &str) -> Result<ArchiveEntry, CliError> {
+    let src = Path::new(spec);
+    let file_name = src.file_name().ok_or_else(|| {
+        CliError::command_usage(format!(
+            "invalid --add-file path '{spec}': it has no file name"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+    })?;
+    let metadata = std::fs::metadata(src).map_err(|error| {
+        CliError::fatal(format!("could not read --add-file '{spec}': {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    if !metadata.is_file() {
+        return Err(
+            CliError::command_usage(format!("--add-file '{spec}' is not a regular file"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
+    let data = std::fs::read(src).map_err(|error| {
+        CliError::fatal(format!("could not read --add-file '{spec}': {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(ArchiveEntry {
+        path: PathBuf::from(file_name),
+        source: ArchiveSource::Inline(data),
+        mode: add_file_mode(&metadata),
+    })
 }
 
 fn validate_pathspec(pathspec: &str) -> Result<PathBuf, CliError> {
@@ -351,7 +425,7 @@ fn write_tar_archive<W: Write>(
 
     for entry in entries {
         let archive_path = apply_prefix(prefix, &entry.path);
-        let data = load_blob_content(&entry.hash)?;
+        let data = load_entry_content(entry)?;
         let mode = tar_entry_mode(&entry.mode);
         let entry_type = tar_entry_type(&entry.mode);
 
@@ -449,7 +523,7 @@ fn write_zip_archive<W: Write + Seek>(
                 .with_stable_code(StableErrorCode::IoWriteFailed)
             })?
             .to_string();
-        let data = load_blob_content(&entry.hash)?;
+        let data = load_entry_content(entry)?;
 
         if entry.mode == TreeItemMode::Link {
             let symlink_options = zip::write::FileOptions::default()
@@ -584,7 +658,14 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
     })?;
     let prefix = validate_prefix(args.prefix.as_deref())?;
     let treeish = args.treeish.as_deref().unwrap_or("HEAD");
-    let entries = filter_entries_by_pathspecs(resolve_entries(treeish).await?, &args.paths)?;
+    let mut entries = filter_entries_by_pathspecs(resolve_entries(treeish).await?, &args.paths)?;
+
+    // `--add-file=<file>` appends untracked working-tree files (not subject to
+    // the pathspec filter), so an archive can include them alongside — or even
+    // instead of — tracked tree content.
+    for spec in &args.add_file {
+        entries.push(build_add_file_entry(spec)?);
+    }
 
     if entries.is_empty() {
         return Err(
@@ -738,7 +819,10 @@ mod tests {
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, PathBuf::from("docs/README.md"));
-        assert_eq!(entries[0].hash, hash);
+        assert!(
+            matches!(&entries[0].source, ArchiveSource::Blob(h) if *h == hash),
+            "tree entries should carry their blob hash"
+        );
         assert_eq!(entries[0].mode, TreeItemMode::Blob);
         assert_eq!(entries[1].path, PathBuf::from("docs/script.sh"));
         assert_eq!(entries[1].mode, TreeItemMode::BlobExecutable);
@@ -768,17 +852,17 @@ mod tests {
         let entries = vec![
             ArchiveEntry {
                 path: PathBuf::from("README.md"),
-                hash,
+                source: ArchiveSource::Blob(hash),
                 mode: TreeItemMode::Blob,
             },
             ArchiveEntry {
                 path: PathBuf::from("src/main.rs"),
-                hash,
+                source: ArchiveSource::Blob(hash),
                 mode: TreeItemMode::Blob,
             },
             ArchiveEntry {
                 path: PathBuf::from("src/lib.rs"),
-                hash,
+                source: ArchiveSource::Blob(hash),
                 mode: TreeItemMode::Blob,
             },
         ];

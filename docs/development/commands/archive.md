@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix`、`--list`、`-v`/`--verbose` 和 `TREEISH <path>...` pathspec 限定均已支持。
+- 兼容级别：`partial`。基础 archive 创建能力已公开；`--format`、`--output`、`--prefix`、`--list`、`-v`/`--verbose`、`--add-file=<file>`（把未跟踪的工作区文件按 basename 注入归档，应用 `--prefix`，不受 pathspec 过滤；可重复）和 `TREEISH <path>...` pathspec 限定均已支持。
 
 
 ## 设计方案
@@ -42,14 +42,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `archive`，`src/cli.rs::Commands::Archive` 负责 CLI 接入。
 - 用户文档：`docs/commands/archive.md`。
 - Synopsis：`libra archive [OPTIONS] [TREEISH] [PATH]...` / `libra archive --list`。
-- 公开参数包括：`[TREEISH]`、`[PATH]...`、`-l, --list`、`-f, --format <FMT>`、`-o, --output <FILE>`、`--prefix <PREFIX>`、`-v, --verbose`。
+- 公开参数包括：`[TREEISH]`、`[PATH]...`、`-l, --list`、`-f, --format <FMT>`、`-o, --output <FILE>`、`--prefix <PREFIX>`、`-v, --verbose`、`--add-file=<file>`（可重复）。`ArchiveEntry` 的内容来源抽象为 `ArchiveSource`（`Blob(hash)` 走对象库 / `Inline(Vec<u8>)` 走未跟踪文件），三种写入器统一经 `load_entry_content` 读取，因此 `--add-file` 不向对象库写入任何 blob。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `--add-file=<file>`（把未跟踪的工作区文件追加进归档） | 未公开；条目仅来自已解析的树，需要读文件系统并注入 `ArchiveEntry`。命令层。 |
+| ✅ 已实现 | `--add-file=<file>`（把未跟踪的工作区文件追加进归档） | `ArchiveSource::Inline` + `build_add_file_entry` 读取工作区文件（保留 Unix 执行位），按 basename 注入（应用 `--prefix`、绕过 pathspec 过滤、不写对象库）；缺失/非常规文件报错。带集成测试 `archive_add_file_includes_untracked_working_tree_file`。 |
 | Git flag | `-0`..`-9` / 压缩级别 | 未公开；gzip/bzip2/zip 均使用 `Compression::default()` 硬编码（`archive.rs`）。命令层。 |
 | ✅ 已实现 | `-v` / `--verbose`（向 stderr 报告进度） | 已实现：在 `execute_safe` 写归档前，按归档条目顺序把每个（应用 `--prefix` 后的）路径打印到 stderr，对齐 `git archive -v`；归档字节仍走 `-o`/stdout，verbose 不污染 stdout。带集成测试（`test_archive_verbose_lists_paths_on_stderr`）。 |
 | Git flag | `--remote=<repo>` / `--exec=<cmd>`（从远端取归档） | 未公开；依赖 `upload-archive` 协议，需打通 `src/internal/protocol`，协议层改造。 |
