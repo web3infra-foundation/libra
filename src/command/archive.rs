@@ -34,6 +34,7 @@ EXAMPLES:
     libra archive --format=zip -o feature.zip feature-branch
     libra archive -v -o project.tar HEAD   List archived paths on stderr
     libra archive --add-file=NOTES.txt -o release.tar HEAD   Include an untracked file
+    libra archive --format=tar.gz --compression-level=9 -o max.tgz HEAD   Max compression
     libra archive --list";
 
 /// Supported archive output formats.
@@ -109,6 +110,13 @@ pub struct ArchiveArgs {
     /// Repeatable; added files are not subject to the `<path>` pathspec filter.
     #[arg(long = "add-file", value_name = "FILE", action = clap::ArgAction::Append)]
     pub add_file: Vec<String>,
+
+    /// Compression level 0-9 for the compressed formats (`tar.gz`, `tar.bz2`,
+    /// `zip`); ignored for plain `tar`. Git exposes this as `-0`..`-9`, which
+    /// clap cannot model as bare numeric flags, so Libra uses this long form.
+    /// (bzip2 has no level 0, so 0 is treated as 1 there.)
+    #[arg(long = "compression-level", value_name = "LEVEL", value_parser = clap::value_parser!(u32).range(0..=9))]
+    pub compression_level: Option<u32>,
 }
 
 /// Where an archive entry's bytes come from.
@@ -477,8 +485,11 @@ fn write_tar_gz_archive<W: Write>(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     writer: W,
+    level: Option<u32>,
 ) -> Result<(), CliError> {
-    let gz = GzEncoder::new(writer, Compression::default());
+    // flate2 accepts levels 0-9 (0 = no compression); default is 6.
+    let compression = level.map(Compression::new).unwrap_or_default();
+    let gz = GzEncoder::new(writer, compression);
     write_tar_archive(entries, prefix, gz)
 }
 
@@ -487,8 +498,13 @@ fn write_tar_bz2_archive<W: Write>(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     writer: W,
+    level: Option<u32>,
 ) -> Result<(), CliError> {
-    let bz = BzEncoder::new(writer, bzip2::Compression::default());
+    // bzip2 levels are 1-9 (no "store" level), so a requested 0 maps to 1.
+    let compression = level
+        .map(|l| bzip2::Compression::new(l.clamp(1, 9)))
+        .unwrap_or_default();
+    let bz = BzEncoder::new(writer, compression);
     write_tar_archive(entries, prefix, bz)
 }
 
@@ -506,10 +522,12 @@ fn write_zip_archive<W: Write + Seek>(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     writer: W,
+    level: Option<u32>,
 ) -> Result<(), CliError> {
     let mut archive = zip::ZipWriter::new(writer);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(level.map(|l| l as i32));
 
     for entry in entries {
         let archive_path = apply_prefix(prefix, &entry.path);
@@ -594,13 +612,14 @@ fn write_zip_output(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     output: Option<&str>,
+    level: Option<u32>,
 ) -> Result<(), CliError> {
     if let Some(path) = output {
-        return write_zip_archive(entries, prefix, create_output_file(path)?);
+        return write_zip_archive(entries, prefix, create_output_file(path)?, level);
     }
 
     let mut buffer = Cursor::new(Vec::new());
-    write_zip_archive(entries, prefix, &mut buffer)?;
+    write_zip_archive(entries, prefix, &mut buffer, level)?;
 
     let mut stdout = std::io::stdout();
     stdout.write_all(&buffer.into_inner()).map_err(|error| {
@@ -619,21 +638,23 @@ fn create_archive(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     output: Option<&str>,
+    level: Option<u32>,
 ) -> Result<(), CliError> {
     match format {
         ArchiveFormat::Tar => {
+            // Plain tar is uncompressed; the level is not applicable.
             let writer = open_output(output)?;
             write_tar_archive(entries, prefix, writer)
         }
         ArchiveFormat::TarGz => {
             let writer = open_output(output)?;
-            write_tar_gz_archive(entries, prefix, writer)
+            write_tar_gz_archive(entries, prefix, writer, level)
         }
         ArchiveFormat::TarBz2 => {
             let writer = open_output(output)?;
-            write_tar_bz2_archive(entries, prefix, writer)
+            write_tar_bz2_archive(entries, prefix, writer, level)
         }
-        ArchiveFormat::Zip => write_zip_output(entries, prefix, output),
+        ArchiveFormat::Zip => write_zip_output(entries, prefix, output, level),
     }
 }
 
@@ -684,7 +705,13 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
         }
     }
 
-    create_archive(format, &entries, prefix.as_deref(), args.output.as_deref())
+    create_archive(
+        format,
+        &entries,
+        prefix.as_deref(),
+        args.output.as_deref(),
+        args.compression_level,
+    )
 }
 
 #[cfg(test)]
@@ -958,7 +985,7 @@ mod tests {
     fn write_tar_gz_archive_accepts_empty_entries() {
         let mut buf = Vec::new();
 
-        write_tar_gz_archive(&[], None, &mut buf).expect("empty tar.gz should finalize");
+        write_tar_gz_archive(&[], None, &mut buf, None).expect("empty tar.gz should finalize");
 
         assert!(buf.starts_with(&[0x1f, 0x8b]));
     }
@@ -967,7 +994,7 @@ mod tests {
     fn write_tar_bz2_archive_accepts_empty_entries() {
         let mut buf = Vec::new();
 
-        write_tar_bz2_archive(&[], None, &mut buf).expect("empty tar.bz2 should finalize");
+        write_tar_bz2_archive(&[], None, &mut buf, None).expect("empty tar.bz2 should finalize");
 
         assert!(buf.starts_with(b"BZh"));
     }
@@ -983,7 +1010,7 @@ mod tests {
     fn write_zip_archive_accepts_empty_entries() {
         let mut buf = Cursor::new(Vec::new());
 
-        write_zip_archive(&[], None, &mut buf).expect("empty zip should finalize");
+        write_zip_archive(&[], None, &mut buf, None).expect("empty zip should finalize");
 
         assert!(buf.into_inner().starts_with(b"PK"));
     }

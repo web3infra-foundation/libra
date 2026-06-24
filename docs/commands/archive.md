@@ -33,6 +33,7 @@ matching files or directories inside that committed tree are archived.
 | `--prefix <PREFIX>` | | Prepend a relative directory prefix to each archived path | none |
 | `--verbose` | `-v` | Report each archived path (prefix applied) to stderr as progress | false |
 | `--add-file=<file>` | | Add an untracked working-tree file to the archive at its basename (under `--prefix`). Repeatable; not subject to the `[PATH]...` filter. Must appear before `[TREEISH]`. | none |
+| `--compression-level <0-9>` | | Compression level for `tar.gz`/`tar.bz2`/`zip` (ignored for plain `tar`). This is Git's `-0`..`-9`, which clap can't model as bare numeric flags. bzip2 has no level 0, so 0 is treated as 1. | format default |
 
 `--prefix <PREFIX>` must be relative. Absolute prefixes and prefixes containing
 `..` path components are rejected to prevent archive path traversal.

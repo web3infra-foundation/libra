@@ -22,7 +22,7 @@
 | 命令 | 兼容级别 | 当前说明 |
 |---|---|---|
 | [`add`](add.md) | `partial` | sparse-checkout flag unsupported |
-| [`archive`](archive.md) | `partial` | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix`, `--list`, `-v`/`--verbose`, `--add-file=<file>` (inject an untracked file; repeatable), and `TREEISH <path>...` supported |
+| [`archive`](archive.md) | `partial` | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix`, `--list`, `-v`/`--verbose`, `--add-file=<file>` (inject an untracked file; repeatable), `--compression-level <0-9>` (Git's `-0`..`-9`), and `TREEISH <path>...` supported |
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |
 | [`bisect`](bisect.md) | `partial` | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` and `start --first-parent` supported; `replay` (see [docs/development/comma... |

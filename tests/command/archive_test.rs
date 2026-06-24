@@ -684,3 +684,83 @@ fn test_archive_verbose_lists_paths_on_stderr() {
         "verbose should list the prefixed path on stderr: {stderr}"
     );
 }
+
+/// `--compression-level <0-9>` is threaded into the gzip/bzip2/zip encoders:
+/// for highly compressible data, level 9 produces a smaller archive than level
+/// 0, and an out-of-range level is rejected by the parser.
+#[test]
+fn archive_compression_level_affects_output() {
+    let repo = create_archive_test_repo();
+    let p = repo.path();
+    // A large, highly compressible committed file so the level is observable.
+    fs::write(p.join("big.txt"), "a".repeat(20_000)).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "big.txt"], p), "add big.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "big", "--no-verify"], p),
+        "commit big.txt",
+    );
+
+    let out0 = p.join("l0.tar.gz");
+    let out9 = p.join("l9.tar.gz");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "archive",
+                "--format=tar.gz",
+                "--compression-level=0",
+                "-o",
+                out0.to_str().unwrap(),
+                "HEAD",
+            ],
+            p,
+        ),
+        "archive level 0",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "archive",
+                "--format=tar.gz",
+                "--compression-level=9",
+                "-o",
+                out9.to_str().unwrap(),
+                "HEAD",
+            ],
+            p,
+        ),
+        "archive level 9",
+    );
+    let s0 = read_bytes(&out0);
+    let s9 = read_bytes(&out9);
+    assert!(
+        is_gzip(&s0) && is_gzip(&s9),
+        "both levels produce gzip output"
+    );
+    assert!(
+        s9.len() < s0.len(),
+        "level 9 ({}) must be smaller than level 0 ({}) for compressible data",
+        s9.len(),
+        s0.len()
+    );
+
+    // An out-of-range level is rejected by the parser.
+    assert!(
+        !run_libra_command(
+            &[
+                "archive",
+                "--format=tar.gz",
+                "--compression-level=10",
+                "HEAD"
+            ],
+            p
+        )
+        .status
+        .success(),
+        "--compression-level=10 must be rejected"
+    );
+
+    // zip also honors the level and stays a valid zip.
+    let z = run_libra_command(&["archive", "--format=zip", "--compression-level=9"], p);
+    assert_cli_success(&z, "zip with --compression-level");
+    assert!(is_zip(&z.stdout), "zip output is valid");
+}
