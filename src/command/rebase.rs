@@ -672,6 +672,13 @@ pub struct RebaseArgs {
     /// Explicitly replay clean cherry-pick commits instead of dropping them
     #[clap(long = "reapply-cherry-picks", conflicts_with_all = ["continue_rebase", "abort", "skip"])]
     pub reapply_cherry_picks: bool,
+
+    /// Do not stash and re-apply a dirty working tree around the rebase.
+    /// Accepted for Git parity and is a no-op: Libra's rebase never autostashes
+    /// (it requires a clean tree), so this already matches the default. (Git's
+    /// opposite `--autostash` is not implemented.)
+    #[clap(long = "no-autostash")]
+    pub no_autostash: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

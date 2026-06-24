@@ -907,6 +907,20 @@ fn test_rebase_reapply_cherry_picks_flag_is_accepted() {
 }
 
 #[test]
+fn test_rebase_no_autostash_flag_is_accepted_noop() {
+    let repo = create_cli_rebase_success_repo();
+
+    // `--no-autostash` is accepted and a no-op: Libra's rebase never autostashes
+    // (it requires a clean tree), so the rebase proceeds normally.
+    let output = run_libra_command(&["--json", "rebase", "--no-autostash", "main"], repo.path());
+    assert_cli_success(&output, "rebase --no-autostash");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["status"], "completed");
+    assert_eq!(json["data"]["replay_count"], 1);
+}
+
+#[test]
 fn test_rebase_human_start_uses_structured_runner_output() {
     let repo = create_cli_rebase_success_repo();
 
@@ -1379,6 +1393,7 @@ async fn test_basic_rebase() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -1581,6 +1596,7 @@ async fn test_rebase_preserves_untracked_files() {
     fs::write(temp_path.path().join("notes.txt"), "keep me").unwrap();
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -1692,6 +1708,7 @@ async fn test_rebase_already_up_to_date() {
 
     // Try to rebase feature onto master (should be up to date)
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -1856,6 +1873,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 
     // Start rebase
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -1877,6 +1895,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     // Rebase should complete (no conflict in this case)
     // But let's test abort when no rebase is in progress
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2057,6 +2076,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     })
     .await;
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -2105,6 +2125,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
 
     // Abort should restore the original branch ref.
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2178,6 +2199,7 @@ async fn test_rebase_continue_no_rebase() {
 
     // Try to continue when no rebase is in progress
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2233,6 +2255,7 @@ async fn test_rebase_skip_no_rebase() {
 
     // Try to skip when no rebase is in progress
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2400,6 +2423,7 @@ async fn test_rebase_with_conflict_and_abort() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -2428,6 +2452,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 6. Abort the rebase
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2619,6 +2644,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
     })
     .await;
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -2650,6 +2676,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
 
     // Cleanup: abort rebase
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -2859,6 +2886,7 @@ async fn test_rebase_with_conflict_and_skip() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -2879,6 +2907,7 @@ async fn test_rebase_with_conflict_and_skip() {
     );
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -3056,6 +3085,7 @@ async fn test_rebase_with_conflict_and_continue() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -3100,6 +3130,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // Continue the rebase
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -3357,6 +3388,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -3378,6 +3410,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // Skip the conflicting commit (F1)
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -3567,6 +3600,7 @@ async fn test_rebase_state_persistence() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -3605,6 +3639,7 @@ async fn test_rebase_state_persistence() {
 
     // Clean up - abort the rebase
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -3749,6 +3784,7 @@ async fn test_rebase_fast_forward_branch_behind() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -3896,6 +3932,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     fs::write(temp_path.path().join("file.txt"), "local-modification").unwrap();
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4043,6 +4080,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     fs::write(temp_path.path().join("new.txt"), "local-untracked").unwrap();
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4221,6 +4259,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     fs::write(temp_path.path().join("file.txt"), "dirty").unwrap();
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4404,6 +4443,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4430,6 +4470,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
     // Clean up
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -4612,6 +4653,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     fs::write(temp_path.path().join("new.txt"), "keep me").unwrap();
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4635,6 +4677,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     // Clean up
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -4796,6 +4839,7 @@ async fn test_rebase_continue_requires_resolution() {
     .await;
 
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: Some("main".to_string()),
@@ -4818,6 +4862,7 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Continue without resolving conflicts
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,
@@ -4840,6 +4885,7 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Clean up
     execute(RebaseArgs {
+        no_autostash: false,
         onto: None,
         branch: None,
         upstream: None,

@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互。已支持 `--onto <newbase> [<upstream>] [<branch>]`（重放 `<upstream>..HEAD` 区间到 `<newbase>`，第三 positional 先切换分支）；interactive、exec、autosquash、rebase-merges 等能力仍列为未完成。
+`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互。已支持 `--onto <newbase> [<upstream>] [<branch>]`（重放 `<upstream>..HEAD` 区间到 `<newbase>`，第三 positional 先切换分支）；`--autosquash`（fixup!/squash!/amend! 折叠）与 `--reapply-cherry-picks` 已支持，`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash）已公开；interactive、exec、`--autostash`（正向 auto-stash）、rebase-merges 等能力仍列为未完成。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--autosquash` / `--reapply-cherry-picks` not supported
+- 兼容级别：`partial`。`--onto <newbase> [<upstream>] [<branch>]`、`--autosquash`、`--reapply-cherry-picks` 与 `--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash，要求干净工作树；字段 `no_autostash` 解析后不被读取。Git 的反向 `--autostash` 未实现）已支持；interactive/exec/`--rebase-merges` 未支持
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -56,10 +56,11 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `--autosquash` / `--reapply-cherry-picks` not 支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | `--onto`/`--autosquash`/`--reapply-cherry-picks`/`--no-autostash`(no-op) 已支持；interactive/`--rebase-merges`/`--autostash` 未支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Interactive | 原始对照：不支持；相关参数/替代：-i / --interactive；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Exec | 原始对照：不支持；相关参数/替代：--exec <cmd>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Autosquash | 原始对照：不支持；相关参数/替代：--autosquash；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Autosquash | `--autosquash` 已支持（fixup!/squash!/amend! 移动并折叠到目标提交）。 |
+| 部分实现 | Autostash | `--no-autostash` 作为接受式 no-op 已公开（Libra 的 rebase 从不 autostash，要求干净工作树）；`--autostash`（正向 auto-stash）仍未实现。 |
 | 兼容差异项 | Rebase merges | 原始对照：不支持；相关参数/替代：--rebase-merges；当前说明：默认行为。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Keep empty | 原始对照：不支持；相关参数/替代：--keep-empty / --no-keep-empty；当前说明：Default keeps empty。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
