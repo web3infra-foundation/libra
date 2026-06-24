@@ -1766,3 +1766,105 @@ async fn test_config_null_terminated_output() {
         "-z with --ssh-keys must be rejected as a usage error"
     );
 }
+
+/// `--type=<bool|int|path>` and the `--bool`/`--int`/`--path` shortcuts
+/// canonicalize a value when reading (`git config --type`): bool variants,
+/// int k/m/g multipliers, and `~` path expansion. Invalid values error, and
+/// the flags are rejected outside get modes / for an unknown type.
+#[tokio::test]
+#[serial]
+async fn test_config_typed_get() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+    let set = |k: &str, v: &str| {
+        assert_cli_success(&run_libra_command(&["config", "--local", k, v], p), "set");
+    };
+    set("flag.on", "yes");
+    set("flag.off", "0");
+    set("num.size", "1k");
+    set("num.bad", "notanint");
+    set("p.home", "~/work");
+
+    // --bool: yes → true, 0 → false.
+    let b = run_libra_command(&["config", "--local", "--bool", "--get", "flag.on"], p);
+    assert_cli_success(&b, "--bool get");
+    assert_eq!(String::from_utf8_lossy(&b.stdout).trim(), "true");
+    let b2 = run_libra_command(&["config", "--local", "--bool", "--get", "flag.off"], p);
+    assert_eq!(String::from_utf8_lossy(&b2.stdout).trim(), "false");
+
+    // --int and --type=int both apply the k multiplier: 1k → 1024.
+    let i = run_libra_command(&["config", "--local", "--int", "--get", "num.size"], p);
+    assert_cli_success(&i, "--int get");
+    assert_eq!(String::from_utf8_lossy(&i.stdout).trim(), "1024");
+    let it = run_libra_command(
+        &["config", "--local", "--type", "int", "--get", "num.size"],
+        p,
+    );
+    assert_cli_success(&it, "--type int get");
+    assert_eq!(String::from_utf8_lossy(&it.stdout).trim(), "1024");
+
+    // A non-int value with --int errors.
+    assert!(
+        !run_libra_command(&["config", "--local", "--int", "--get", "num.bad"], p)
+            .status
+            .success(),
+        "non-int value with --int must error"
+    );
+
+    // --path expands a leading ~/.
+    let pa = run_libra_command(&["config", "--local", "--path", "--get", "p.home"], p);
+    assert_cli_success(&pa, "--path get");
+    let pout = String::from_utf8_lossy(&pa.stdout);
+    assert!(
+        !pout.trim().starts_with('~') && pout.trim().ends_with("/work"),
+        "--path must expand a leading ~/: {pout}"
+    );
+
+    // The type flags are rejected outside get modes and for an unknown type.
+    assert_eq!(
+        run_libra_command(&["config", "--local", "--bool", "--list"], p)
+            .status
+            .code(),
+        Some(129),
+        "--bool with --list must be rejected (129)"
+    );
+    assert_eq!(
+        run_libra_command(
+            &["config", "--local", "--type", "frob", "--get", "flag.on"],
+            p
+        )
+        .status
+        .code(),
+        Some(129),
+        "unknown --type must be rejected (129)"
+    );
+
+    // Two type selectors at once are mutually exclusive (clap rejects).
+    assert!(
+        !run_libra_command(
+            &["config", "--local", "--bool", "--int", "--get", "flag.on"],
+            p
+        )
+        .status
+        .success(),
+        "--bool --int together must be rejected"
+    );
+
+    // No whitespace trimming: a padded value is not a valid bool (matches Git).
+    set("flag.padded", " true ");
+    assert!(
+        !run_libra_command(&["config", "--local", "--bool", "--get", "flag.padded"], p)
+            .status
+            .success(),
+        "a whitespace-padded bool value must be rejected"
+    );
+
+    // An explicit empty value canonicalizes to false (git: `if (!*value) return
+    // 0`; only a valueless key is true, which Libra's string storage never has).
+    set("flag.empty", "");
+    let e = run_libra_command(&["config", "--local", "--bool", "--get", "flag.empty"], p);
+    assert_cli_success(&e, "--bool get empty");
+    assert_eq!(String::from_utf8_lossy(&e.stdout).trim(), "false");
+}

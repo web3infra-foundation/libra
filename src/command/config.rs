@@ -292,6 +292,24 @@ pub struct ConfigArgs {
     /// and `key\nvalue\0` for `--get-regexp` / `--list`.
     #[clap(short = 'z', long = "null", global = true)]
     pub null: bool,
+    /// Canonicalize the value to a type when reading (`git config --type=<t>`:
+    /// `bool`, `int`, or `path`). Mutually exclusive with the shortcut flags.
+    #[clap(
+        long = "type",
+        value_name = "TYPE",
+        hide = true,
+        group = "config_type_sel"
+    )]
+    pub value_type: Option<String>,
+    /// Shortcut for `--type=bool`.
+    #[clap(long = "bool", hide = true, group = "config_type_sel")]
+    pub type_bool: bool,
+    /// Shortcut for `--type=int`.
+    #[clap(long = "int", hide = true, group = "config_type_sel")]
+    pub type_int: bool,
+    /// Shortcut for `--type=path`.
+    #[clap(long = "path", hide = true, group = "config_type_sel")]
+    pub type_path: bool,
 
     // ── Scope flags ──────────────────────────────────────────────────
     /// Use repository config (default)
@@ -513,6 +531,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             regexp,
             default,
             null,
+            value_type,
         } => {
             handle_get(
                 &key,
@@ -523,6 +542,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 scope,
                 use_cascade,
                 null,
+                value_type,
                 output,
             )
             .await
@@ -598,6 +618,8 @@ enum ResolvedCommand {
         default: Option<String>,
         /// NUL-terminate output records (`-z`/`--null`).
         null: bool,
+        /// Canonicalize the read value to this type (`--type`/`--bool`/etc.).
+        value_type: Option<ConfigValueType>,
     },
     List {
         name_only: bool,
@@ -635,6 +657,22 @@ enum ResolvedCommand {
 }
 
 fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
+    // `--type`/`--bool`/`--int`/`--path` canonicalize a value when READING, so
+    // they are only valid with a get operation. Resolve them once and reject
+    // any other mode up front rather than silently ignoring the flag.
+    let value_type = resolve_value_type(args)?;
+    if value_type.is_some()
+        && !(args.get
+            || args.get_all
+            || args.get_regexp
+            || matches!(args.command, Some(ConfigCommand::Get { .. })))
+    {
+        return Err(CliError::command_usage(
+            "--type/--bool/--int/--path is only valid with --get/--get-all/--get-regexp",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
     // If an explicit subcommand was provided, use it directly
     if let Some(ref cmd) = args.command {
         return Ok(match cmd {
@@ -666,6 +704,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 regexp: *regexp,
                 default: default.clone(),
                 null: args.null,
+                value_type,
             },
             ConfigCommand::List {
                 name_only,
@@ -800,6 +839,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             regexp: true,
             default: args.default.clone(),
             null: args.null,
+            value_type,
         });
     }
     if args.get {
@@ -810,6 +850,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             regexp: false,
             default: args.default.clone(),
             null: args.null,
+            value_type,
         });
     }
     if args.get_all {
@@ -820,6 +861,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             regexp: false,
             default: args.default.clone(),
             null: args.null,
+            value_type,
         });
     }
     if args.unset {
@@ -1081,6 +1123,106 @@ async fn render_get_value(
     Ok(decrypted)
 }
 
+/// Value type for `--type`/`--bool`/`--int`/`--path` canonicalization on read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigValueType {
+    Bool,
+    Int,
+    Path,
+}
+
+/// Resolve the requested read type from `--type=<t>` or a `--bool`/`--int`/
+/// `--path` shortcut. Returns `None` when none was requested; errors on an
+/// unknown `--type`.
+fn resolve_value_type(args: &ConfigArgs) -> CliResult<Option<ConfigValueType>> {
+    if args.type_bool {
+        return Ok(Some(ConfigValueType::Bool));
+    }
+    if args.type_int {
+        return Ok(Some(ConfigValueType::Int));
+    }
+    if args.type_path {
+        return Ok(Some(ConfigValueType::Path));
+    }
+    match args.value_type.as_deref() {
+        None => Ok(None),
+        Some("bool") => Ok(Some(ConfigValueType::Bool)),
+        Some("int") => Ok(Some(ConfigValueType::Int)),
+        Some("path") => Ok(Some(ConfigValueType::Path)),
+        Some(other) => Err(CliError::command_usage(format!(
+            "error: unsupported --type '{other}' (expected bool, int, or path)"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)),
+    }
+}
+
+/// Canonicalize a stored value to the requested type when reading, mirroring
+/// `git config --type`. Errors on values that are not valid for the type.
+fn canonicalize_typed_value(value: &str, ty: ConfigValueType) -> CliResult<String> {
+    match ty {
+        ConfigValueType::Bool => {
+            // git `git_parse_maybe_bool_text`: true/yes/on/1 → true; an explicit
+            // empty value and false/no/off/0 → false (`if (!*value) return 0`).
+            // Only a *valueless* key (NULL) is true, but Libra always stores an
+            // explicit string, so empty → false. The comparison is on the raw
+            // value (no trimming), so a padded " true " is not a valid bool →
+            // error, matching Git.
+            match value.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => Ok("true".to_string()),
+                "false" | "no" | "off" | "0" | "" => Ok("false".to_string()),
+                _ => Err(CliError::command_usage(format!(
+                    "error: cannot convert value '{value}' to bool"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)),
+            }
+        }
+        ConfigValueType::Int => {
+            // git: optional k/m/g (case-insensitive) 1024-based multiplier. The
+            // value is parsed without trimming, so surrounding whitespace makes
+            // it invalid (the numeric parse rejects it).
+            let v = value;
+            let (num, mult) = match v.chars().last() {
+                Some('k') | Some('K') => (&v[..v.len() - 1], 1024_i64),
+                Some('m') | Some('M') => (&v[..v.len() - 1], 1024 * 1024),
+                Some('g') | Some('G') => (&v[..v.len() - 1], 1024 * 1024 * 1024),
+                _ => (v, 1),
+            };
+            let base: i64 = num.parse().map_err(|_| {
+                CliError::command_usage(format!("error: cannot convert value '{value}' to int"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            })?;
+            let scaled = base.checked_mul(mult).ok_or_else(|| {
+                CliError::command_usage(format!("error: integer value '{value}' overflows"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+            })?;
+            Ok(scaled.to_string())
+        }
+        ConfigValueType::Path => {
+            // git --path: expand a leading `~`/`~/` to the home directory.
+            // `~user` expansion is not supported (returned unchanged).
+            if value == "~"
+                && let Some(home) = dirs::home_dir()
+            {
+                return Ok(home.to_string_lossy().into_owned());
+            }
+            if let Some(rest) = value.strip_prefix("~/")
+                && let Some(home) = dirs::home_dir()
+            {
+                return Ok(home.join(rest).to_string_lossy().into_owned());
+            }
+            Ok(value.to_string())
+        }
+    }
+}
+
+/// Apply an optional `--type` canonicalization to a read value.
+fn apply_value_type(value: String, ty: Option<ConfigValueType>) -> CliResult<String> {
+    match ty {
+        Some(t) => canonicalize_typed_value(&value, t),
+        None => Ok(value),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_get(
     key: &str,
@@ -1091,6 +1233,7 @@ async fn handle_get(
     scope: ConfigScope,
     use_cascade: bool,
     null: bool,
+    value_type: Option<ConfigValueType>,
     output: &OutputConfig,
 ) -> CliResult<()> {
     // Block --reveal for vault internal keys on exact-key queries
@@ -1141,7 +1284,10 @@ async fn handle_get(
         // Build display values with decryption support
         let mut display_entries = Vec::new();
         for (e, s) in &entries {
-            let val = render_get_value(e, reveal, *s, use_cascade).await?;
+            let val = apply_value_type(
+                render_get_value(e, reveal, *s, use_cascade).await?,
+                value_type,
+            )?;
             display_entries.push((e, s, val));
         }
 
@@ -1189,6 +1335,8 @@ async fn handle_get(
         if entries.is_empty()
             && let Some(d) = default
         {
+            // Canonicalize the default through `--type` like a stored value.
+            let d = apply_value_type(d.to_string(), value_type)?;
             if output.is_json() {
                 emit_json_data(
                     "config",
@@ -1213,7 +1361,10 @@ async fn handle_get(
         // Build display values with decryption support
         let mut display_entries = Vec::new();
         for (e, s) in &entries {
-            let val = render_get_value(e, reveal, *s, use_cascade).await?;
+            let val = apply_value_type(
+                render_get_value(e, reveal, *s, use_cascade).await?,
+                value_type,
+            )?;
             display_entries.push((e, s, val));
         }
 
@@ -1254,12 +1405,15 @@ async fn handle_get(
 
         let (display_value, default_applied, origin_scope) = match entry {
             Some((ref e, s)) => {
-                let val = render_get_value(e, reveal, s, use_cascade).await?;
+                let val = apply_value_type(
+                    render_get_value(e, reveal, s, use_cascade).await?,
+                    value_type,
+                )?;
                 (val, false, Some(s))
             }
             None => {
                 if let Some(d) = default {
-                    (d.to_string(), true, None)
+                    (apply_value_type(d.to_string(), value_type)?, true, None)
                 } else {
                     // Spell correction: find closest matching key
                     let all_keys = if use_cascade {

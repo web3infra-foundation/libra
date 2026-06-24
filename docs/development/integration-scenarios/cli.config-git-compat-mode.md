@@ -29,7 +29,7 @@ libra config --unset-all remote.origin.fetch
 libra config --get -d fallback missing.compat
 libra config --get --default fallback-long missing.compat.long
 
-# 类型别名（--bool/--int/--path 等价于 --type=<t>；--type 语义细节由 cargo 命令测试覆盖）
+# 类型别名（--bool/--int/--path 等价于 --type=<t>，读取时规范化值；语义细节由 cargo 测试 test_config_typed_get 覆盖）
 libra config set custom.boolflag yes
 libra config --bool --get custom.boolflag        # 输出 true
 libra config set custom.intval 1k

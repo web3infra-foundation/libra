@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。vault-backed local/global config 已支持；section 操作 `--remove-section <name>` / `--rename-section <old> <new>`（事务化，采用 Git 的 section/subsection 身份而非裸前缀——`--remove-section branch` 删除 `branch.<key>` 但不动 `branch.feature.*` 子节）已支持；`-z`/`--null` NUL 分隔输出（get/get-all 输出 `value\0`，`--get-regexp`/`--list` 输出 `key\nvalue\0`，`--name-only` 输出 `key\0`，`--show-origin` 前缀 `origin\0`）已支持；system scope、editor round-trip、类型转换和 includeIf 尚未完整支持。
+- 兼容级别：`partial`。vault-backed local/global config 已支持；section 操作 `--remove-section <name>` / `--rename-section <old> <new>`（事务化，采用 Git 的 section/subsection 身份而非裸前缀——`--remove-section branch` 删除 `branch.<key>` 但不动 `branch.feature.*` 子节）已支持；`-z`/`--null` NUL 分隔输出（get/get-all 输出 `value\0`，`--get-regexp`/`--list` 输出 `key\nvalue\0`，`--name-only` 输出 `key\0`，`--show-origin` 前缀 `origin\0`）已支持；读取时的类型规范化 `--type=<bool|int|path>` 及 `--bool`/`--int`/`--path` 快捷方式（bool 变体→true/false、int 的 k/m/g 1024 倍率、path 的 `~`/`~/` 展开）已支持；system scope、editor round-trip 和 includeIf 尚未完整支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/config.md`。
 - Synopsis：`libra config [OPTIONS] [key] [value] [COMMAND]`。
-- 公开参数/子命令包括：`set`、`get`、`list`、`unset`、`import`、`path`、`edit`、`generate-ssh-key`、`generate-gpg-key`、`--local`、`--global`、`-d, --default <DEFAULT>` 等（另含隐藏 Git 兼容标志 `--get`、`--get-all`、`--unset`、`--unset-all`、`-l, --list`、`--add`、`--import`、`--get-regexp`、`--show-origin`、`--remove-section`、`--rename-section`）。`--remove-section <name>` / `--rename-section <old> <new>` 经 `ScopedConfig::get_connection` + sea-orm 事务执行：先 `begin()`，再在事务内 `get_by_prefix_with_conn` 取候选并用 `key_in_section` 过滤为精确 section 成员（Git section/subsection 身份，非裸前缀），rename 先 `add_with_conn` 到 `new.<name>` 再 `unset_all_with_conn` 旧 key，全部一个事务内提交；空 section 报 “No such section”（exit 128），rename 同名（exit 2）或目标 section 已存在（exit 128，避免合并与加密标志继承）均拒绝。`--system` 虽在 clap 中声明，但运行时在 `execute_inner` 中无条件以 `CliError::command_usage` 拒绝（提示改用 `--local` / `--global`），并非可用作用域；详见下方缺口表。
+- 公开参数/子命令包括：`set`、`get`、`list`、`unset`、`import`、`path`、`edit`、`generate-ssh-key`、`generate-gpg-key`、`--local`、`--global`、`-d, --default <DEFAULT>` 等（另含隐藏 Git 兼容标志 `--get`、`--get-all`、`--unset`、`--unset-all`、`-l, --list`、`--add`、`--import`、`--get-regexp`、`--show-origin`、`--remove-section`、`--rename-section`、`-z`/`--null`、`--type`/`--bool`/`--int`/`--path`）。`--type`/`--bool`/`--int`/`--path`（互斥；`resolve_value_type`）在读取时规范化值，仅对 get/get-all/get-regexp 有效，其它模式报 129。`--remove-section <name>` / `--rename-section <old> <new>` 经 `ScopedConfig::get_connection` + sea-orm 事务执行：先 `begin()`，再在事务内 `get_by_prefix_with_conn` 取候选并用 `key_in_section` 过滤为精确 section 成员（Git section/subsection 身份，非裸前缀），rename 先 `add_with_conn` 到 `new.<name>` 再 `unset_all_with_conn` 旧 key，全部一个事务内提交；空 section 报 “No such section”（exit 128），rename 同名（exit 2）或目标 section 已存在（exit 128，避免合并与加密标志继承）均拒绝。`--system` 虽在 clap 中声明，但运行时在 `execute_inner` 中无条件以 `CliError::command_usage` 拒绝（提示改用 `--local` / `--global`），并非可用作用域；详见下方缺口表。
 
 
 ## 还未实现的功能
@@ -58,7 +58,7 @@ flowchart TD
 | 功能缺口 | 不支持编辑器编辑：Libra 使用 SQLite 存储，不能安全地通过文本编辑器往返修改；详见设计方案。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | `--system` 作用域 | 原始对照：git config --system；相关参数/替代：否；当前说明：clap 中声明但运行时无条件拒绝（`execute_inner` 返回 `CliError::command_usage`，提示改用 `--local` / `--global`），并非可用作用域。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 编辑器编辑 | 原始对照：git config -e；相关参数/替代：jj config edit；当前说明：不支持 (SQLite 存储)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 类型转换 | 原始对照：--type=bool\|int\|path；相关参数/替代：否 (TOML 类型)；当前说明：不支持 (本批次)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 类型转换（读取时） | `--type=<bool\|int\|path>` 与 `--bool`/`--int`/`--path` 快捷方式（`resolve_value_type` + `canonicalize_typed_value`）：bool（yes/true/on/1→`true`，no/false/off/0 与显式空值→`false`，否则报错；不裁剪空白，故 ` true ` 报错）、int（可选 k/m/g 1024 倍率，非整数/含空白报错）、path（`~`/`~/` 展开 home，`~user` 不支持原样返回）。仅作用于 get/get-all/get-regexp（含 `--default`），与其他模式组合报 129；未知 `--type` 报 129。与 `-z`/`--json` 组合正常。带集成测试 `test_config_typed_get`。SET 侧的类型校验暂未实现。 |
 | ✅ 已实现 | NUL 分隔输出 `-z`/`--null` | `ConfigArgs.null`（`global=true`）线程到 `ResolvedCommand::{Get,List}` 与 `handle_get`/`handle_list`：get/get-all → `value\0`；`--get-regexp`/`--list` → `key\nvalue\0`；`--name-only` → `key\0`；`--show-origin` 前缀 `origin\0`。`--json` 优先于 `-z`。`-z` 与 Libra 专有的 `--ssh-keys`/`--gpg-keys`/`--vault` 汇总视图组合时报 `command_usage`（exit 129，无 `key\nvalue\0` 映射），仅作用于标准 key/value 输出。带集成测试 `test_config_null_terminated_output`（精确字节断言）。 |
 | ✅ 已实现 | 重命名/删除 section | 采用 Git section/subsection 身份（`key_in_section`：section=首个 `.` 前、name=末个 `.` 后、subsection=两者之间）。`--remove-section <name>` 删除该 section 的 key（`--remove-section branch` 只删 `branch.<key>`，不动 `branch.feature.*`）；`--rename-section <old> <new>` 把 old section 的 key 搬到 new（保留 value 与加密标志，多值顺序由 `get_by_prefix_with_conn` 的 `(Key,Id)` 排序稳定保留，目标 section 已存在则拒绝以避免合并/标志继承）。均在单个 sea-orm 事务内（含存在性检查），空 section→exit 128，rename 同名/目标已存在→exit 2/128。带集成测试 `test_config_remove_and_rename_section`/`test_config_section_ops_exact_git_semantics`/`test_config_rename_section_preserves_multivalue_order`。 |
 | 兼容差异项 | 条件配置 | 原始对照：includeIf；相关参数/替代：[[when]] blocks；当前说明：不支持。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
