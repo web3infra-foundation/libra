@@ -267,8 +267,15 @@ pub struct BranchArgs {
 
     /// Display the branch list in columns. Modes: `always`, `auto` (only when
     /// stdout is a terminal), `never`. Bare `--column` means `always`.
-    #[clap(long, num_args = 0..=1, default_missing_value = "always", value_name = "MODE")]
+    #[clap(long, num_args = 0..=1, default_missing_value = "always", value_name = "MODE", overrides_with = "no_column")]
     pub column: Option<String>,
+
+    /// Do not display the branch list in columns (equivalent to
+    /// `--column=never`), countermanding an earlier `--column` (last one on the
+    /// command line wins), matching `git branch --no-column`. Branches list one
+    /// per line by default, so on its own this is a no-op.
+    #[clap(long = "no-column", overrides_with = "column")]
+    pub no_column: bool,
 
     /// Show the sha1 and commit subject line for each branch (`-v`). Repeat
     /// (`-vv`) to also show the upstream-tracking segment
@@ -1596,6 +1603,7 @@ pub async fn list_branches(
     commits_no_contains: &[String],
 ) -> CliResult<()> {
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: true,

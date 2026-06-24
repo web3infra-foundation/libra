@@ -536,6 +536,7 @@ async fn test_branch() {
         // create branch with first commit
         let first_branch_name = "first_branch".to_string();
         let args = BranchArgs {
+            no_column: false,
             new_branch: Some(first_branch_name.clone()),
             commit_hash: Some(first_commit_id.to_string()),
             list: false,
@@ -581,6 +582,7 @@ async fn test_branch() {
         // create second branch with current branch
         let second_branch_name = "second_branch".to_string();
         let args = BranchArgs {
+            no_column: false,
             new_branch: Some(second_branch_name.clone()),
             commit_hash: None,
             list: false,
@@ -616,6 +618,7 @@ async fn test_branch() {
     // show current branch
     println!("show current branch");
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -679,6 +682,7 @@ async fn test_create_branch_from_remote() {
     assert!(get_target_commit("origin/main").await.is_ok());
 
     let args = BranchArgs {
+        no_column: false,
         new_branch: Some("test_new".to_string()),
         commit_hash: Some("origin/main".into()),
         list: false,
@@ -743,6 +747,7 @@ async fn test_create_branch_from_remote_tracking_ref() {
     assert!(get_target_commit("origin/main").await.is_ok());
 
     execute(BranchArgs {
+        no_column: false,
         new_branch: Some("tracking-copy".to_string()),
         commit_hash: Some("origin/main".into()),
         list: false,
@@ -963,6 +968,7 @@ async fn test_branch_rename() {
 
     // Create a test branch
     let args = BranchArgs {
+        no_column: false,
         new_branch: Some("old_name".to_string()),
         commit_hash: None,
         list: false,
@@ -997,6 +1003,7 @@ async fn test_branch_rename() {
 
     // Rename branch from old_name to new_name
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1100,6 +1107,7 @@ async fn test_rename_current_branch() {
     // Rename current branch (feature) to feature_new using single argument
     let feature_new = "feature_new".to_string();
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1178,6 +1186,7 @@ async fn test_rename_to_existing_branch() {
 
     // Create two branches
     let args = BranchArgs {
+        no_column: false,
         new_branch: Some("branch1".to_string()),
         commit_hash: None,
         list: false,
@@ -1204,6 +1213,7 @@ async fn test_rename_to_existing_branch() {
     execute(args).await;
 
     let args = BranchArgs {
+        no_column: false,
         new_branch: Some("branch2".to_string()),
         commit_hash: None,
         list: false,
@@ -1231,6 +1241,7 @@ async fn test_rename_to_existing_branch() {
 
     // Try to rename branch1 to branch2 (should fail)
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1302,6 +1313,7 @@ async fn test_list_all_branches() {
 
     // Create local branch
     let args = BranchArgs {
+        no_column: false,
         new_branch: Some("feature_branch".to_string()),
         commit_hash: None,
         list: false,
@@ -1339,6 +1351,7 @@ async fn test_list_all_branches() {
 
     // Test -a parameter - just call execute, don't try to capture output
     let args = BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1415,6 +1428,7 @@ async fn test_branch_delete_safe() {
 
     // Create a feature branch
     execute(BranchArgs {
+        no_column: false,
         new_branch: Some("feature".to_string()),
         commit_hash: None,
         list: false,
@@ -1488,6 +1502,7 @@ async fn test_branch_delete_safe() {
 
     // Try to delete feature branch with -d (should fail - not merged)
     execute(BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1562,6 +1577,7 @@ async fn test_branch_delete_safe() {
 
     // Now try -d again (should succeed - fully merged)
     execute(BranchArgs {
+        no_column: false,
         new_branch: None,
         commit_hash: None,
         list: false,
@@ -1657,6 +1673,7 @@ async fn test_branch_contains_commit_filter() {
 
     // Create dev branch and add two commits
     execute(BranchArgs {
+        no_column: false,
         new_branch: Some("dev".to_string()),
         commit_hash: None,
         list: false,
@@ -2243,5 +2260,33 @@ fn branch_vv_shows_upstream_segment() {
     assert!(
         !String::from_utf8_lossy(&v.stdout).contains("[origin/feature]"),
         "-v omits the upstream segment"
+    );
+}
+
+#[test]
+fn branch_no_column_countermands_column() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    run_libra_command(&["branch", "aaaaa"], p);
+    run_libra_command(&["branch", "bbbbb"], p);
+
+    // `--no-column` alone lists one branch per line (the default).
+    let plain = run_libra_command(&["branch", "--no-column"], p);
+    assert!(
+        plain.status.success(),
+        "branch --no-column: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+
+    // `--column=always --no-column` (last wins) countermands `--column`, so the
+    // listing is one-per-line, NOT columnar (no two names share a line).
+    let out = run_libra_command(&["branch", "--column=always", "--no-column"], p);
+    assert!(out.status.success(), "branch --column=always --no-column");
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !listed
+            .lines()
+            .any(|l| l.contains("aaaaa") && l.contains("bbbbb")),
+        "--no-column countermands --column (one per line): {listed}"
     );
 }
