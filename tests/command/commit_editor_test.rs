@@ -436,3 +436,128 @@ fn verbose_template_includes_diff_but_message_excludes_it() {
         "staged diff must not enter the message: {msg}"
     );
 }
+
+/// Write an editor script that first copies the template it is handed (the
+/// COMMIT_EDITMSG path, `$1`) to `capture`, then overwrites it with `body` so
+/// the commit succeeds. Lets a test inspect what was seeded into the template.
+#[cfg(unix)]
+fn write_capturing_editor_script(dir: &Path, name: &str, capture: &Path, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncp \"$1\" '{}'\nprintf '%s' '{body}' > \"$1\"\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn status_flag_seeds_commented_status_into_template_and_strips_it() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "tracked.txt", "x\n");
+
+    // `--status`: the editor template carries a commented status section.
+    let capture = temp.path().join("with-status.txt");
+    let editor = write_capturing_editor_script(temp.path(), "ed.sh", &capture, "status subject\\n");
+    let out = run_libra_env(&["commit", "--status"], &repo, &[("EDITOR", &editor)]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "commit --status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let template = fs::read_to_string(&capture).unwrap();
+    assert!(
+        template
+            .lines()
+            .any(|l| l.starts_with('#') && l.contains("tracked.txt")),
+        "template must include a commented status line naming the staged file:\n{template}"
+    );
+    // The commented status is stripped from the final commit message.
+    let msg = last_commit_message(&repo);
+    assert!(
+        msg.contains("status subject"),
+        "commit uses the editor message"
+    );
+    assert!(
+        !msg.contains("Changes to be committed"),
+        "status section must not leak into the final message:\n{msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn default_and_no_status_omit_status_from_template() {
+    // Without `--status` (Libra's default) the template carries no status; the
+    // same holds for an explicit `--no-status`.
+    for flags in [vec!["commit"], vec!["commit", "--no-status"]] {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        stage_file(&repo, "tracked.txt", "x\n");
+        let capture = temp.path().join("no-status.txt");
+        let editor =
+            write_capturing_editor_script(temp.path(), "ed.sh", &capture, "plain subject\\n");
+        let out = run_libra_env(&flags, &repo, &[("EDITOR", &editor)]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{flags:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let template = fs::read_to_string(&capture).unwrap();
+        assert!(
+            !template.contains("tracked.txt") && !template.contains("Changes to be committed"),
+            "{flags:?}: template must NOT include a status section:\n{template}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn status_not_seeded_under_non_comment_stripping_cleanup() {
+    // Under `--cleanup=verbatim`/`whitespace` the `#` comment lines are NOT
+    // stripped, so `--status` must NOT seed the status block (it would leak into
+    // the verbatim message). The status section is omitted for those modes.
+    for mode in ["verbatim", "whitespace"] {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        stage_file(&repo, "tracked.txt", "x\n");
+        let capture = temp.path().join(format!("tpl-{mode}.txt"));
+        let editor =
+            write_capturing_editor_script(temp.path(), "ed.sh", &capture, "verbatim subject\\n");
+        let cleanup = format!("--cleanup={mode}");
+        let out = run_libra_env(
+            &["commit", "--status", &cleanup],
+            &repo,
+            &[("EDITOR", &editor)],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "commit --status --cleanup={mode} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let template = fs::read_to_string(&capture).unwrap();
+        assert!(
+            !template.contains("tracked.txt") && !template.contains("Changes to be committed"),
+            "--cleanup={mode}: status must NOT be seeded (comments are not stripped):\n{template}"
+        );
+        // And nothing status-like leaked into the final message.
+        assert!(
+            !last_commit_message(&repo).contains("Changes to be committed"),
+            "--cleanup={mode}: no status in the final message"
+        );
+    }
+}

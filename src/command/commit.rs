@@ -168,11 +168,21 @@ pub struct CommitArgs {
     #[arg(long)]
     pub porcelain: bool,
 
-    /// Do not include the status in the commit-message editor template. Accepted
-    /// for Git parity and is a no-op: Libra's editor template never includes a
-    /// status section, so it already matches `--no-status`. (Git's default
-    /// `--status` template-status section is not implemented.)
-    #[arg(long = "no-status")]
+    /// Include the working-tree status as commented lines in the commit-message
+    /// editor template (Git shows this by default; Libra defaults to omitting
+    /// it, so `--status` opts in). The status lines are `#`-commented and so are
+    /// stripped from the final message — informational only. Seeded only when an
+    /// editor opens and the effective cleanup strips comments; it is omitted
+    /// under `--cleanup=verbatim`/`--cleanup=whitespace` (unless `-v` forces the
+    /// scissors cleanup) so it never leaks into the message. Toggle pair with
+    /// `--no-status`; the last one wins.
+    #[arg(long = "status", overrides_with = "no_status")]
+    pub status: bool,
+
+    /// Do not include the status in the commit-message editor template (Libra's
+    /// default). Accepted for Git parity. Toggle pair with `--status`; the last
+    /// one wins.
+    #[arg(long = "no-status", overrides_with = "status")]
     pub no_status: bool,
 }
 
@@ -852,11 +862,29 @@ async fn resolve_final_message(
         None
     };
 
+    // `--status`: a `#`-commented status section to seed into the editor
+    // template (informational only). Seed it ONLY when an editor will open AND
+    // the cleanup that will be applied actually strips `#` comments —
+    // Strip/Default/Scissors, or Scissors as forced by `-v`. Under
+    // `--cleanup=verbatim`/`whitespace` the comment lines are preserved, so
+    // injecting the status would leak it into the final message (like Git, which
+    // omits the status cruft when it will not be stripped).
+    let cleanup_strips_comments = args.verbose
+        || matches!(
+            mode,
+            CleanupMode::Strip | CleanupMode::Default | CleanupMode::Scissors
+        );
+    let status_section = if args.status && editor_cmd.is_some() && cleanup_strips_comments {
+        build_status_section().await
+    } else {
+        None
+    };
+
     let resolved = if let Some(editor_cmd) = editor_cmd {
         let buffer = if args.verbose {
-            build_verbose_template(&initial).await?
+            build_verbose_template(&initial, status_section.as_deref()).await?
         } else {
-            initial.clone()
+            append_status_section(initial.clone(), status_section.as_deref())
         };
         let path = util::storage_path().join("COMMIT_EDITMSG");
         let raw = editor::edit_message(&path, &buffer, &editor_cmd, true)
@@ -895,9 +923,14 @@ async fn resolve_final_message(
 }
 
 /// Build the `commit -v` editor template: the initial message, a commented
-/// help/status header, the Git-standard scissors marker, and the staged diff.
-/// Everything from the scissors line down is stripped by `Scissors` cleanup.
-async fn build_verbose_template(initial: &str) -> Result<String, CommitError> {
+/// help header, an optional commented status section (`--status`), the
+/// Git-standard scissors marker, and the staged diff. Everything from the
+/// scissors line down is stripped by `Scissors` cleanup; the commented header
+/// and status section are stripped as comment lines.
+async fn build_verbose_template(
+    initial: &str,
+    status_section: Option<&str>,
+) -> Result<String, CommitError> {
     let diff = diff::staged_diff_text()
         .await
         .map_err(|e| CommitError::StagedChanges(e.to_string()))?;
@@ -909,6 +942,11 @@ async fn build_verbose_template(initial: &str) -> Result<String, CommitError> {
     buffer.push('\n');
     buffer.push_str("# Please enter the commit message for your changes. Lines starting\n");
     buffer.push_str("# with '#' will be ignored, and an empty message aborts the commit.\n");
+    // `--status`: commented status, above the scissors so it stays visible while
+    // editing (Git places the status section here too).
+    if let Some(section) = status_section {
+        buffer.push_str(section);
+    }
     buffer.push_str("#\n");
     buffer.push_str("# ------------------------ >8 ------------------------\n");
     buffer.push_str("# Do not modify or remove the line above.\n");
@@ -918,6 +956,46 @@ async fn build_verbose_template(initial: &str) -> Result<String, CommitError> {
         buffer.push('\n');
     }
     Ok(buffer)
+}
+
+/// Append a `#`-commented status section (`--status`) to a plain (non-verbose)
+/// editor buffer. Returns `buffer` unchanged when there is no section.
+fn append_status_section(mut buffer: String, status_section: Option<&str>) -> String {
+    if let Some(section) = status_section {
+        if !buffer.is_empty() && !buffer.ends_with('\n') {
+            buffer.push('\n');
+        }
+        buffer.push('\n');
+        buffer.push_str(section);
+    }
+    buffer
+}
+
+/// Render the working-tree status as a `#`-commented block for the commit
+/// editor template (`--status`). Each line of the long-format `status` output
+/// is prefixed with `# ` so `cleanup_commit_message` strips it from the final
+/// message (informational only). Returns `None` when the status cannot be
+/// rendered or is empty — non-fatal, the template simply omits it.
+async fn build_status_section() -> Option<String> {
+    let mut raw: Vec<u8> = Vec::new();
+    status::execute_to(status::StatusArgs::default(), &mut raw)
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut section = String::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            section.push_str("#\n");
+        } else {
+            section.push_str("# ");
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+    Some(section)
 }
 
 /// Load the commit message of the given commit-ish.

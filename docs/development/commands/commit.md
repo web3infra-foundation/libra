@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、hooks、结构化输出和兼容拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）、`--no-status`（接受式 no-op：Libra 的编辑器模板从不含 status 段）也已支持，同时对 `--status`（模板含状态段）、`-t/--template`、`commit.cleanup`/`commit.verbose` 配置等未完成行为明确说明。
+`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、Libra 自有 pre-commit hook、结构化输出和兼容拒绝。这里的 hook 只指 `.libra/hooks/pre-commit.*`；Git hooks bridge（`.git/hooks` / `core.hooksPath`，包括 stock `commit-msg` bridge）按 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性) 拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）、`--status`/`--no-status`（last-wins 切换：`--status` 把工作树 status 以 `#` 注释行注入编辑器模板，随后被 cleanup 剥离；仅当生效 cleanup 会剥离注释时才注入，`--cleanup=verbatim`/`whitespace` 下省略以免泄漏；默认不含 status 段）也已支持，同时对 `-t/--template`、`commit.cleanup`/`commit.verbose` 配置等未完成行为明确说明。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--no-status`（接受式 no-op）已补齐，`--status`（模板含状态段）/`-t/--template`/`commit.cleanup`/`commit.verbose` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--status`/`--no-status`（last-wins 切换，`--status` 注入注释化 status 段，仅在 cleanup 会剥离注释时）已补齐，`-t/--template`/`commit.cleanup`/`commit.verbose` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
 - `--amend` 作者归属与 Git 对齐：默认**保留**被修订提交的原作者（name/email/authored date），只有显式 `--reset-author` 或 `--author <AUTHOR>` 才会改写为当前身份；committer 始终取当前身份。此前 `--amend` 会静默把作者改成当前身份、使 `--reset-author` 沦为空操作，已修正（见 `src/command/commit.rs` amend 分支）。
 
 
@@ -50,7 +50,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/commit.md`。
 - Synopsis：`libra commit [OPTIONS] (-m <MESSAGE> | -F <FILE> | -C <COMMIT> | -c <COMMIT> | --fixup <COMMIT> | --squash <COMMIT> | --amend --no-edit)`。
-- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--author <AUTHOR>`、`--allow-empty`、`--disable-pre`、`--no-verify`、`--cleanup <MODE>`、`--dry-run`、`--fixup <COMMIT>`、`--squash <COMMIT>`、`-C/--reuse-message <COMMIT>`、`-c/--reedit-message <COMMIT>`、`--trailer <TRAILER>`、`--reset-author` 等。
+- 公开参数/子命令包括：`-m, --message <MESSAGE>`、`-F, --file <FILE>`、`--amend`、`--no-edit`、`--conventional`、`-a, --all`、`-s, --signoff`、`--author <AUTHOR>`、`--allow-empty`、`--disable-pre`（跳过 Libra 自有 `.libra/hooks/pre-commit.*`）、`--no-verify`（跳过 Libra 自有 pre-commit 与消息校验，不启用 Git `commit-msg` hook bridge）、`--cleanup <MODE>`、`--dry-run`、`--fixup <COMMIT>`、`--squash <COMMIT>`、`-C/--reuse-message <COMMIT>`、`-c/--reedit-message <COMMIT>`、`--trailer <TRAILER>`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--status`/`--no-status`（last-wins 切换；`--status` 把工作树 status 以注释行注入编辑器模板）等。
 
 
 ## 还未实现的功能
@@ -59,7 +59,7 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, and `--reset-author` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | ✅ 已实现 | `--porcelain` 机器输出 | 输出 would-be-committed 状态的 porcelain v1（复用 `status::output_porcelain` + 折叠 untracked 目录），替代人类摘要；与 Git 一致 **隐含 `--dry-run`**（不创建提交）；`-a` 仅为预览自动暂存，dry-run 后通过 index 快照还原（不改动 index），`--json` 模式下惰性。带集成测试（`test_commit_porcelain_outputs_status_format`、`test_commit_all_porcelain_shows_autostaged_as_staged`）。 |
-| 部分实现 | `--no-status` / `--status` | `--no-status` 作为接受式 no-op 已公开（Libra 的编辑器模板从不包含 status 段，故已是默认行为；字段 `no_status` 解析后不被读取）；Git 默认的 `--status`（在模板中包含状态段）仍未实现。 |
+| ✅ 已实现 | `--status` / `--no-status` | last-wins 切换。`--status` 在打开编辑器时把工作树 status（经 `status::execute_to` 长格式）以 `#` 注释行注入模板（`-v` 时置于 scissors 之上），随后被 `cleanup_commit_message` 当作注释行剥离 → 不进入最终消息。**仅当生效的 cleanup 会剥离注释时才注入**（`cleanup_strips_comments = verbose || matches!(mode, Strip\|Default\|Scissors)`）：`--cleanup=verbatim`/`whitespace`（保留注释行）下不注入，故绝不泄漏。无 `-m`/`-F`（不开编辑器）时无效果。默认与 `--no-status` 不含 status 段。带集成测试（`status_flag_seeds_commented_status_into_template_and_strips_it`、`default_and_no_status_omit_status_from_template`、`status_not_seeded_under_non_comment_stripping_cleanup`）。 |
 | 功能缺口 | `-t/--template` 初始模板、`commit.cleanup`/`commit.verbose` 配置默认 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求

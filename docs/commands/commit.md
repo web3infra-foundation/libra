@@ -190,14 +190,21 @@ untouched, even with `-a`, which is auto-staged only for the preview). Inert und
 libra commit --porcelain
 ```
 
-### `--no-status`
+### `--status` / `--no-status`
 
-Do not include the status in the commit-message editor template. Accepted no-op
-for Git parity: Libra's editor template never includes a status section, so it
-already matches `--no-status`. (Git's default `--status` template-status section
-is not implemented.)
+`--status` seeds the working-tree status, as `#`-commented lines, into the
+commit-message editor template (Git shows this by default; Libra defaults to
+omitting it, so `--status` opts in). Because the lines are comments, the message
+cleanup strips them — they are informational only and never enter the final
+commit message. This has no effect when no editor is opened (e.g. with `-m`).
+The status is also omitted under cleanup modes that keep comment lines
+(`--cleanup=verbatim` and `--cleanup=whitespace`, unless `-v` forces the
+scissors cleanup), so it can never leak into the message; it is seeded only when
+an editor opens and the effective cleanup strips comments. `--no-status` (the
+default) omits the status section. The two are a last-one-wins toggle.
 
 ```bash
+libra commit --status          # opens the editor with the status commented in
 libra commit --no-status -m "message"
 ```
 

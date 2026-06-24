@@ -110,11 +110,12 @@ libra commit --no-verify -m "WIP: work in progress"
 libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 ```
 
-### `--no-status`
+### `--status` / `--no-status`
 
-不在提交消息编辑器模板中包含状态。为对齐 Git 而接受的 no-op：Libra 的编辑器模板从不包含 status 段，故已是默认行为。（Git 默认的 `--status`（在模板中包含状态段）未实现。）
+`--status` 把工作树状态以 `#` 注释行注入提交消息编辑器模板（Git 默认显示；Libra 默认省略，故用 `--status` 主动开启）。由于是注释行，消息 cleanup 会将其剥离——仅供参考，不进入最终提交消息。未打开编辑器时（例如带 `-m`）无效果。在保留注释行的 cleanup 模式下也会省略（`--cleanup=verbatim` 与 `--cleanup=whitespace`，除非 `-v` 强制 scissors），从而绝不泄漏进消息；仅当打开编辑器且生效的 cleanup 会剥离注释时才注入。`--no-status`（默认）不含 status 段。两者构成 last-wins 切换。
 
 ```bash
+libra commit --status          # 打开编辑器，模板中含注释化的状态
 libra commit --no-status -m "message"
 ```
 
