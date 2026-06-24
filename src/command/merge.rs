@@ -113,6 +113,13 @@ pub struct MergeArgs {
     /// suppress.
     #[arg(long = "no-progress")]
     pub no_progress: bool,
+
+    /// Do not verify that the merged commits carry a valid GPG signature.
+    /// Accepted for Git parity and is a no-op: Libra's merge never verifies
+    /// commit signatures, so it already matches the default. (Git's opposite
+    /// `--verify-signatures` is not implemented.)
+    #[arg(long = "no-verify-signatures")]
+    pub no_verify_signatures: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
