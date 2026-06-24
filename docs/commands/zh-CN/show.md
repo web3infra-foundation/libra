@@ -29,6 +29,7 @@ libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 | `--no-expand-tabs` | | 不在提交消息中展开 tab。接受式 no-op：Libra 的 show 逐字打印 tab。 |
 | `--no-notes` | | 不显示提交 notes。接受式 no-op：Libra 的 show 从不内联显示 notes。 |
 | `--no-mailmap` | | 不应用 `.mailmap`。接受式 no-op：Libra 的 show 显示记录的原始身份。 |
+| `--no-show-signature` | | 不显示已签名提交的 GPG 签名。接受式 no-op：Libra 的 show 从不内联显示提交签名。（Git 的 `--show-signature` 未实现。） |
 | `<PATHS>...` | | 将输出限制为匹配路径（提交 diff 的 pathspec 过滤器）。 |
 
 ### 示例

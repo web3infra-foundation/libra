@@ -245,6 +245,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
     let _pager = ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
     let args = ShowArgs {
+        no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
         no_mailmap: false,
@@ -299,6 +300,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
         no_mailmap: false,
@@ -354,6 +356,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
+        no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
         no_mailmap: false,
@@ -818,6 +821,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
         no_mailmap: false,
@@ -864,6 +868,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
     let _guard = ChangeDirGuard::new(temp.path());
 
     let args = ShowArgs {
+        no_show_signature: false,
         no_expand_tabs: false,
         no_notes: false,
         no_mailmap: false,
@@ -1077,13 +1082,18 @@ fn show_log_display_no_op_flags_are_accepted() {
         "show prints a commit header"
     );
 
-    // `--no-expand-tabs`/`--no-notes`/`--no-mailmap` (Git's log/show display
-    // options) are accepted no-ops: Libra's show expands no tabs, displays no
-    // notes inline, and applies no mailmap. They are parsed-but-unread, so each
-    // still produces the same commit header. (The per-file diff ordering of
-    // `show` itself is not stable across invocations, so only the header is
-    // compared.)
-    for flag in ["--no-expand-tabs", "--no-notes", "--no-mailmap"] {
+    // `--no-expand-tabs`/`--no-notes`/`--no-mailmap`/`--no-show-signature`
+    // (Git's log/show display options) are accepted no-ops: Libra's show expands
+    // no tabs, displays no notes inline, applies no mailmap, and never displays
+    // commit signatures inline. They are parsed-but-unread, so each still
+    // produces the same commit header. (The per-file diff ordering of `show`
+    // itself is not stable across invocations, so only the header is compared.)
+    for flag in [
+        "--no-expand-tabs",
+        "--no-notes",
+        "--no-mailmap",
+        "--no-show-signature",
+    ] {
         let out = run_libra_command(&["show", flag], p);
         assert_cli_success(&out, &format!("show {flag}"));
         let hdr = String::from_utf8_lossy(&out.stdout)

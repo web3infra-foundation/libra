@@ -37,6 +37,7 @@ list their entries and blobs print their text content (or a binary summary).
 | `--no-expand-tabs` | | Do not expand tabs in the commit message. Accepted no-op: Libra's show prints tabs verbatim. |
 | `--no-notes` | | Do not show commit notes. Accepted no-op: Libra's show never displays notes inline. |
 | `--no-mailmap` | | Do not apply a `.mailmap`. Accepted no-op: Libra's show shows the raw recorded identities. |
+| `--no-show-signature` | | Do not display the GPG signature of signed commits. Accepted no-op: Libra's show never displays commit signatures inline. (Git's `--show-signature` is not implemented.) |
 | `<PATHS>...` | | Limit output to matching paths (pathspec filter for commit diffs). |
 
 ### Examples

@@ -106,6 +106,12 @@ pub struct ShowArgs {
     #[clap(long = "no-mailmap")]
     pub no_mailmap: bool,
 
+    /// Do not display the GPG signature of signed commits. Accepted for Git
+    /// parity and is a no-op: Libra's show never displays commit signatures
+    /// inline. (Git's opposite `--show-signature` is not implemented.)
+    #[clap(long = "no-show-signature")]
+    pub no_show_signature: bool,
+
     /// Limit output to matching paths.
     #[clap(value_name = "PATHS", num_args = 0..)]
     pub pathspec: Vec<String>,
