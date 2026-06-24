@@ -101,8 +101,15 @@ pub struct CloneArgs {
     pub branch: Option<String>,
 
     /// Clone only one branch, HEAD or --branch
-    #[clap(long)]
+    #[clap(long, overrides_with = "no_single_branch")]
     pub single_branch: bool,
+
+    /// Clone the branch histories of all branches (the default), countermanding
+    /// an earlier `--single-branch` (last one on the command line wins),
+    /// matching `git clone --no-single-branch`. Clone fetches all branches by
+    /// default, so on its own this is a no-op.
+    #[clap(long = "no-single-branch", overrides_with = "single_branch")]
+    pub no_single_branch: bool,
 
     /// Create a bare repository without checking out a working tree
     #[clap(long)]
@@ -3381,6 +3388,7 @@ mod tests {
     /// single unsupported flag it cares about.
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
+            no_single_branch: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3591,6 +3599,7 @@ mod tests {
         let source = cloud_source();
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
+            no_single_branch: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3688,6 +3697,7 @@ mod tests {
             selector_kind: CloudPublishCheckoutSelectorKind::Ref,
         };
         let args = CloneArgs {
+            no_single_branch: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
                 .to_string(),
@@ -3754,6 +3764,7 @@ mod tests {
         let source = cloud_source();
         let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
         let args = CloneArgs {
+            no_single_branch: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3817,6 +3828,7 @@ mod tests {
             .await
             .expect("metadata should overwrite in-memory remote");
         let args = CloneArgs {
+            no_single_branch: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,

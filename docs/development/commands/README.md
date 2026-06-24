@@ -32,7 +32,7 @@
 | [`checkout`](checkout.md) | `partial` | visible branch compatibility surface plus `-d`/`--detach`, `-t`/`--track` (accepted no-op; DWIM always tracks), `--no-overlay` (no-op — never in overlay mode), and explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` for new code |
 | [`cherry-pick`](cherry-pick.md) | `partial` | commit replay, `-n`, and `-x` supported; edit/mainline/signoff/sequencer/strategy flags incomplete |
 | [`clean`](clean.md) | `partial` | `-n` / `-f` / `-d` / `-x` / `-X` / `-e`/`--exclude` / `<pathspec>...` supported; `-i` not exposed |
-| [`clone`](clone.md) | `partial` | `--depth`, `--single-branch`, `--tags`/`--no-tags` (clone fetches all tags by default), and `--no-progress` (suppresses the fetch progress meter) supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |
+| [`clone`](clone.md) | `partial` | `--depth`, `--single-branch`/`--no-single-branch` (toggle; `--no-single-branch` countermands, last wins), `--tags`/`--no-tags` (clone fetches all tags by default), and `--no-progress` (suppresses the fetch progress meter) supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d... |
 | [`cloud`](cloud.md) | `intentionally-different` | Libra cloud backup/restore extension, not a Git command |
 | [`code`](code.md) | `intentionally-different` | Libra AI extension, not a Git command |
 | [`code-control`](code-control.md) | `intentionally-different` | Libra AI automation extension, not a Git command |

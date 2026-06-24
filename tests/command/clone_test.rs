@@ -181,6 +181,7 @@ async fn test_clone_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -215,6 +216,7 @@ async fn test_clone_bare_repository() {
     let repo_dir = temp_path.path().join("bare-clone.git");
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_dir.to_str().unwrap().to_string()),
@@ -264,6 +266,7 @@ async fn test_clone_branch_single_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -297,6 +300,7 @@ async fn test_clone_default_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -330,6 +334,7 @@ async fn test_clone_default_branch_single_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -365,6 +370,7 @@ async fn test_clone_to_existing_empty_dir() {
     fs::create_dir(&repo_path).unwrap();
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
@@ -403,6 +409,7 @@ async fn test_clone_to_existing_dir() {
     fs::write(&dummy_file, "test").unwrap();
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
@@ -437,6 +444,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
     fs::write(&conflict_path, "test").unwrap();
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
@@ -470,6 +478,7 @@ async fn test_clone_with_depth() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -503,6 +512,7 @@ async fn test_clone_with_depth_and_branch() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     command::clone::execute(CloneArgs {
+        no_single_branch: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -537,5 +547,30 @@ fn clone_no_progress_flag_is_accepted() {
     assert!(
         !stderr.contains("unexpected argument"),
         "--no-progress is accepted by the parser: {stderr}"
+    );
+}
+
+#[test]
+fn clone_no_single_branch_countermands_single_branch() {
+    let temp = tempdir().unwrap();
+    // `--single-branch --no-single-branch` (last wins) is NOT a clap conflict:
+    // `--no-single-branch` countermands `--single-branch` via the symmetric
+    // override, so it parses and fails later connecting to the bogus source,
+    // not at clap. `--no-single-branch` (clone all branches) is the default.
+    let output = crate::command::run_libra_command(
+        &[
+            "clone",
+            "--single-branch",
+            "--no-single-branch",
+            "/nonexistent/libra/repo",
+            "dest",
+        ],
+        temp.path(),
+    );
+    assert!(!output.status.success(), "clone of a bogus source fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("cannot be used with"),
+        "--single-branch --no-single-branch parses (override, no conflict): {stderr}"
     );
 }

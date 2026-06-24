@@ -101,6 +101,16 @@ because the restored local repository must preserve all published refs.
 libra clone --single-branch -b main git@github.com:user/repo.git
 ```
 
+### `--no-single-branch`
+
+Clone the histories of all branches (the default), countermanding an earlier
+`--single-branch` (last one on the command line wins). Clone fetches all
+branches by default, so on its own this is a no-op.
+
+```bash
+libra clone --single-branch --no-single-branch git@github.com:user/repo.git
+```
+
 ### `--bare`
 
 Create a bare repository without a working tree. The destination directory becomes the
@@ -330,6 +340,7 @@ not, because its operation-log model fetches all refs by design.
 | Destination directory | `git clone <url> <dir>` | `jj git clone <url> <dir>` | `libra clone <url> <dir>` |
 | Specific branch | `-b` / `--branch` | `-b` / `--branch` (jj 0.17+) | `-b` / `--branch` |
 | Single branch | `--single-branch` | N/A | `--single-branch` |
+| No single branch | `--no-single-branch` | N/A | `--no-single-branch` (countermands `--single-branch`; all branches is the default) |
 | Bare clone | `--bare` | N/A | `--bare` |
 | Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
 | Shallow since date | `--shallow-since=<date>` | N/A | N/A |
