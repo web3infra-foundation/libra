@@ -23,6 +23,8 @@ Git-compatible flag style is also supported (hidden from help):
 
 ```
 libra config [--get | --get-all | --unset | --unset-all | -l | --add | --import | --get-regexp | --show-origin] [--local | --global] [key] [value] [-d <default>]
+libra config --remove-section <name>
+libra config --rename-section <old-name> <new-name>
 ```
 
 ## Description
@@ -218,10 +220,10 @@ These flags are global (apply to any subcommand):
 
 ### Hidden Git-Compatible Flags
 
-These flags provide backward compatibility with `git config` invocation patterns. They are hidden from `--help` and internally translated to the equivalent subcommand.
+These flags provide backward compatibility with `git config` invocation patterns. They are hidden from `--help`. Most translate to the equivalent subcommand; `--remove-section` / `--rename-section` are flag-only section operations with no subcommand form.
 
-| Flag | Equivalent Subcommand |
-|------|----------------------|
+| Flag | Equivalent Subcommand / Behavior |
+|------|----------------------------------|
 | `--get` | `get <key>` |
 | `--get-all` | `get --all <key>` |
 | `--unset` | `unset <key>` |
@@ -231,6 +233,8 @@ These flags provide backward compatibility with `git config` invocation patterns
 | `--import` | `import` |
 | `--get-regexp` | `get --regexp <key>` |
 | `--show-origin` | `list --show-origin` |
+| `--remove-section <name>` | Delete the keys in section `<name>` in one transaction, using Git's section/subsection identity (so `--remove-section branch` removes `branch.<key>` but not the `branch.feature.*` subsection). Missing section → exit 128. |
+| `--rename-section <old> <new>` | Move section `<old>`'s keys to `<new>`, preserving each value and its encryption flag. Missing source → exit 128; identical names → exit 2; an already-existing destination section is refused → exit 128. |
 
 ### Other Flags
 
@@ -428,7 +432,7 @@ Git exits with code 1 when a key is not found, which is indistinguishable from o
 | Type coercion | `--type=bool\|int\|path` | No (TOML types) | Not supported (this batch) |
 | Default fallback | `--default value` | No | `--default value` |
 | Null-delimited | `-z` | No | Not supported (this batch) |
-| Rename/remove section | Yes | No | Not supported (this batch) |
+| Rename/remove section | Yes | No | `--remove-section` / `--rename-section` (Git section/subsection semantics; rename refuses an existing destination) |
 | JSON output | No | No | **`--json`** |
 | Secret redaction | No | No | **Auto-detect** |
 | Import from Git | N/A | N/A | **`libra config import`** |

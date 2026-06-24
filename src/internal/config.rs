@@ -317,6 +317,9 @@ impl ConfigKv {
         let rows = config_kv::Entity::find()
             .filter(config_kv::Column::Key.starts_with(prefix))
             .order_by_asc(config_kv::Column::Key)
+            // Stable tie-breaker so multi-value keys keep insertion order — e.g.
+            // `--rename-section` must preserve the order of duplicate values.
+            .order_by_asc(config_kv::Column::Id)
             .all(db)
             .await
             .context("failed to query config_kv by prefix")?;

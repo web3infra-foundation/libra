@@ -7,7 +7,7 @@ use std::{io::IsTerminal, path::PathBuf, process::Command};
 
 use clap::{Parser, Subcommand};
 use once_cell::sync::Lazy;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -282,6 +282,12 @@ pub struct ConfigArgs {
     /// Show which scope each value comes from
     #[clap(long("show-origin"), hide = true)]
     pub show_origin: bool,
+    /// Remove an entire section (`<name>`) and all of its keys
+    #[clap(long("remove-section"), hide = true)]
+    pub remove_section: bool,
+    /// Rename a section: `--rename-section <old> <new>`
+    #[clap(long("rename-section"), hide = true)]
+    pub rename_section: bool,
 
     // ── Scope flags ──────────────────────────────────────────────────
     /// Use repository config (default)
@@ -535,6 +541,12 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             .await
         }
         ResolvedCommand::Unset { key, all } => handle_unset(&key, all, scope, output).await,
+        ResolvedCommand::RemoveSection { name } => {
+            handle_remove_section(&name, scope, output).await
+        }
+        ResolvedCommand::RenameSection { old, new } => {
+            handle_rename_section(&old, &new, scope, output).await
+        }
         ResolvedCommand::Import => handle_import(scope, output).await,
         ResolvedCommand::Path => handle_path(scope, output).await,
         ResolvedCommand::Edit => Err(CliError::from_legacy_string(
@@ -587,6 +599,15 @@ enum ResolvedCommand {
     Unset {
         key: String,
         all: bool,
+    },
+    /// Remove an entire section and every key under it.
+    RemoveSection {
+        name: String,
+    },
+    /// Rename a section, moving all of its keys from `old.*` to `new.*`.
+    RenameSection {
+        old: String,
+        new: String,
     },
     Import,
     Path,
@@ -675,6 +696,44 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             ssh_keys: false,
             gpg_keys: false,
         });
+    }
+    if args.remove_section {
+        let name = args
+            .key
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                CliError::from_legacy_string("error: --remove-section requires a <name>")
+                    .with_exit_code(2)
+            })?;
+        if args.valuepattern.is_some() {
+            return Err(CliError::from_legacy_string(
+                "error: --remove-section takes exactly one <name>",
+            )
+            .with_exit_code(2));
+        }
+        return Ok(ResolvedCommand::RemoveSection {
+            name: name.to_string(),
+        });
+    }
+    if args.rename_section {
+        match (
+            args.key.as_deref().filter(|s| !s.is_empty()),
+            args.valuepattern.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            (Some(old), Some(new)) => {
+                return Ok(ResolvedCommand::RenameSection {
+                    old: old.to_string(),
+                    new: new.to_string(),
+                });
+            }
+            _ => {
+                return Err(CliError::from_legacy_string(
+                    "error: --rename-section requires <old-name> <new-name>",
+                )
+                .with_exit_code(2));
+            }
+        }
     }
     if args.import || args.key.as_deref() == Some("import") {
         if args.import && args.key.is_some() {
@@ -1597,6 +1656,206 @@ async fn handle_unset(
         } else {
             println!("Unset {}: {}", scope_name(scope), key);
         }
+    }
+    Ok(())
+}
+
+/// Map a transactional write failure to a user-facing error (exit 128).
+fn config_write_cli_error(message: impl Into<String>) -> CliError {
+    CliError::fatal(message)
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+        .with_exit_code(128)
+}
+
+/// Whether `key` belongs to git section `section`, using Git's section /
+/// subsection identity rather than a raw prefix. A fully-qualified key splits
+/// as `section.[subsection.]name` (section = before the FIRST dot, name = after
+/// the LAST dot, subsection = anything between). `<section>` is likewise
+/// `section` (bare) or `section.subsection`. So `--remove-section branch`
+/// matches `branch.autosetup` but NOT `branch.feature.remote` (that key is in
+/// subsection `feature`, addressed as `branch.feature`) — matching Git, and
+/// avoiding deleting unrelated subsections.
+fn key_in_section(key: &str, section: &str) -> bool {
+    let Some((key_sec, key_rest)) = key.split_once('.') else {
+        return false;
+    };
+    let (target_sec, target_sub) = match section.split_once('.') {
+        Some((s, sub)) => (s, Some(sub)),
+        None => (section, None),
+    };
+    if key_sec != target_sec {
+        return false;
+    }
+    match key_rest.rsplit_once('.') {
+        // key = section.subsection.name → belongs only if the subsection matches.
+        Some((key_sub, _name)) => target_sub == Some(key_sub),
+        // key = section.name (no subsection) → belongs only to the bare section.
+        None => target_sub.is_none(),
+    }
+}
+
+/// Distinct keys belonging to `section`, read transactionally. Candidates are
+/// narrowed by the `<section>.` SQL prefix, then filtered to exact members with
+/// [`key_in_section`].
+async fn section_member_keys<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    section: &str,
+) -> CliResult<Vec<String>> {
+    let prefix = format!("{section}.");
+    let entries = ConfigKv::get_by_prefix_with_conn(txn, &prefix)
+        .await
+        .map_err(|e| config_read_cli_error(format!("failed to read config: {e}")))?;
+    let mut keys: Vec<String> = entries
+        .into_iter()
+        .filter(|e| key_in_section(&e.key, section))
+        .map(|e| e.key)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// `--remove-section <name>`: delete every key in section `<name>` (Git
+/// section semantics — see [`key_in_section`]) in one transaction. A section
+/// with no keys is "No such section" (exit 128), matching
+/// `git config --remove-section`.
+async fn handle_remove_section(
+    name: &str,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let conn = ScopedConfig::get_connection(scope)
+        .await
+        .map_err(config_read_cli_error)?;
+    // Begin first so the existence check and the deletes are one atomic unit.
+    let txn = conn
+        .begin()
+        .await
+        .map_err(|e| config_write_cli_error(format!("failed to start config transaction: {e}")))?;
+
+    let keys = section_member_keys(&txn, name).await?;
+    if keys.is_empty() {
+        return Err(
+            CliError::from_legacy_string(format!("error: No such section: {name}"))
+                .with_exit_code(128),
+        );
+    }
+
+    let mut removed = 0usize;
+    for key in &keys {
+        removed += ConfigKv::unset_all_with_conn(&txn, key)
+            .await
+            .map_err(|e| config_write_cli_error(format!("failed to remove '{key}': {e}")))?;
+    }
+    txn.commit()
+        .await
+        .map_err(|e| config_write_cli_error(format!("failed to commit config transaction: {e}")))?;
+
+    if output.is_json() {
+        emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "remove-section",
+                "scope": scope_name(scope),
+                "section": name,
+                "removed_count": removed,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!("Removed section {}: {name}", scope_name(scope));
+    }
+    Ok(())
+}
+
+/// `--rename-section <old> <new>`: move every key in section `<old>` to the
+/// matching key in section `<new>` (value and encryption flag preserved) in one
+/// transaction. A missing source is "No such section" (exit 128). Renaming onto
+/// the same name, or onto a destination section that already has keys, is
+/// rejected — the latter avoids ambiguous merges and encrypted/plaintext
+/// flag inheritance, so every destination write lands on a fresh key.
+async fn handle_rename_section(
+    old: &str,
+    new: &str,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if old == new {
+        return Err(CliError::from_legacy_string(format!(
+            "error: source and destination sections are identical: {old}"
+        ))
+        .with_exit_code(2));
+    }
+
+    let conn = ScopedConfig::get_connection(scope)
+        .await
+        .map_err(config_read_cli_error)?;
+    let txn = conn
+        .begin()
+        .await
+        .map_err(|e| config_write_cli_error(format!("failed to start config transaction: {e}")))?;
+
+    // Read source members transactionally (exact section semantics). Use the
+    // full entries (value + encrypted) in insertion order for the re-add.
+    let old_prefix = format!("{old}.");
+    let source: Vec<ConfigKvEntry> = ConfigKv::get_by_prefix_with_conn(&txn, &old_prefix)
+        .await
+        .map_err(|e| config_read_cli_error(format!("failed to read config: {e}")))?
+        .into_iter()
+        .filter(|e| key_in_section(&e.key, old))
+        .collect();
+    if source.is_empty() {
+        return Err(
+            CliError::from_legacy_string(format!("error: No such section: {old}"))
+                .with_exit_code(128),
+        );
+    }
+
+    // Refuse to write into a destination section that already exists, so every
+    // re-added key is fresh (preserving the source's exact value + encrypted
+    // flag, and avoiding silent multi-value merges).
+    if !section_member_keys(&txn, new).await?.is_empty() {
+        return Err(CliError::from_legacy_string(format!(
+            "error: destination section already exists: {new}"
+        ))
+        .with_exit_code(128));
+    }
+
+    for e in &source {
+        // Exact members all begin with `{old}.`; the remainder is the key name
+        // under the section (which itself may contain dots for nested names).
+        let name = e.key.strip_prefix(&old_prefix).unwrap_or(&e.key);
+        let new_key = format!("{new}.{name}");
+        ConfigKv::add_with_conn(&txn, &new_key, &e.value, e.encrypted)
+            .await
+            .map_err(|err| config_write_cli_error(format!("failed to write '{new_key}': {err}")))?;
+    }
+    let mut old_keys: Vec<String> = source.iter().map(|e| e.key.clone()).collect();
+    old_keys.sort();
+    old_keys.dedup();
+    for key in &old_keys {
+        ConfigKv::unset_all_with_conn(&txn, key)
+            .await
+            .map_err(|err| config_write_cli_error(format!("failed to remove '{key}': {err}")))?;
+    }
+    txn.commit()
+        .await
+        .map_err(|e| config_write_cli_error(format!("failed to commit config transaction: {e}")))?;
+
+    if output.is_json() {
+        emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "rename-section",
+                "scope": scope_name(scope),
+                "old": old,
+                "new": new,
+                "moved_count": old_keys.len(),
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!("Renamed section {}: {old} -> {new}", scope_name(scope));
     }
     Ok(())
 }

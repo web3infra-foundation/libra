@@ -1499,3 +1499,202 @@ async fn get_best_effort_reads_value_inside_repository() {
         .unwrap();
     assert_eq!(entry.map(|e| e.value).as_deref(), Some("yes"));
 }
+
+/// `--remove-section` / `--rename-section` operate on whole sections: rename
+/// moves every `old.*` key to `new.*` (siblings untouched), remove deletes all
+/// keys under the section, a missing section is exit 128, and renaming to the
+/// same name is rejected (exit 2) so the move cannot delete what it just wrote.
+#[tokio::test]
+#[serial]
+async fn test_config_remove_and_rename_section() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    let set = |k: &str, v: &str| {
+        assert_cli_success(
+            &run_libra_command(&["config", "--local", k, v], p),
+            "config set",
+        );
+    };
+    set("branch.feature.remote", "origin");
+    set("branch.feature.merge", "refs/heads/feature");
+    set("branch.other.remote", "upstream");
+
+    // Rename branch.feature -> branch.renamed.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "config",
+                "--local",
+                "--rename-section",
+                "branch.feature",
+                "branch.renamed",
+            ],
+            p,
+        ),
+        "rename-section",
+    );
+
+    // New keys carry the original values.
+    let r1 = run_libra_command(&["config", "--local", "--get", "branch.renamed.remote"], p);
+    assert_cli_success(&r1, "get renamed.remote");
+    assert!(String::from_utf8_lossy(&r1.stdout).contains("origin"));
+    let r2 = run_libra_command(&["config", "--local", "--get", "branch.renamed.merge"], p);
+    assert!(String::from_utf8_lossy(&r2.stdout).contains("refs/heads/feature"));
+
+    // The old section is gone; the sibling section is untouched.
+    assert!(
+        !run_libra_command(&["config", "--local", "--get", "branch.feature.remote"], p)
+            .status
+            .success(),
+        "old section key must be removed by rename"
+    );
+    let sib = run_libra_command(&["config", "--local", "--get", "branch.other.remote"], p);
+    assert_cli_success(&sib, "sibling untouched");
+    assert!(String::from_utf8_lossy(&sib.stdout).contains("upstream"));
+
+    // Remove the renamed section.
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "--local", "--remove-section", "branch.renamed"],
+            p,
+        ),
+        "remove-section",
+    );
+    assert!(
+        !run_libra_command(&["config", "--local", "--get", "branch.renamed.remote"], p)
+            .status
+            .success(),
+        "removed section key must be gone"
+    );
+
+    // Removing a non-existent section is "No such section" (exit 128).
+    assert_eq!(
+        run_libra_command(&["config", "--local", "--remove-section", "nope"], p)
+            .status
+            .code(),
+        Some(128),
+        "removing a missing section must exit 128"
+    );
+
+    // Renaming a section onto itself is rejected (exit 2).
+    assert_eq!(
+        run_libra_command(
+            &[
+                "config",
+                "--local",
+                "--rename-section",
+                "branch.other",
+                "branch.other"
+            ],
+            p,
+        )
+        .status
+        .code(),
+        Some(2),
+        "identical rename must be rejected with exit 2"
+    );
+}
+
+/// Section ops use Git's exact section/subsection identity, not a raw prefix:
+/// `--remove-section branch` removes only the bare-section key `branch.x`, not
+/// the subsection key `branch.feature.remote`. Renaming onto a destination
+/// section that already has keys is rejected (exit 128) so no merge/flag
+/// ambiguity can occur.
+#[tokio::test]
+#[serial]
+async fn test_config_section_ops_exact_git_semantics() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+    let set = |k: &str, v: &str| {
+        assert_cli_success(&run_libra_command(&["config", "--local", k, v], p), "set");
+    };
+
+    set("branch.autosetupmerge", "always"); // bare section `branch`
+    set("branch.feature.remote", "origin"); // subsection `branch.feature`
+
+    // Removing the bare section must NOT touch the subsection.
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--remove-section", "branch"], p),
+        "remove bare section",
+    );
+    assert!(
+        !run_libra_command(&["config", "--local", "--get", "branch.autosetupmerge"], p)
+            .status
+            .success(),
+        "the bare-section key must be removed"
+    );
+    let kept = run_libra_command(&["config", "--local", "--get", "branch.feature.remote"], p);
+    assert_cli_success(
+        &kept,
+        "subsection key must survive removing the bare section",
+    );
+    assert!(String::from_utf8_lossy(&kept.stdout).contains("origin"));
+
+    // Renaming onto an existing destination section is rejected; source survives.
+    set("dst.x", "1");
+    set("src.y", "2");
+    assert_eq!(
+        run_libra_command(&["config", "--local", "--rename-section", "src", "dst"], p)
+            .status
+            .code(),
+        Some(128),
+        "rename onto an existing destination section must be rejected (128)"
+    );
+    assert!(
+        run_libra_command(&["config", "--local", "--get", "src.y"], p)
+            .status
+            .success(),
+        "source must be preserved after a rejected rename"
+    );
+}
+
+/// `--rename-section` preserves multi-value order (each value is re-added under
+/// the new key in its original insertion order).
+#[tokio::test]
+#[serial]
+async fn test_config_rename_section_preserves_multivalue_order() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--add", "mvtest.list", "first"], p),
+        "add first",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--add", "mvtest.list", "second"], p),
+        "add second",
+    );
+
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "--local", "--rename-section", "mvtest", "moved"],
+            p,
+        ),
+        "rename multi-value section",
+    );
+
+    let g = run_libra_command(&["config", "--local", "--get-all", "moved.list"], p);
+    assert_cli_success(&g, "get-all moved.list");
+    let out = String::from_utf8_lossy(&g.stdout);
+    let first = out.find("first");
+    let second = out.find("second");
+    assert!(
+        first.is_some() && second.is_some() && first < second,
+        "multi-value insertion order must be preserved (first before second): {out}"
+    );
+    // `--get-all` on a now-missing key exits 0 with empty output, so assert the
+    // old values are gone rather than expecting a non-zero exit.
+    let old = run_libra_command(&["config", "--local", "--get-all", "mvtest.list"], p);
+    let old_out = String::from_utf8_lossy(&old.stdout);
+    assert!(
+        !old_out.contains("first") && !old_out.contains("second"),
+        "the old multi-value key must be removed, got: {old_out}"
+    );
+}
