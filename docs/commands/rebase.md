@@ -8,7 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
-libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] <upstream>
+libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --continue
 libra rebase --abort
@@ -37,6 +37,7 @@ Rebase state (the list of remaining and completed commits, the original HEAD, an
 | | `--autosquash` | Move and fold `fixup!`, `squash!`, and `amend!` commits into their target commits during replay. |
 | | `--reapply-cherry-picks` | Explicitly replay clean cherry-pick commits. This matches Libra's default linear replay behavior. |
 | | `--no-autostash` | Do not stash and re-apply a dirty working tree around the rebase. Accepted no-op for Git parity: Libra's rebase never autostashes (it requires a clean tree). (Git's `--autostash` is not implemented.) |
+| | `--no-rerere-autoupdate` | Do not update the rerere index. Accepted no-op for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
 
 ### Option Details
 
@@ -355,6 +356,7 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Exec | Not supported | `--exec <cmd>` | N/A |
 | Autosquash | Supported | `--autosquash` | N/A |
 | Autostash | `--no-autostash` (no-op; never autostashes); `--autostash` not supported | `--autostash` / `--no-autostash` | N/A |
+| Rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere); `--rerere-autoupdate` not supported | `--rerere-autoupdate` / `--no-rerere-autoupdate` | N/A |
 | Reapply cherry-picks | Supported; Libra replays by default | `--reapply-cherry-picks` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
 | Keep empty | Not supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |

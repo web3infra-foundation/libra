@@ -679,6 +679,12 @@ pub struct RebaseArgs {
     /// opposite `--autostash` is not implemented.)
     #[clap(long = "no-autostash")]
     pub no_autostash: bool,
+
+    /// Do not update the rerere (reuse recorded resolution) index. Accepted for
+    /// Git parity and is a no-op: Libra has no rerere, so there is nothing to
+    /// update. (Git's opposite `--rerere-autoupdate` is not exposed.)
+    #[clap(long = "no-rerere-autoupdate")]
+    pub no_rerere_autoupdate: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

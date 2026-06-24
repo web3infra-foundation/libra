@@ -7,7 +7,7 @@
 ## 概要
 
 ```
-libra rebase <upstream>
+libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] <upstream>
 libra rebase --continue
 libra rebase --abort
 libra rebase --skip
@@ -294,6 +294,7 @@ Libra 提供折中方案：带 conflict-stop 语义的线性 rebase（Git 用户
 | Exec | 不支持 | `--exec <cmd>` | N/A |
 | Autosquash | 支持（`--autosquash`） | `--autosquash` | N/A |
 | Autostash | `--no-autostash`（no-op；从不 autostash）；`--autostash` 不支持 | `--autostash` / `--no-autostash` | N/A |
+| Rerere autoupdate | `--no-rerere-autoupdate`（no-op；无 rerere）；`--rerere-autoupdate` 不支持 | `--rerere-autoupdate` / `--no-rerere-autoupdate` | N/A |
 | Rebase merges | 不支持 | `--rebase-merges` | 默认行为 |
 | Keep empty | 不支持 | `--keep-empty` / `--no-keep-empty` | 默认保留空提交 |
 | Force rebase | 不支持 | `--force-rebase` | N/A |

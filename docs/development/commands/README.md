@@ -47,7 +47,7 @@
 | [`graph`](graph.md) | `intentionally-different` | Libra AI graph inspection extension, not a Git command |
 | [`grep`](grep.md) | `partial` | tracked/index/tree search with common match flags, context lines, `-E`/`-G`, `-P` rejection, `-a`/`-I` binary controls, `--heading`/`--break`/`-z` output grouping, `-m`/`--max-count`, and `-o`/`--only-matching` supported; untracked/no-index search not exposed |
 | [`hash-object`](hash-object.md) | `partial` | Blob hashing for files, `--stdin`, and `--stdin-paths`; `-w` writes blob objects; `--path` / `--no-filters` accepted for raw-byte... |
-| [`hooks`](hooks.md) | `intentionally-different` | Hidden compatibility entry for hook configs installed by `libra agent enable` |
+| [`hooks`](hooks.md) | `intentionally-different` | Hidden compatibility entry for AI provider hook configs installed by `libra agent enable`; not a Git hooks bridge (`.git/hooks` / `core.hooksPath` rejected by D3) |
 | [`index-pack`](index-pack.md) | `partial` | hidden plumbing command; `--stdin`, `--keep[=<MSG>]`, and progress flags supported; `--fix-thin` not exposed |
 | [`init`](init.md) | `partial` | fresh repository initialization supported; safe re-initialization/top-up of existing repos not implemented |
 | [`lfs`](lfs.md) | `partial` | built-in Libra LFS command; uses `.libra_attributes`, not Git LFS filters/hooks (see [docs/development/commands/_comp... |
@@ -64,7 +64,7 @@
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |
 | [`pull`](pull.md) | `partial` | fetch + fast-forward/three-way merge supported; `--ff-only` / `--rebase` / `--no-rebase` (countermands `--rebase`, last wins) / `--ff` / `--no-ff`, fetch `--depth`, `--squash`, `--no-commit`, `--commit`, `--autostash`, and `--no-progress` (forwarded to the fetch) exposed |
 | [`push`](push.md) | `partial` | branch/tag update, multi-refspec, delete (`-d`/`--delete`), `--tags`, and `--mirror` supported; local file remote rejected — intentiona... |
-| [`rebase`](rebase.md) | `partial` | `--onto <newbase> [<upstream>] [<branch>]`, `--autosquash`, `--reapply-cherry-picks`, and `--no-autostash` (no-op — never autostashes) supported; interactive / `--rebase-merges` / `--autostash` not supported |
+| [`rebase`](rebase.md) | `partial` | `--onto <newbase> [<upstream>] [<branch>]`, `--autosquash`, `--reapply-cherry-picks`, `--no-autostash` (no-op — never autostashes), and `--no-rerere-autoupdate` (no-op — no rerere) supported; interactive / `--rebase-merges` / `--autostash` / `--rerere-autoupdate` not supported |
 | [`reflog`](reflog.md) | `supported` | show/delete/exists/expire supported; expire has documented intentional differences around no-ref handling, stale-fix depth, and updateref skips |
 | [`remote`](remote.md) | `partial` | add (incl. `-f`/`--fetch`)/remove/rename/list/get-url/set-url/prune/set-branches/set-head (incl. `--auto`)/update supported; `remote show` queries the remote by default (`--no-query` for offline cached data); `remote update [<group>]` fetches all/named remotes (groups expanded); `update -p`/`--prune` not exposed |
 | [`reset`](reset.md) | `partial` | soft/mixed/hard/path reset plus pathspec-from-file/pathspec-file-nul and no-refresh no-op supported; merge/keep not exposed |
