@@ -290,7 +290,7 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 | 未跟踪文件控制 | `git status -u<mode>` | N/A（始终显示） | `libra status --untracked-files=<mode>` |
 | 脏状态退出码 | `git diff --exit-code` | N/A | `libra status --exit-code` |
 | Quiet 模式 | `git status -q` | N/A | `libra status --quiet`（全局标志） |
-| 列显示 | `git status --column` | N/A | N/A |
+| 列显示 | `git status --column` | N/A | `libra status --column`（`--no-column` 撤销） |
 | Ahead/behind 显示 | `git status -sb`（仅文本） | N/A | 人类 + JSON 中结构化 `upstream` 对象 |
 | 查找 renames | `git status -M` | 自动 | `--find-renames` / `--renames` |
 | 忽略 submodules | `git status --ignore-submodules` | N/A | N/A（无 submodules） |
@@ -324,4 +324,4 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 - `--porcelain v2` 被接受，但当前产生 v1 格式输出；使用 `--json` 获取完整结构化数据
 - jj 的 `jj status` 始终使用短格式，并且不区分已暂存与未暂存更改（jj 没有暂存区）
 - 通过 `--find-renames[=<n>]` 及 `--renames`/`--no-renames` 开关支持重命名检测；不暴露 Git 的短别名 `-M`
-- 不支持 `--column` 显示
+- 支持 `--column` 列对齐显示；`--no-column`（等价于 `--column=never`）经 clap `overrides_with` 撤销先前的 `--column`（最后出现者生效），status 默认非列式故单独使用为 no-op

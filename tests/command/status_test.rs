@@ -2561,3 +2561,28 @@ fn test_status_long_selects_default_and_conflicts() {
         "--long --porcelain conflicts"
     );
 }
+
+#[test]
+fn status_no_column_countermands_column() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let p = temp.path();
+    assert!(run_libra_command(&["init"], p).status.success());
+    std::fs::write(p.join("f.txt"), "x\n").unwrap();
+
+    // `--no-column` alone is accepted (status is not columnar by default).
+    let out = run_libra_command(&["status", "--no-column"], p);
+    assert!(
+        out.status.success(),
+        "status --no-column: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `--column --no-column` (last wins) is accepted: `--no-column` countermands
+    // `--column` via clap's symmetric override, so there is no conflict error.
+    let out2 = run_libra_command(&["status", "--column", "--no-column"], p);
+    assert!(
+        out2.status.success(),
+        "status --column --no-column (override): {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+}

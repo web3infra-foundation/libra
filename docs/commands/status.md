@@ -91,6 +91,16 @@ and ignored sections, file names are laid out in multiple columns.
 libra status --column
 ```
 
+### `--no-column`
+
+Do not align status entries into columns (equivalent to `--column=never`),
+countermanding an earlier `--column` (last one on the command line wins). Status
+is not columnar by default, so on its own this is a no-op.
+
+```bash
+libra status --no-column
+```
+
 ### `--find-renames [PERCENT]`
 
 Detect renames among staged and unstaged changes. When a deleted file and a new file have the
@@ -384,7 +394,7 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Untracked files control | `git status -u<mode>` | N/A (always shows) | `libra status --untracked-files=<mode>` |
 | Exit code for dirty | `git diff --exit-code` | N/A | `libra status --exit-code` |
 | Quiet mode | `git status -q` | N/A | `libra status --quiet` (global flag) |
-| Column display | `git status --column` | N/A | N/A |
+| Column display | `git status --column` | N/A | `libra status --column` (`--no-column` countermands) |
 | Ahead/behind display | `git status -sb` (text only) | N/A | Human + structured `upstream` object in JSON |
 | Find renames | `git status -M` | Automatic | `--find-renames` / `--renames` |
 | Ignore submodules | `git status --ignore-submodules` | N/A | N/A (no submodules) |
@@ -419,4 +429,4 @@ Every `StatusError` variant maps to an explicit `StableErrorCode`.
 - `--porcelain v2` is accepted but currently produces v1-format output; use `--json` for full structured data
 - jj's `jj status` always uses a short format and does not distinguish staged from unstaged changes (jj has no staging area)
 - Rename detection is supported via `--find-renames[=<n>]` and the `--renames`/`--no-renames` toggles; Git's short `-M` alias is not exposed
-- `--column` display is not supported
+- `--column` column-aligned display is supported; `--no-column` (equivalent to `--column=never`) countermands an earlier `--column` via clap's symmetric override (last one wins), and status is not columnar by default so `--no-column` alone is a no-op

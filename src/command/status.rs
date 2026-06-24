@@ -116,8 +116,15 @@ pub struct StatusArgs {
     pub untracked_files: UntrackedFiles,
 
     /// Print status entries with columns aligned (human output only).
-    #[clap(long = "column")]
+    #[clap(long = "column", overrides_with = "no_column")]
     pub column: bool,
+
+    /// Do not print status entries in columns (equivalent to `--column=never`),
+    /// countermanding an earlier `--column` (last one on the command line wins),
+    /// matching `git status --no-column`. Status is not columnar by default, so
+    /// on its own this is a no-op.
+    #[clap(long = "no-column", overrides_with = "column")]
+    pub no_column: bool,
 
     /// Terminate each status entry with a NUL byte instead of a newline.
     /// This is intended for machine-readable short/porcelain output.
