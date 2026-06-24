@@ -1241,6 +1241,7 @@ async fn test_basic_rebase() {
 
     // 2. Create and switch to feature branch
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -1318,6 +1319,7 @@ async fn test_basic_rebase() {
 
     // 4. Switch back to master and make it diverge
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -1363,6 +1365,7 @@ async fn test_basic_rebase() {
 
     // 5. Switch back to feature and perform rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -1469,6 +1472,7 @@ async fn test_rebase_preserves_untracked_files() {
 
     // Create feature branch and add a commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -1514,6 +1518,7 @@ async fn test_rebase_preserves_untracked_files() {
 
     // Advance master to force a real rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -1559,6 +1564,7 @@ async fn test_rebase_preserves_untracked_files() {
 
     // Switch back to feature and create an untracked file
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -1671,6 +1677,7 @@ async fn test_rebase_already_up_to_date() {
 
     // Create feature branch from current master (no divergence)
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -1742,6 +1749,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 
     // Create feature branch and make a commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -1787,6 +1795,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 
     // Switch back to master and make a conflicting commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -1832,6 +1841,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 
     // Switch back to feature
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -1942,6 +1952,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
 
     // Create feature branch and commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -1987,6 +1998,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
 
     // Advance master to force a rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -2032,6 +2044,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
 
     // Rebase feature onto master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -2277,6 +2290,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 2. Create feature branch and modify the file
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -2326,6 +2340,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 3. Switch to master and make a conflicting modification
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -2371,6 +2386,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 4. Switch back to feature and attempt rebase (should conflict)
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -2500,6 +2516,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
 
     // 2. Feature branch modifies binary content
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -2544,6 +2561,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
 
     // 3. Master modifies binary content differently
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -2588,6 +2606,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
 
     // 4. Rebase feature onto master (should conflict)
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -2693,6 +2712,7 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // 2. Create feature branch with two commits
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -2779,6 +2799,7 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // 3. Switch to master and make a conflicting change
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -2824,6 +2845,7 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // 4. Switch back to feature and attempt rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -2924,6 +2946,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // 2. Create feature branch and modify the file
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -2973,6 +2996,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // 3. Switch to master and make a conflicting modification
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3018,6 +3042,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // 4. Switch back to feature and attempt rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -3157,6 +3182,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // 2. Create feature branch with 3 commits
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -3271,6 +3297,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // 3. Switch to master and make conflicting change to file1
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3316,6 +3343,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // 4. Switch back to feature and attempt rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -3433,6 +3461,7 @@ async fn test_rebase_state_persistence() {
 
     // 2. Create feature branch with conflicting change
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -3478,6 +3507,7 @@ async fn test_rebase_state_persistence() {
 
     // 3. Create conflicting change on master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3523,6 +3553,7 @@ async fn test_rebase_state_persistence() {
 
     // 4. Start rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -3641,6 +3672,7 @@ async fn test_rebase_fast_forward_branch_behind() {
 
     // Create feature branch at the same commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -3655,6 +3687,7 @@ async fn test_rebase_fast_forward_branch_behind() {
 
     // Advance master by one commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3702,6 +3735,7 @@ async fn test_rebase_fast_forward_branch_behind() {
 
     // Rebase feature onto master (fast-forward)
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -3784,6 +3818,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
 
     // Create feature branch at base
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -3798,6 +3833,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
 
     // Advance master by one commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3843,6 +3879,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
 
     // Switch to feature and introduce a dirty tracked file
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -3928,6 +3965,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 
     // Create feature branch at base
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -3942,6 +3980,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 
     // Advance master with a new file that will conflict with untracked
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -3987,6 +4026,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 
     // Switch to feature and create untracked file that would be overwritten
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -4072,6 +4112,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
 
     // Create feature branch and add a commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -4117,6 +4158,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
 
     // Advance master to force a non-fast-forward rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -4162,6 +4204,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
 
     // Switch back to feature and introduce a dirty tracked file
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -4254,6 +4297,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
     // Feature commit modifies both files (conflict + clean)
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -4300,6 +4344,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
     // Master conflicting change
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -4345,6 +4390,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
     // Rebase feature onto master; should stop with conflict
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -4439,6 +4485,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     // Feature commit adds a file and changes conflict.txt
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -4503,6 +4550,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     // Master conflicting change
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -4548,6 +4596,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 
     // Rebase feature onto master with an untracked file at the added path.
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -4641,6 +4690,7 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Feature commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -4686,6 +4736,7 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Master conflict
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -4731,6 +4782,7 @@ async fn test_rebase_continue_requires_resolution() {
 
     // Start rebase
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,

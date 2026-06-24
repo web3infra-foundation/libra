@@ -5,7 +5,7 @@
 use git_internal::internal::index::Index;
 use libra::{
     internal::{
-        branch::{TRACES_BRANCH, Branch as InternalBranch},
+        branch::{Branch as InternalBranch, TRACES_BRANCH},
         head::Head,
     },
     utils::{client_storage::ClientStorage, path, test::ChangeDirGuard},
@@ -471,6 +471,7 @@ async fn test_switch_function() {
     // create a new branch and switch to it
     {
         let args = SwitchArgs {
+            no_progress: false,
             branch: None,
             create: Some("test_branch".to_string()),
             force_create: None,
@@ -527,6 +528,7 @@ async fn test_switch_function() {
         commit::execute(args).await;
 
         let args = SwitchArgs {
+            no_progress: false,
             branch: Some(commit_id_str.clone()),
             create: None,
             force_create: None,
@@ -554,6 +556,7 @@ async fn test_switch_function() {
     //switch branch back to the master
     {
         let args = SwitchArgs {
+            no_progress: false,
             branch: Some("main".to_string()),
             create: None,
             force_create: None,
@@ -683,6 +686,7 @@ async fn test_switch_track_sets_upstream() {
     .unwrap();
 
     let args = SwitchArgs {
+        no_progress: false,
         branch: Some("origin/feature".to_string()),
         create: None,
         force_create: None,
@@ -973,6 +977,7 @@ async fn test_detach_head_extra() {
 
 async fn switch_to_detach(branch_test: String) -> String {
     let args = SwitchArgs {
+        no_progress: false,
         branch: Some(branch_test),
         create: None,
         force_create: None,
@@ -995,6 +1000,7 @@ async fn switch_to_detach(branch_test: String) -> String {
 
 async fn switch_to_branch(branch_test: String) {
     let args = SwitchArgs {
+        no_progress: false,
         branch: Some(branch_test),
         create: None,
         force_create: None,
@@ -1049,5 +1055,30 @@ fn test_switch_force_discards_local_changes() {
         std::fs::read_to_string(p.join("tracked.txt")).unwrap(),
         "v2\n",
         "-f should restore the target branch's content"
+    );
+}
+
+#[test]
+fn switch_no_progress_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert!(
+        run_libra_command(&["branch", "feature"], p)
+            .status
+            .success(),
+        "create feature"
+    );
+    // `--no-progress` is accepted and a no-op: Libra's switch renders no progress
+    // meter, so the switch proceeds normally.
+    let out = run_libra_command(&["switch", "--no-progress", "feature"], p);
+    assert!(
+        out.status.success(),
+        "switch --no-progress feature: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let current = run_libra_command(&["branch", "--show-current"], p);
+    assert!(
+        String::from_utf8_lossy(&current.stdout).contains("feature"),
+        "switched to feature"
     );
 }

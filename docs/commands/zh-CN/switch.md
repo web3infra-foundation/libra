@@ -33,6 +33,7 @@ libra switch --track <remote/branch>
 | | `--orphan` | `<name>` | 创建无父提交的新分支并切换到它 |
 | `-d` | `--detach` | | 在给定提交、标签或分支上 detach HEAD |
 | | `--track` | | 创建跟踪给定远程分支的本地分支，并切换到它 |
+| | `--no-progress` | | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 switch 从不渲染进度条。 |
 
 ### 标志细节
 

@@ -1689,6 +1689,7 @@ async fn test_status_branch_detached_head() {
 
     // checkout the first commit to enter the detached state
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some(current_commit.to_string()),
         create: None,
         force_create: None,

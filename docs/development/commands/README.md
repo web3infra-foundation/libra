@@ -79,7 +79,7 @@
 | [`show-ref`](show-ref.md) | `supported` | branch/tag/HEAD listing, scope filters, hash/abbrev/dereference/verify/exists/head reset aliases, and `--exclude-existing[=<pattern>]` stdin filter supported |
 | [`stash`](stash.md) | `partial` | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` supported; `create` / `store` deferred (see ... |
 | [`status`](status.md) | `supported` | 见命令文档。 |
-| [`switch`](switch.md) | `partial` | `-C/--force-create`、`--orphan`、`--detach`、`--track`、`--guess`/`--no-guess`（DWIM 远端跟踪猜测，默认开启，受 `checkout.guess` / `checkout.defaultRemote` 控制）已公开；`-f/--discard-changes`、merge/conflict/submodule 相关参数未公开。 |
+| [`switch`](switch.md) | `partial` | `-C/--force-create`、`--orphan`、`--detach`、`--track`、`-f`/`--force`（别名 `--discard-changes`）、`--guess`/`--no-guess`（DWIM 远端跟踪猜测，默认开启，受 `checkout.guess` / `checkout.defaultRemote` 控制）、`--no-progress`（接受式 no-op：Libra 的 switch 从不渲染进度条）已公开；merge/conflict/submodule 相关参数未公开。 |
 | [`symbolic-ref`](symbolic-ref.md) | `partial` | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | [`tag`](tag.md) | `partial` | lightweight/message/annotated tags, `-F`/`--file` (message from file or stdin), force/delete/list/`-n`, points-at, contains/no-contains, merged/no-merged, sort, `--column` (always/auto/never), and vault-PGP sign/verify supported; editor (`-e`) and Git GPG interop not exposed |
 | [`usage`](usage.md) | `intentionally-different` | Libra AI provider/model usage reporting extension, not a Git command |

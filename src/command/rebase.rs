@@ -987,6 +987,7 @@ async fn switch_to_rebase_branch(branch: &str, output: &OutputConfig) -> CliResu
     }
     switch::execute_safe(
         switch::SwitchArgs {
+            no_progress: false,
             branch: Some(branch.to_string()),
             create: None,
             force_create: None,

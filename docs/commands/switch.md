@@ -36,6 +36,7 @@ Fuzzy branch name suggestions are provided via Levenshtein distance when a branc
 | | `--track` | | Create a local branch tracking the given remote branch and switch to it |
 | | `--guess` | | Auto-create a tracking branch when `<branch>` uniquely matches one remote (default; DWIM) |
 | | `--no-guess` | | Disable the remote-tracking guess; require a local branch or explicit `--track` |
+| | `--no-progress` | | Do not show a progress meter. Accepted no-op for Git parity: Libra's switch never renders a progress meter. |
 
 ### Flag details
 

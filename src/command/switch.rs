@@ -95,6 +95,12 @@ pub struct SwitchArgs {
     /// an explicit `--track <remote>/<branch>`. Overrides `checkout.guess`.
     #[clap(long = "no-guess", overrides_with = "guess")]
     pub no_guess: bool,
+
+    /// Do not show a progress meter. Accepted for Git parity and is a no-op:
+    /// Libra's switch never renders a progress meter, so there is nothing to
+    /// suppress.
+    #[clap(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -727,6 +733,7 @@ pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<
 
 async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOutput, SwitchError> {
     let SwitchArgs {
+        no_progress: _,
         branch,
         create,
         force_create,

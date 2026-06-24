@@ -1078,6 +1078,7 @@ async fn test_rename_current_branch() {
     // Create and switch to a feature branch
     let feature_branch = "feature".to_string();
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some(feature_branch.clone()),
         force_create: None,
@@ -1441,6 +1442,7 @@ async fn test_branch_delete_safe() {
 
     // Switch to feature branch and make a commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -1471,6 +1473,7 @@ async fn test_branch_delete_safe() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -1520,6 +1523,7 @@ async fn test_branch_delete_safe() {
 
     // Now merge feature into master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("feature".to_string()),
         create: None,
         force_create: None,
@@ -1533,6 +1537,7 @@ async fn test_branch_delete_safe() {
     .await;
 
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -1678,6 +1683,7 @@ async fn test_branch_contains_commit_filter() {
     .await;
 
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("dev".to_string()),
         create: None,
         force_create: None,
@@ -1698,6 +1704,7 @@ async fn test_branch_contains_commit_filter() {
 
     // Return to main branch and add two commits
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some(main_branch.clone()),
         create: None,
         force_create: None,

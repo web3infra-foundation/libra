@@ -77,6 +77,7 @@ async fn test_basic_cherry_pick() {
 
     // --- 2. Create and switch to feature branch ---
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -164,6 +165,7 @@ async fn test_basic_cherry_pick() {
 
     // --- 4. Switch back to master branch ---
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -310,6 +312,7 @@ async fn test_cherry_pick_with_commit() {
 
     // Create feature branch and commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -359,6 +362,7 @@ async fn test_cherry_pick_with_commit() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -457,6 +461,7 @@ async fn test_cherry_pick_multiple_commits() {
 
     // Create feature branch
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".to_string()),
         force_create: None,
@@ -537,6 +542,7 @@ async fn test_cherry_pick_multiple_commits() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".to_string()),
         create: None,
         force_create: None,
@@ -798,6 +804,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
 
     // feature branch with one commit
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: None,
         create: Some("feature".into()),
         force_create: None,
@@ -844,6 +851,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
 
     // back to main
     switch::execute(SwitchArgs {
+        no_progress: false,
         branch: Some("main".into()),
         create: None,
         force_create: None,
