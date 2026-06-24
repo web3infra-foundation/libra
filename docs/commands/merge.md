@@ -32,6 +32,7 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `--no-commit` | Perform the merge and stage the result but stop before committing; finish with `libra merge --continue`. |
 | `--no-edit` | Accept the auto-generated merge message without launching an editor. Libra never opens an editor for merge, so this is a no-op accepted for Git parity. |
 | `-n`, `--no-stat` | Do not show a diffstat at the end of the merge. No-op accepted for Git parity: Libra's merge never prints a diffstat. (Git's default `--stat` diffstat is not implemented.) |
+| `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
 | `--json` | Emit a structured success envelope. |
@@ -131,6 +132,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | Commit message | `-m <msg>` | `-m <msg>` | N/A |
 | No editor | `--no-edit` (no-op; never edits) | `--no-edit` | N/A |
 | No diffstat | `-n` / `--no-stat` (no-op; never prints one) | `-n` / `--no-stat` | N/A |
+| No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
 | Custom strategy | Not supported | `--strategy`, `-X` | N/A |
 | Verify signatures | Not supported | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |

@@ -107,6 +107,12 @@ pub struct MergeArgs {
     /// diffstat by default via `--stat`, which Libra does not implement.)
     #[arg(short = 'n', long = "no-stat")]
     pub no_stat: bool,
+
+    /// Do not show a progress meter. Accepted for Git parity and is a no-op:
+    /// Libra's merge never renders a progress meter, so there is nothing to
+    /// suppress.
+    #[arg(long = "no-progress")]
+    pub no_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1041,3 +1041,35 @@ fn test_merge_no_stat_short_n_and_long_are_accepted() {
         );
     }
 }
+
+#[test]
+fn test_merge_no_progress_is_accepted_noop() {
+    // `--no-progress` suppresses a progress meter. Libra's merge never renders
+    // one, so it is an accepted no-op that produces a normal merge.
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "feature", "--no-progress"], temp_path);
+    assert_cli_success(&output, "merge feature --no-progress");
+    let log = run_libra_command(&["log", "--oneline", "-n", "1"], temp_path);
+    assert!(
+        String::from_utf8_lossy(&log.stdout)
+            .to_lowercase()
+            .contains("merge"),
+        "merge --no-progress created a merge commit"
+    );
+}
