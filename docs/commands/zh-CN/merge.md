@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -34,6 +34,7 @@ Libra 仍未实现 octopus merge、自定义策略、策略选项、交互式消
 | `-n`, `--no-stat` | 合并结束时不显示 diffstat。为对齐 Git 而接受的 no-op：Libra 的 merge 从不打印 diffstat。（Git 默认的 `--stat` diffstat 未实现。） |
 | `--no-progress` | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 merge 从不渲染进度条。 |
 | `--no-verify-signatures` | 不验证被合并提交的 GPG 签名。为对齐 Git 而接受的 no-op：Libra 的 merge 从不验证提交签名。（Git 的反向 `--verify-signatures` 未实现。） |
+| `--no-rerere-autoupdate` | 合并后不更新 rerere 索引。为对齐 Git 而接受的 no-op：Libra 无 rerere。（Git 的 `--rerere-autoupdate` 未公开。） |
 | `--continue` | 在冲突已解决并暂存后完成进行中的合并。 |
 | `--abort` | 恢复合并前的 HEAD、索引和工作树。 |
 | `--json` | 输出结构化成功信封。 |
@@ -135,6 +136,7 @@ Merge aborted.
 | 不显示 diffstat | `-n` / `--no-stat`（no-op；从不打印） | `-n` / `--no-stat` | N/A |
 | 不显示进度条 | `--no-progress`（no-op；从不渲染） | `--no-progress` | N/A |
 | 不验证签名 | `--no-verify-signatures`（no-op；从不验证） | `--no-verify-signatures` | N/A |
+| 不更新 rerere | `--no-rerere-autoupdate`（no-op；无 rerere） | `--no-rerere-autoupdate` | N/A |
 | 自定义策略 | 不支持 | `--strategy`, `-X` | N/A |
 | 验证签名 | 不支持 | `--verify-signatures` | N/A |
 | JSON 输出 | `--json` / `--machine` | 不支持 | N/A |

@@ -120,6 +120,13 @@ pub struct MergeArgs {
     /// `--verify-signatures` is not implemented.)
     #[arg(long = "no-verify-signatures")]
     pub no_verify_signatures: bool,
+
+    /// Do not update the rerere (reuse recorded resolution) index after the
+    /// merge. Accepted for Git parity and is a no-op: Libra has no rerere, so
+    /// there is nothing to update. (Git's opposite `--rerere-autoupdate` is not
+    /// exposed.)
+    #[arg(long = "no-rerere-autoupdate")]
+    pub no_rerere_autoupdate: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

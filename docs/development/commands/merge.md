@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra merge` 的目标是把其他提交或分支合入当前 HEAD，覆盖 fast-forward 和单头 three-way merge。实现需要处理冲突生命周期、autostash、rename detection、签名/策略兼容参数和 JSON 输出；`-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`-n`(`--no-stat`)/`--no-verify-signatures`（接受式 no-op）已支持，同时把 octopus、自定义策略、实际签名验证（`--verify-signatures`）和 `--stat`（合并后 diffstat）作为未完成差异。
+`libra merge` 的目标是把其他提交或分支合入当前 HEAD，覆盖 fast-forward 和单头 three-way merge。实现需要处理冲突生命周期、autostash、rename detection、签名/策略兼容参数和 JSON 输出；`-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`-n`(`--no-stat`)/`--no-verify-signatures`/`--no-rerere-autoupdate`（接受式 no-op）已支持，同时把 octopus、自定义策略、实际签名验证（`--verify-signatures`）、`--rerere-autoupdate` 和 `--stat`（合并后 diffstat）作为未完成差异。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。fast-forward 与单头三方合并已支持；`-m <msg>`、`--ff-only`、`--no-ff`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op；Libra 从不为 merge 打开编辑器）、`-n`/`--no-stat`（接受为 no-op；Libra 的 merge 从不打印 diffstat）、`--no-verify-signatures`（接受为 no-op；Libra 的 merge 从不验证提交签名）已支持；octopus/自定义策略、`--verify-signatures`（实际签名验证）与 `--stat`（Git 默认的合并后 diffstat）仍未实现。
+- 兼容级别：`partial`。fast-forward 与单头三方合并已支持；`-m <msg>`、`--ff-only`、`--no-ff`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op；Libra 从不为 merge 打开编辑器）、`-n`/`--no-stat`（接受为 no-op；Libra 的 merge 从不打印 diffstat）、`--no-verify-signatures`（接受为 no-op；Libra 的 merge 从不验证提交签名）、`--no-rerere-autoupdate`（接受为 no-op；Libra 无 rerere）已支持；octopus/自定义策略、`--verify-signatures`（实际签名验证）、`--rerere-autoupdate` 与 `--stat`（Git 默认的合并后 diffstat）仍未实现。
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/merge.md`。
-- Synopsis：`libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] <branch>` / `libra merge --continue` / `libra merge --abort`。
-- 公开参数/子命令包括：`<branch>`、`--continue`、`--abort`、`--ff-only`、`--no-ff`、`-m, --message <MSG>`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op，Libra 从不为 merge 打开编辑器，行为等同默认；不提供 `--edit`）、`-n`/`--no-stat`（接受为 no-op：Libra 的 merge 从不打印 diffstat；`no_stat` 字段解析后不被读取。Git 默认通过 `--stat` 打印 diffstat，Libra 未实现 `--stat`）、`--no-progress`（接受为 no-op：Libra 的 merge 从不渲染进度条；`no_progress` 字段解析后不被读取）、`--no-verify-signatures`（接受为 no-op：Libra 的 merge 从不验证提交签名；`no_verify_signatures` 字段解析后不被读取。Git 的反向 `--verify-signatures` 未实现）。
+- Synopsis：`libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>` / `libra merge --continue` / `libra merge --abort`。
+- 公开参数/子命令包括：`<branch>`、`--continue`、`--abort`、`--ff-only`、`--no-ff`、`-m, --message <MSG>`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op，Libra 从不为 merge 打开编辑器，行为等同默认；不提供 `--edit`）、`-n`/`--no-stat`（接受为 no-op：Libra 的 merge 从不打印 diffstat；`no_stat` 字段解析后不被读取。Git 默认通过 `--stat` 打印 diffstat，Libra 未实现 `--stat`）、`--no-progress`（接受为 no-op：Libra 的 merge 从不渲染进度条；`no_progress` 字段解析后不被读取）、`--no-verify-signatures`（接受为 no-op：Libra 的 merge 从不验证提交签名；`no_verify_signatures` 字段解析后不被读取。Git 的反向 `--verify-signatures` 未实现）、`--no-rerere-autoupdate`（接受为 no-op：Libra 无 rerere，无可更新；`no_rerere_autoupdate` 字段解析后不被读取。Git 的反向 `--rerere-autoupdate` 未公开）。
 - `--ff-only`：仅当当前分支可 fast-forward 到目标时才合并，否则失败（非快进退出错误）。`--no-ff`：即使可以 fast-forward 也强制生成两亲合并提交。`-m, --message <MSG>`：覆盖合并提交消息（默认 `Merge <upstream> into <head>`）。`--squash`：执行合并并把结果写入 index/worktree，但**不创建提交、不移动 HEAD、不记录 merge 信息**（永不 fast-forward），随后用普通 `commit` 收尾生成单亲提交。`--no-commit`：执行合并并暂存结果但**停在提交之前**（永不 fast-forward），写入 `MergeState`（无冲突路径），随后用 `libra merge --continue` 收尾两亲提交。**刻意差异**：与 Git 不同，`--no-commit` 后用普通 `commit` 只会记录单亲，必须用 `merge --continue` 收尾。`--squash` 与 `--no-commit` 互斥，且都与 `--ff-only`/`--continue`/`--abort` 互斥。这些 flag 底层复用 pull 已有的 `PullMergeOptions` 引擎路径（`message`/`squash`/`no_commit` 在 `perform_three_way_merge` 计算出 merged tree 后提前返回；`--no-commit` 复用 `merge --continue` 的 MergeState 机制）。
 
 
@@ -55,13 +55,14 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | fast-forward 与单头三方合并、`-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`-n`(`--no-stat`)/`--no-verify-signatures` 已支持；octopus/自定义策略/`--verify-signatures`/`--stat` 延后 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | fast-forward 与单头三方合并、`-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`-n`(`--no-stat`)/`--no-verify-signatures`/`--no-rerere-autoupdate` 已支持；octopus/自定义策略/`--verify-signatures`/`--rerere-autoupdate`/`--stat` 延后 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | ✅ 已实现 | Squash `--squash` | 执行合并并写入 index/worktree，但不创建提交、不移动 HEAD（永不 ff），随后用普通 `commit` 收尾。复用 pull 引擎路径。 |
 | ✅ 已实现 | 提交消息 `-m <msg>` | 覆盖默认 `Merge <branch> into <head>` 消息。 |
 | ✅ 已实现 | `--no-edit` | 接受为 no-op：Libra 从不为 merge 打开编辑器（带集成测试 `test_merge_no_edit_accepts_default_message`）。 |
 | ✅ 已实现 | `-n` / `--no-stat` | 接受为 no-op：Libra 的 merge 从不打印 diffstat（带集成测试 `test_merge_no_stat_short_n_and_long_are_accepted`）。Git 默认的 `--stat` 仍未实现。 |
 | ✅ 已实现 | `--no-progress` | 接受为 no-op：Libra 的 merge 从不渲染进度条（带集成测试 `test_merge_no_progress_is_accepted_noop`）。 |
 | ✅ 已实现 | `--no-verify-signatures` | 接受为 no-op：Libra 的 merge 从不验证提交签名（带集成测试 `test_merge_no_verify_signatures_is_accepted_noop`）。Git 的反向 `--verify-signatures`（实际签名验证）仍未实现。 |
+| ✅ 已实现 | `--no-rerere-autoupdate` | 接受为 no-op：Libra 无 rerere，无可更新（带集成测试 `test_merge_no_rerere_autoupdate_is_accepted_noop`）。Git 的反向 `--rerere-autoupdate` 未公开。 |
 | 兼容差异项 | Octopus merge | 原始对照：不支持；相关参数/替代：不支持；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 自定义策略 | 原始对照：不支持；相关参数/替代：--strategy, -X；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 部分实现 | 验证签名 | `--no-verify-signatures`（接受式 no-op，Libra 从不验证提交签名）已公开；实际验证 `--verify-signatures` 仍不支持（Libra 无 PGP keyring）。 |

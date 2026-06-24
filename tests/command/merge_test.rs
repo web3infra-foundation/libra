@@ -1106,3 +1106,35 @@ fn test_merge_no_verify_signatures_is_accepted_noop() {
         "merge --no-verify-signatures created a merge commit"
     );
 }
+
+#[test]
+fn test_merge_no_rerere_autoupdate_is_accepted_noop() {
+    // `--no-rerere-autoupdate` skips updating the rerere index. Libra has no
+    // rerere, so it is an accepted no-op that produces a normal merge.
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "feature", "--no-rerere-autoupdate"], temp_path);
+    assert_cli_success(&output, "merge feature --no-rerere-autoupdate");
+    let log = run_libra_command(&["log", "--oneline", "-n", "1"], temp_path);
+    assert!(
+        String::from_utf8_lossy(&log.stdout)
+            .to_lowercase()
+            .contains("merge"),
+        "merge --no-rerere-autoupdate created a merge commit"
+    );
+}

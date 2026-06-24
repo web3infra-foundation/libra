@@ -5,7 +5,7 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [-n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -34,6 +34,7 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `-n`, `--no-stat` | Do not show a diffstat at the end of the merge. No-op accepted for Git parity: Libra's merge never prints a diffstat. (Git's default `--stat` diffstat is not implemented.) |
 | `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |
 | `--no-verify-signatures` | Do not verify the GPG signature of the merged commits. No-op accepted for Git parity: Libra's merge never verifies commit signatures. (Git's opposite `--verify-signatures` is not implemented.) |
+| `--no-rerere-autoupdate` | Do not update the rerere index after the merge. No-op accepted for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
 | `--json` | Emit a structured success envelope. |
@@ -135,6 +136,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | No diffstat | `-n` / `--no-stat` (no-op; never prints one) | `-n` / `--no-stat` | N/A |
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
 | No signature verification | `--no-verify-signatures` (no-op; never verifies) | `--no-verify-signatures` | N/A |
+| No rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere) | `--no-rerere-autoupdate` | N/A |
 | Custom strategy | Not supported | `--strategy`, `-X` | N/A |
 | Verify signatures | Not supported | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
