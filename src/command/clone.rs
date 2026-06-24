@@ -882,6 +882,17 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout reported a pathspec-file read failure: {detail}"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        // `clone` never restores conflict stages (it checks out a freshly fetched
+        // tree with no unmerged index), so these are unreachable; surface rather
+        // than panic.
+        RestoreError::PathUnmerged(path) => CliError::fatal(format!(
+            "internal error: clone checkout reported an unmerged path '{path}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+        RestoreError::MissingStageVersion { path, stage } => CliError::fatal(format!(
+            "internal error: clone checkout reported a missing conflict stage {stage} for '{path}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 
@@ -1422,6 +1433,9 @@ async fn clone_cloud_publish_into_destination(
     }
     command::restore::execute_checked_typed(RestoreArgs {
         no_overlay: false,
+        ours: false,
+        theirs: false,
+        ignore_unmerged: false,
         worktree: true,
         staged: true,
         source: None,
@@ -3013,6 +3027,9 @@ pub(crate) async fn setup_repository(
         if checkout_worktree {
             command::restore::execute_checked_typed(RestoreArgs {
                 no_overlay: false,
+                ours: false,
+                theirs: false,
+                ignore_unmerged: false,
                 worktree: true,
                 staged: true,
                 source: None,

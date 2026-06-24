@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra restore` 的目标是从索引、工作区或指定来源恢复文件内容。实现需要支持 staged/worktree、`--source <tree-ish>` 来源解析和 pathspec 处理，同时把冲突阶段 `--ours/--theirs/-2/-3`、ignore-unmerged、`--overlay`（正向 overlay 模式）、patch、progress、目标 revision 等能力列为差异（`--no-overlay` 已作为接受式 no-op 公开）。
+`libra restore` 的目标是从索引、工作区或指定来源恢复文件内容。实现需要支持 staged/worktree、`--source <tree-ish>` 来源解析、pathspec 处理与冲突阶段 `--ours/--theirs/-2/-3` + `--ignore-unmerged`（仅写工作树，索引保持未合并；未合并路径的普通 restore 报错 `LBR-CONFLICT-001`/128），同时把 `--merge`/`--conflict`（重渲染冲突标记）、`--overlay`（正向 overlay 模式）、patch、progress 等能力列为差异（`--no-overlay`/`--no-progress` 已作为接受式 no-op 公开）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--source` / `--staged` / `--worktree`、路径 restore、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条）与 `--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，已是 Git 默认）已支持；`--overlay`（正向 overlay 模式）、冲突解析、patch 变体与 `--progress` 进度条尚未公开。
+- 兼容级别：`partial`。`--source` / `--staged` / `--worktree`、路径 restore、冲突阶段 `--ours`/`-2` 与 `--theirs`/`-3`（写工作树、索引保持未合并）+ `--ignore-unmerged`（跳过未合并路径）、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条）与 `--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，已是 Git 默认）已支持；未合并路径的普通 restore 被拒绝（`LBR-CONFLICT-001`/128）；`--overlay`（正向 overlay 模式）、`--merge`/`--conflict=<style>`（重渲染冲突标记）、patch 变体与 `--progress` 进度条尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `31378911`（`feat(restore): conflict-stage restore --ours/--theirs/-2/-3, --ignore-unmerged, unmerged guard`）：功能演进：曾引入 conflict-stage restore --ours/--theirs/-2/-3、--ignore-unmerged 和 unmerged guard；但这些参数已在后续提交中回退，当前 `RestoreArgs` 仅保留 `<pathspec>`、`-s/--source`、`-W/--worktree`、`-S/--staged`，相关冲突阶段能力仍为差异项。
+- 2026-06-06 `31378911`（`feat(restore): conflict-stage restore --ours/--theirs/-2/-3, --ignore-unmerged, unmerged guard`）：首次引入 conflict-stage restore；该提交在一次 reconcile 中被回退（参数从 `RestoreArgs` 丢失）。2026-06-25 由原提交内容恢复并适配当时已新增的 `--no-overlay`/`--no-progress`/`--pathspec-from-file` 字段：`--ours`/`-2`（冲突 stage 2）、`--theirs`/`-3`（冲突 stage 3）写工作树、索引保持未合并；`--ignore-unmerged` 跳过未合并路径；普通 restore 命中未合并路径报 `RestoreError::PathUnmerged`（`LBR-CONFLICT-001`/128）；缺失阶段报 `RestoreError::MissingStageVersion`。四个互斥关系经 clap `conflicts_with_all` 表达（→ `LBR-CLI-002`/129）。
 - 2026-06-09 `17d26c76`（`fix(pull): avoid fast-forward hang from whole-worktree restore`）：实现修正：avoid fast-forward hang from whole-worktree restore；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -44,8 +44,9 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/restore.md`。
-- Synopsis：`libra restore [--source <tree-ish>] [--staged] [--worktree] [--pathspec-from-file <FILE> [--pathspec-file-nul]] [<pathspec>...]`。
-- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条；字段 `no_progress` 解析后不被读取）、`--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，故已是默认；字段 `no_overlay` 解析后不被读取。Git 的反向 `--overlay` 未实现）。
+- Synopsis：`libra restore [--source <tree-ish>] [--staged] [--worktree] [(--ours | --theirs)] [--ignore-unmerged] [--pathspec-from-file <FILE> [--pathspec-file-nul]] [<pathspec>...]`。
+- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`-2, --ours`（冲突 stage 2 写工作树）、`-3, --theirs`（冲突 stage 3 写工作树）、`--ignore-unmerged`（跳过未合并路径）、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条；字段 `no_progress` 解析后不被读取）、`--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，故已是默认；字段 `no_overlay` 解析后不被读取。Git 的反向 `--overlay` 未实现）。
+- 冲突阶段 restore（`--ours`/`-2`、`--theirs`/`-3`）：读取索引未合并条目的 stage 2/3 blob 写入工作树，索引刻意保持未合并（`libra status` 仍显示冲突直到 `libra add` 暂存解决）。与 `--theirs`/`--source`/`--staged`/`--ignore-unmerged` 互斥（clap `conflicts_with_all` → `LBR-CLI-002`/129）。缺失阶段（如 modify/delete 冲突无 their 版本）报 `LBR-CONFLICT-001`/128。普通 restore 命中未合并路径默认报 `path '<file>' is unmerged`（`LBR-CONFLICT-001`/128），`--ignore-unmerged` 改为跳过这些路径、恢复其余。
 - `--pathspec-from-file <FILE>`：从文件读取 pathspec（每行一个，`-` 读 stdin），与位置 `<pathspec>` 二选一（clap `required_unless_present`，省略位置参数时由该选项满足）；`--pathspec-file-nul` 改用 NUL 分隔（要求同时给出 `--pathspec-from-file`）。空条目被忽略，换行模式下去除行尾 `\r`。在 `run_restore` 顶部解析后填充 `args.pathspec`，对内部 `execute_checked*` 调用方无影响（它们传显式 pathspec）。
 
 
@@ -54,7 +55,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 部分实现 | overlay 模式 | `--no-overlay` 作为接受式 no-op 已公开（Libra 的 restore 从不处于 overlay 模式，已是 Git 默认）；`--overlay`（正向 overlay 模式）仍未实现。 |
-| 兼容差异项 | 冲突解析 | 原始对照：不支持；相关参数/替代：--ours / --theirs / --merge；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 部分实现 | 冲突解析 | `--ours`/`-2` 与 `--theirs`/`-3` 已公开（写工作树、索引保持未合并）+ `--ignore-unmerged`（跳过未合并）；普通 restore 命中未合并路径报 `LBR-CONFLICT-001`/128。`--merge` / `--conflict=<style>`（重渲染冲突标记）仍未实现。 |
 | 兼容差异项 | patch 模式 | 原始对照：不支持；相关参数/替代：-p / --patch；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 部分实现 | 进度 | `--no-progress` 作为接受式 no-op 已公开（Libra 的 restore 从不渲染进度条）；`--progress` 进度条本身仍未实现。 |
 | 兼容差异项 | 目标 revision | 原始对照：不支持；相关参数/替代：不适用；当前说明：--to <revision>。 后续实现时需要补对应回归测试并同步兼容矩阵。 |

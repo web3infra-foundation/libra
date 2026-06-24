@@ -1169,6 +1169,9 @@ async fn restore_to_commit(
 ) -> Result<(), SwitchError> {
     let restore_args = RestoreArgs {
         no_overlay: false,
+        ours: false,
+        theirs: false,
+        ignore_unmerged: false,
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),

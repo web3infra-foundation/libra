@@ -533,6 +533,9 @@ async fn add_fuse_worktree(
     if Head::current_commit().await.is_some()
         && let Err(err) = restore::execute_checked(RestoreArgs {
             no_overlay: false,
+            ours: false,
+            theirs: false,
+            ignore_unmerged: false,
             pathspec: vec![target.to_string_lossy().to_string()],
             source: Some(checkout_branch.clone()),
             worktree: true,

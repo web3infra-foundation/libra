@@ -972,6 +972,9 @@ async fn apply_fast_forward_merge(
     restore::execute_safe(
         RestoreArgs {
             no_overlay: false,
+            ours: false,
+            theirs: false,
+            ignore_unmerged: false,
             worktree: true,
             staged: true,
             source: None, // `restore` without source defaults to HEAD, which is now correct.

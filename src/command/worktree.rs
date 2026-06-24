@@ -797,6 +797,9 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         // of carrying staged-but-uncommitted index content.
         if let Err(e) = restore::execute_checked(RestoreArgs {
             no_overlay: false,
+            ours: false,
+            theirs: false,
+            ignore_unmerged: false,
             pathspec: vec![util::working_dir_string()],
             source: Some("HEAD".to_string()),
             worktree: true,

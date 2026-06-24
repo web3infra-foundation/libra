@@ -251,6 +251,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
     let _ = restore::execute_safe(
         RestoreArgs {
             no_overlay: false,
+            ours: false,
+            theirs: false,
+            ignore_unmerged: false,
             worktree: true,
             staged: true,
             source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
