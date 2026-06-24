@@ -393,3 +393,15 @@ fn restore_no_progress_flag_is_accepted_noop() {
     let out = run_libra_command(&["restore", "--no-progress", "r.txt"], p);
     assert_cli_success(&out, "restore --no-progress r.txt");
 }
+
+#[test]
+fn restore_no_overlay_flag_is_accepted_noop() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("r.txt"), "modified\n").unwrap();
+    // `--no-overlay` is accepted and a no-op: Libra's restore is never in
+    // overlay mode (it already matches `--no-overlay`, the Git default), so the
+    // restore proceeds normally.
+    let out = run_libra_command(&["restore", "--no-overlay", "r.txt"], p);
+    assert_cli_success(&out, "restore --no-overlay r.txt");
+}

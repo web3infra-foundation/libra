@@ -964,6 +964,7 @@ async fn apply_fast_forward_merge(
     // Only restore the working directory *after* the pointers have been updated.
     restore::execute_safe(
         RestoreArgs {
+            no_overlay: false,
             worktree: true,
             staged: true,
             source: None, // `restore` without source defaults to HEAD, which is now correct.

@@ -38,6 +38,7 @@ libra commit -m "second" --no-verify
 libra diff --old HEAD~1 --new HEAD --numstat
 printf 'source probe\n' > tracked.txt
 libra restore --source HEAD~1 tracked.txt
+libra --json restore --source HEAD --no-overlay tracked.txt
 libra reset --hard HEAD
 libra reset --soft HEAD~1
 libra reset --mixed HEAD
@@ -58,7 +59,6 @@ libra fsck --connectivity-only
 ! libra --json reset --keep HEAD
 ! libra --json reset --merge HEAD
 ! libra --json restore --source HEAD --overlay tracked.txt
-! libra --json restore --source HEAD --no-overlay tracked.txt
 ! libra diff --algorithm myers tracked.txt
 ! libra diff --old no-such-revision --new HEAD
 ! libra restore nonexistent.txt

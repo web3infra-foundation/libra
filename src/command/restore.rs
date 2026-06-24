@@ -175,6 +175,12 @@ pub struct RestoreArgs {
     /// suppress.
     #[clap(long = "no-progress")]
     pub no_progress: bool,
+    /// Do not restore in overlay mode (the default): paths missing from the
+    /// source are still removed from the target. Accepted for Git parity and is
+    /// a no-op: Libra's restore is never in overlay mode, so this already
+    /// matches the default. (Git's opposite `--overlay` is not implemented.)
+    #[clap(long = "no-overlay")]
+    pub no_overlay: bool,
 }
 
 pub async fn execute(args: RestoreArgs) {

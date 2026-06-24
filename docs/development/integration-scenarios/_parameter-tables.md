@@ -74,7 +74,8 @@
 | `restore --staged <path>` | `cli.restore-reset-diff` | index 恢复到 HEAD，工作区保持修改 |
 | `restore --worktree <path>` | `cli.restore-reset-diff` | 工作区文件恢复到 index 或 source 内容 |
 | `restore --source <rev>` | `cli.restore-reset-diff` | source revision 可恢复文件；不存在时失败且不改写文件 |
-| `restore --pathspec-from-file` / `--overlay` / `--no-overlay` | `cli.restore-reset-diff` | 当前未实现，runner 负向断言稳定错误 |
+| `restore --pathspec-from-file` / `--overlay` | `cli.restore-reset-diff` | 当前未实现，runner 负向断言稳定错误 |
+| `restore --no-overlay` | `cli.restore-reset-diff` | 接受式 no-op（Libra 的 restore 从不处于 overlay 模式，已是 Git 默认），runner 正向断言成功 |
 | `reset HEAD -- <path>` | `cli.restore-reset-diff` | 路径级 reset 只取消暂存 |
 | `reset --soft` | `cli.restore-reset-diff` | 只移动 HEAD，保留 index/工作区 |
 | `reset --mixed` | `cli.restore-reset-diff` | 移动 HEAD 并重置 index |

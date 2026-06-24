@@ -31,6 +31,7 @@ LFS-managed files are automatically downloaded from the LFS server when restorin
 | Staged | `-S` | `--staged` | Restore the index (unstage files). Defaults the source to HEAD if `--source` is not given. |
 | Worktree | `-W` | `--worktree` | Restore the working tree. This is the default when `--staged` is not given. |
 | No progress | | `--no-progress` | Do not show a progress meter. Accepted no-op for Git parity: Libra's restore never renders a progress meter. |
+| No overlay | | `--no-overlay` | Do not restore in overlay mode (paths missing from the source are still removed). Accepted no-op for Git parity: Libra's restore is never in overlay mode, matching the Git default. (Git's `--overlay` is not implemented.) |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress human-readable output. |
 
@@ -161,7 +162,7 @@ Unlike `git restore` which can operate on the entire worktree with `--worktree`,
 | Target worktree | `-W` / `--worktree` | `-W` / `--worktree` (default) | Default behavior |
 | Target index/staging | `-S` / `--staged` | `-S` / `--staged` | N/A (no staging area) |
 | Both targets | `-S -W` | `-S -W` | N/A |
-| Overlay mode | Not supported | `--overlay` / `--no-overlay` | N/A |
+| Overlay mode | `--no-overlay` (no-op; never in overlay mode); `--overlay` not supported | `--overlay` / `--no-overlay` | N/A |
 | Conflict resolution | Not supported | `--ours` / `--theirs` / `--merge` | `--restore-descendants` |
 | Patch mode | Not supported | `-p` / `--patch` | N/A |
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |

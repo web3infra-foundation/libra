@@ -497,6 +497,7 @@ async fn restore_checkout_paths(args: CheckoutArgs) -> Result<CheckoutOutput, Ch
     let previous_commit = current_commit_string().await?;
     let source = args.branch;
     let restore_args = RestoreArgs {
+        no_overlay: false,
         worktree: true,
         staged: source.is_some(),
         source,
@@ -749,6 +750,7 @@ async fn check_and_switch_branch(
 
 async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliResult<()> {
     let restore_args = RestoreArgs {
+        no_overlay: false,
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),

@@ -112,6 +112,9 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
         false,
     )?;
     assert_json_error_code(&overlay_restore, "LBR-CLI-002")?;
+    // `--no-overlay` is the Git default for restore, accepted as a no-op
+    // (Libra's restore is never in overlay mode), so it succeeds. The positive
+    // `--overlay` (above) remains rejected.
     let no_overlay_restore = ctx.command(
         &[
             "--json",
@@ -122,9 +125,9 @@ pub(crate) fn scenario_restore_reset_diff(ctx: &mut ScenarioCtx<'_>) -> Result<(
             "tracked.txt",
         ],
         repo.clone(),
-        false,
+        true,
     )?;
-    assert_json_error_code(&no_overlay_restore, "LBR-CLI-002")?;
+    assert_json_ok(&no_overlay_restore, "restore --source HEAD --no-overlay tracked.txt")?;
 
     fs::write(repo.join("tracked.txt"), "diff output probe\n")
         .context("dirty tracked for --output")?;

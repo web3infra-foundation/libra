@@ -252,6 +252,7 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
     // the CLI.
     use crate::command::restore::{RestoreArgs, execute_checked_typed};
     let restore_args = RestoreArgs {
+        no_overlay: false,
         pathspec: vec![".".to_string()],
         source: Some(parent_commit.clone()),
         worktree: true,

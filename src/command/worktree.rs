@@ -796,6 +796,7 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
         // Populate from HEAD so new worktrees reflect committed state instead
         // of carrying staged-but-uncommitted index content.
         if let Err(e) = restore::execute_checked(RestoreArgs {
+            no_overlay: false,
             pathspec: vec![util::working_dir_string()],
             source: Some("HEAD".to_string()),
             worktree: true,

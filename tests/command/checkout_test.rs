@@ -250,6 +250,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
     // try to restore using a SHA-1 length hash in a SHA-256 repo; should no-op
     let _ = restore::execute_safe(
         RestoreArgs {
+            no_overlay: false,
             worktree: true,
             staged: true,
             source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),

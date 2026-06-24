@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra restore` 的目标是从索引、工作区或指定来源恢复文件内容。实现需要支持 staged/worktree、`--source <tree-ish>` 来源解析和 pathspec 处理，同时把冲突阶段 `--ours/--theirs/-2/-3`、ignore-unmerged、overlay、patch、progress、目标 revision 等能力列为差异。
+`libra restore` 的目标是从索引、工作区或指定来源恢复文件内容。实现需要支持 staged/worktree、`--source <tree-ish>` 来源解析和 pathspec 处理，同时把冲突阶段 `--ours/--theirs/-2/-3`、ignore-unmerged、`--overlay`（正向 overlay 模式）、patch、progress、目标 revision 等能力列为差异（`--no-overlay` 已作为接受式 no-op 公开）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--source` / `--staged` / `--worktree`、路径 restore 与 `--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条）已支持；overlay、冲突解析、patch 变体与 `--progress` 进度条尚未公开。
+- 兼容级别：`partial`。`--source` / `--staged` / `--worktree`、路径 restore、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条）与 `--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，已是 Git 默认）已支持；`--overlay`（正向 overlay 模式）、冲突解析、patch 变体与 `--progress` 进度条尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,7 +45,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/restore.md`。
 - Synopsis：`libra restore [--source <tree-ish>] [--staged] [--worktree] [--pathspec-from-file <FILE> [--pathspec-file-nul]] [<pathspec>...]`。
-- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条；字段 `no_progress` 解析后不被读取）。
+- 公开参数/子命令包括：`<pathspec>...`、`-s, --source <SOURCE>`、`-W, --worktree`、`-S, --staged`、`--pathspec-from-file <FILE>`、`--pathspec-file-nul`、`--no-progress`（接受式 no-op：Libra 的 restore 从不渲染进度条；字段 `no_progress` 解析后不被读取）、`--no-overlay`（接受式 no-op：Libra 的 restore 从不处于 overlay 模式，故已是默认；字段 `no_overlay` 解析后不被读取。Git 的反向 `--overlay` 未实现）。
 - `--pathspec-from-file <FILE>`：从文件读取 pathspec（每行一个，`-` 读 stdin），与位置 `<pathspec>` 二选一（clap `required_unless_present`，省略位置参数时由该选项满足）；`--pathspec-file-nul` 改用 NUL 分隔（要求同时给出 `--pathspec-from-file`）。空条目被忽略，换行模式下去除行尾 `\r`。在 `run_restore` 顶部解析后填充 `args.pathspec`，对内部 `execute_checked*` 调用方无影响（它们传显式 pathspec）。
 
 
@@ -53,7 +53,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | overlay 模式 | 原始对照：不支持；相关参数/替代：--overlay / --no-overlay；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 部分实现 | overlay 模式 | `--no-overlay` 作为接受式 no-op 已公开（Libra 的 restore 从不处于 overlay 模式，已是 Git 默认）；`--overlay`（正向 overlay 模式）仍未实现。 |
 | 兼容差异项 | 冲突解析 | 原始对照：不支持；相关参数/替代：--ours / --theirs / --merge；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | patch 模式 | 原始对照：不支持；相关参数/替代：-p / --patch；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 部分实现 | 进度 | `--no-progress` 作为接受式 no-op 已公开（Libra 的 restore 从不渲染进度条）；`--progress` 进度条本身仍未实现。 |
