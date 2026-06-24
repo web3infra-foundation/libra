@@ -56,6 +56,7 @@ this command.
 | `--first-parent` | Follow only the first parent of merge commits when walking history. | Off |
 | `--match <pattern>` | Only consider tags whose name matches the glob (repeatable; OR semantics, wax globs ≤256 chars). | None |
 | `--exclude <pattern>` | Exclude tags whose name matches the glob (repeatable; takes precedence over `--match`). | None |
+| `--contains` | Inverse containment query (git name-rev): name the target by its nearest **descendant** tag, printing `<tag>`, `<tag>~<n>`, or `<tag>~<n>^<m>~<k>`. Implies lightweight tags; equal-weight ties resolve by tag name; fails when no tag descends from the target. | Off |
 
 ### Examples
 
@@ -96,6 +97,9 @@ libra describe --match 'v1.*'
 # Skip release-candidate tags
 libra describe --exclude '*rc*'
 
+# Name a commit by its nearest descendant tag (e.g. v1.0~2)
+libra describe --contains HEAD~2
+
 # JSON output for automation
 libra describe --json
 ```
@@ -110,6 +114,7 @@ libra describe --exact-match
 libra describe --long
 libra describe --dirty
 libra describe HEAD~1
+libra describe --contains HEAD~2
 libra describe --json
 libra describe --tags --abbrev 10
 ```
@@ -234,10 +239,13 @@ reachable tags Git would prefer, which Libra resolves deterministically).
 `--all` is supported: branches (`heads/`), remote-tracking branches
 (`remotes/`), and tags (`tags/`, including lightweight ones) are all folded
 into the candidate set for the same BFS, with tags taking precedence at a
-shared commit, then heads, then remotes. `--contains` remains unimplemented:
-it depends on Git's reverse-walk containment algorithm, which Libra's
-predictable forward BFS does not provide. It can be added incrementally if
-real users or agents need it.
+shared commit, then heads, then remotes. `--contains` is supported: it runs
+Git's reverse-walk containment algorithm (name-rev) — a Dijkstra-style walk
+backward from every tag commit where first-parent steps are cheap and
+other-parent steps are expensive, so the closest descendant tag's straightest
+path wins — and prints `<tag>`, `<tag>~<n>`, or `<tag>~<n>^<m>~<k>`. It
+implies lightweight-tag inclusion (like `git name-rev --tags`) and fails when
+no tag descends from the commit.
 
 ### Why include both string and structured fields?
 
@@ -273,6 +281,7 @@ search, but this has not been a problem in practice.
 | Candidate count | `--candidates <N>` (N=0 ⇒ exact-match; N≥1 ⇒ nearest-tag BFS) | `--candidates=<N>` (default 10) | N/A |
 | First-parent only | `--first-parent` | `--first-parent` | N/A |
 | Consider all refs | `--all` (heads/remotes/tags, prefixed) | `--all` | N/A |
+| Find tags containing a commit | `--contains` (name-rev, prints `<tag>~<n>^<m>`) | `--contains` | N/A |
 | Dirty suffix | `--dirty[=<mark>]` | `--dirty[=<mark>]` | N/A |
 | JSON output | `--json` with typed fields | No | No |
 | Algorithm | BFS (shortest path) | Heuristic multi-candidate | N/A |
@@ -284,6 +293,7 @@ search, but this has not been a problem in practice.
 | Invalid revision | `LBR-CLI-003` | 129 |
 | `HEAD` has no commit | `LBR-REPO-003` | 128 |
 | No tags can describe the target and `--always` is absent | `LBR-REPO-003` | 128 |
-| `--exact-match` target has no exact tag | `LBR-REPO-003` | 128 |
+| `--exact-match` target has no exact tag (incl. `--contains --exact-match` resolving only to a relative `~N` name) | `LBR-REPO-003` | 128 |
+| `--contains` target has no descendant tag | `LBR-REPO-003` | 128 |
 | `--long --abbrev=0` | `LBR-CLI-002` | 129 |
 | Failed to read refs or objects | `LBR-IO-001` / `LBR-REPO-002` | 128 |

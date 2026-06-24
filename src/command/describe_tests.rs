@@ -34,6 +34,13 @@ fn describe_error_display_pins_each_variant() {
         "no names found, cannot describe anything",
     );
     assert_eq!(
+        DescribeError::NoContainingTag {
+            commit_id: "deadbeef".to_string(),
+        }
+        .to_string(),
+        "cannot describe 'deadbeef': no tag contains it",
+    );
+    assert_eq!(
         DescribeError::NoExactMatch {
             commit_id: "deadbeef".to_string(),
         }

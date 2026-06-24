@@ -31,6 +31,8 @@ pub(super) enum DescribeError {
     LoadCommit { commit_id: String, detail: String },
     #[error("no names found, cannot describe anything")]
     NoNamesFound,
+    #[error("cannot describe '{commit_id}': no tag contains it")]
+    NoContainingTag { commit_id: String },
     #[error("no tag exactly matches '{commit_id}'")]
     NoExactMatch { commit_id: String },
     #[error("options '--long' and '--abbrev=0' cannot be used together")]

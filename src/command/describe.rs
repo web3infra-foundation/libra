@@ -1,5 +1,8 @@
 //! Implementation of `describe` command, which finds the most recent tag reachable from a commit.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+};
 
 use clap::Parser;
 use git_internal::{
@@ -43,6 +46,7 @@ EXAMPLES:
     libra describe HEAD~1           Describe a specific commit-ish (hash, ref, or HEAD~N)
     libra describe --candidates 0   Only succeed on an exact tag match (like --exact-match)
     libra describe --abbrev 12      Use 12 hex digits instead of the default 7 in the hash portion
+    libra describe --contains HEAD~2   Name a commit by its nearest descendant tag (e.g. v1.0~2)
     libra describe --json           Structured JSON output for agents";
 
 /// Maximum byte length accepted for a `--match`/`--exclude` glob pattern, guarding
@@ -101,6 +105,12 @@ pub struct DescribeArgs {
     /// Exclude tags whose name matches the glob (repeatable; takes precedence over --match).
     #[clap(long, value_name = "PATTERN")]
     pub exclude: Vec<String>,
+
+    /// Find the tag that *contains* the commit (the nearest descendant tag),
+    /// printing a `git name-rev`-style name (`<tag>`, `<tag>~<n>`, or
+    /// `<tag>~<n>^<m>~<k>`), like `git describe --contains`.
+    #[clap(long = "contains")]
+    pub contains: bool,
 }
 
 // Entry in tag lookup map
@@ -144,7 +154,9 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     // `--all` considers every ref (branches + remotes + tags), which implies
     // even lightweight tags are candidates.
     let include_all = args.all;
-    let include_lightweight = args.tags || include_all;
+    // `--contains` mirrors `git name-rev --tags`, which considers every tag in
+    // refs/tags (annotated and lightweight), so it implies lightweight inclusion.
+    let include_lightweight = args.tags || include_all || args.contains;
     // `--candidates 0` means "only exact matches", which is exactly the
     // `--exact-match` behavior (Git documents `--candidates 0` this way).
     let exact_match = args.exact_match || args.candidates == Some(0);
@@ -229,6 +241,22 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
         }
     }
 
+    // `--contains` is the inverse query (git name-rev): find the nearest tag
+    // that DESCENDS from the target and name the target relative to it. It uses
+    // its own walk over `tag_map` rather than the ancestor BFS below.
+    if args.contains {
+        return run_describe_contains(
+            input,
+            start_hash,
+            resolved_commit,
+            &tag_map,
+            first_parent,
+            exact_match,
+            dirty_mark,
+        )
+        .await;
+    }
+
     // 3. Search for  the closest tag using BFS (to find the shortest distance)
     let mut queue = VecDeque::new();
     let mut visited = HashSet::new();
@@ -303,6 +331,149 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
     }
 
     Err(DescribeError::NoNamesFound)
+}
+
+/// `git describe --contains` (name-rev): name the target relative to the nearest
+/// tag that descends from it. A Dijkstra-style walk runs backward from every tag
+/// commit; first-parent steps cost 1 and other-parent steps cost `MERGE_COST`,
+/// so the straightest path from the closest descendant tag wins. The resulting
+/// name is `<tag>` (the tag itself), `<tag>~<n>` (n first-parent steps), or a
+/// `<tag>~<n>^<m>~<k>` chain when the path crosses a merge's non-first parent.
+///
+/// When `exact_match` is set (`--exact-match` or `--candidates 0`), only a tag
+/// that points directly at the target — a bare `<tag>` name with no `~`/`^`
+/// suffix — is accepted; any relative name fails with `NoExactMatch`, matching
+/// the exact-match contract of the forward describe path.
+async fn run_describe_contains(
+    input: String,
+    start_hash: ObjectHash,
+    resolved_commit: String,
+    tag_map: &HashMap<ObjectHash, TagInfo>,
+    first_parent: bool,
+    exact_match_only: bool,
+    dirty_mark: Option<String>,
+) -> Result<DescribeOutput, DescribeError> {
+    // Under `--exact-match`/`--candidates 0` the only acceptable answer is a tag
+    // that points directly at the target — a relative `<tag>~N`/`^M` name is not
+    // an exact hit, and neither is "no descendant tag at all". Decide that up
+    // front (the Dijkstra walk is irrelevant here) so every non-direct outcome
+    // funnels to the same `NoExactMatch` the forward path returns.
+    if exact_match_only {
+        return match tag_map.get(&start_hash) {
+            Some(info) => {
+                let output = DescribeOutput {
+                    input,
+                    resolved_commit,
+                    result: info.name.clone(),
+                    tag: Some(info.name.clone()),
+                    distance: None,
+                    abbreviated_commit: None,
+                    exact_match: true,
+                    used_always: false,
+                    long_format: false,
+                    dirty: false,
+                    dirty_mark: None,
+                };
+                apply_dirty_mark(output, dirty_mark).await
+            }
+            None => Err(DescribeError::NoExactMatch {
+                commit_id: resolved_commit,
+            }),
+        };
+    }
+
+    // A non-first-parent step costs far more than a first-parent step, so a
+    // first-parent path is strongly preferred (matching git name-rev's metric).
+    const MERGE_COST: u64 = 65_535;
+
+    // Heap entries are (weight, seq); `nodes`/`states` hold the commit and its
+    // propagation state (base name + first-parent generation) for that seq.
+    let mut heap: BinaryHeap<Reverse<(u64, u64)>> = BinaryHeap::new();
+    let mut nodes: Vec<ObjectHash> = Vec::new();
+    let mut states: Vec<(String, u32)> = Vec::new();
+    // A commit is finalized the first time it is popped (lowest weight).
+    let mut finalized: HashSet<ObjectHash> = HashSet::new();
+
+    // Seed every tag commit as a name-rev source. Iterate in a deterministic
+    // (tag-name) order so equal-weight ties — two tags equidistant from the
+    // target — resolve to a stable, reproducible name rather than HashMap order.
+    let mut seeds: Vec<(&ObjectHash, &TagInfo)> = tag_map.iter().collect();
+    seeds.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    for (commit, info) in seeds {
+        let seq = nodes.len() as u64;
+        nodes.push(*commit);
+        states.push((info.name.clone(), 0));
+        heap.push(Reverse((0, seq)));
+    }
+
+    while let Some(Reverse((weight, seq))) = heap.pop() {
+        let commit = nodes[seq as usize];
+        if !finalized.insert(commit) {
+            continue; // already finalized with a weight <= this one
+        }
+        let (base, generation) = states[seq as usize].clone();
+        let display = if generation == 0 {
+            base.clone()
+        } else {
+            format!("{base}~{generation}")
+        };
+
+        if commit == start_hash {
+            // Tag names cannot contain '~' or '^', so the base tag is the prefix
+            // up to the first of those.
+            let tag = display
+                .split(['~', '^'])
+                .next()
+                .unwrap_or(&display)
+                .to_string();
+            // `exact_match_only` is handled up front, so here the name may be
+            // relative; `exact_match` is true only when the target carries the
+            // tag directly (display has no `~`/`^` suffix).
+            let exact_match = display == tag;
+            let output = DescribeOutput {
+                input,
+                resolved_commit,
+                result: display,
+                tag: Some(tag),
+                distance: None,
+                abbreviated_commit: None,
+                exact_match,
+                used_always: false,
+                long_format: false,
+                dirty: false,
+                dirty_mark: None,
+            };
+            return apply_dirty_mark(output, dirty_mark).await;
+        }
+
+        let commit_obj =
+            load_object::<Commit>(&commit).map_err(|error| DescribeError::LoadCommit {
+                commit_id: commit.to_string(),
+                detail: error.to_string(),
+            })?;
+        for (i, parent) in commit_obj.parent_commit_ids.iter().enumerate() {
+            if first_parent && i > 0 {
+                break;
+            }
+            if finalized.contains(parent) {
+                continue;
+            }
+            let (new_weight, new_base, new_gen) = if i == 0 {
+                (weight + 1, base.clone(), generation + 1)
+            } else {
+                (weight + MERGE_COST, format!("{display}^{}", i + 1), 0)
+            };
+            let next = nodes.len() as u64;
+            nodes.push(*parent);
+            states.push((new_base, new_gen));
+            heap.push(Reverse((new_weight, next)));
+        }
+    }
+
+    // No tag descends from the target.
+    Err(DescribeError::NoContainingTag {
+        commit_id: resolved_commit,
+    })
 }
 
 async fn apply_dirty_mark(
@@ -418,6 +589,13 @@ fn describe_cli_error(error: DescribeError) -> CliError {
             .with_hint(
                 "create a tag, pass '--tags' to include lightweight tags, or use '--always'.",
             ),
+        DescribeError::NoContainingTag { commit_id } => {
+            CliError::fatal(format!("cannot describe '{commit_id}': no tag contains it"))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint(
+                    "`--contains` names a commit by a tag that descends from it; create or fetch a tag on a descendant commit.",
+                )
+        }
         DescribeError::NoExactMatch { commit_id } => {
             CliError::fatal(format!("no tag exactly matches '{commit_id}'"))
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
