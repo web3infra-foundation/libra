@@ -1927,3 +1927,18 @@ fn test_push_help_lists_examples_banner() {
         );
     }
 }
+
+#[test]
+fn push_no_verify_flag_is_accepted() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-verify` (bypass the pre-push hook) parses and reaches the runtime.
+    // Libra runs no client-side pre-push hook, so it is an accepted no-op; with
+    // no configured remote it fails at the push-destination check, NOT at clap.
+    let output = run_libra_command(&["push", "--no-verify"], repo.path());
+    assert!(!output.status.success(), "push without a remote fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--no-verify is accepted by the parser: {stderr}"
+    );
+}

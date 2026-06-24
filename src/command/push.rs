@@ -166,6 +166,12 @@ pub struct PushArgs {
     /// Mirror all local refs/heads/* and refs/tags/* to the remote, deleting remote-only refs
     #[clap(long, requires("repository"))]
     pub mirror: bool,
+
+    /// Bypass the `pre-push` hook. Accepted for Git parity and is a no-op:
+    /// Libra's push does not run a client-side `pre-push` hook, so there is
+    /// nothing to bypass.
+    #[clap(long = "no-verify")]
+    pub no_verify: bool,
 }
 
 impl PushArgs {
@@ -190,6 +196,7 @@ impl PushArgs {
             dry_run: false,
             tags: false,
             mirror: false,
+            no_verify: false,
         }
     }
 }
@@ -3279,6 +3286,7 @@ mod test {
             dry_run: false,
             tags: false,
             mirror: false,
+            no_verify: false,
         };
         assert!(matches!(
             validate_push_args(&args),
