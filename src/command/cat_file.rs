@@ -8,7 +8,8 @@
 //! - `-t <object>`: print the object type
 //! - `-s <object>`: print the object size (in bytes)
 //! - `-p <object>`: pretty-print the object content
-//! - `-e <object>`: check if the object exists (exit status only)
+//! - `-e <object>`: check if the object exists (exit status only; with
+//!   `--json`/`--machine`, emits `{ exists: bool }` and keeps the exit codes)
 //!
 //! ## AI object modes
 //! - `--ai <id>`:            pretty-print an AI object by object ID
@@ -62,6 +63,7 @@ Notes:
 const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -p HEAD                                  Pretty-print the commit object at HEAD
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
+    libra cat-file -e HEAD --json                           Check existence as JSON ({ exists: bool }; exit 0/1 preserved)
     libra cat-file --batch-command                          Read info/contents commands from stdin (one per line)
     libra cat-file --batch-check --batch-all-objects         List every object in the store (loose + packed), id-ordered
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
@@ -463,9 +465,29 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
         .ok_or_else(|| CliError::command_usage("<object> is required for Git object modes"))?;
 
     if args.check_exist {
-        return Err(CliError::command_usage(
-            "`cat-file -e` does not yet support --json or --machine output",
-        ));
+        // `-e --json`/`--machine`: emit `{ exists: bool }` while preserving the
+        // exit-code contract — a present object exits 0, a well-formed but
+        // absent object exits 1, like plain `cat-file -e`. A malformed/
+        // unresolvable name stays a hard error (LBR-CLI-003 / exit 129, via
+        // `resolve_object_safe`, the same code as the non-JSON `-e` path; this
+        // is Libra's standard invalid-target code, intentionally different from
+        // Git's 128) and emits no `exists` envelope.
+        let storage = ClientStorage::init(path::objects());
+        let hash = resolve_object_safe(object_ref, &storage).await?;
+        let exists = storage.exist(&hash);
+        emit_json_data(
+            "cat-file",
+            &serde_json::json!({
+                "mode": "exists",
+                "object": object_ref,
+                "exists": exists,
+            }),
+            output,
+        )?;
+        if !exists {
+            return Err(CliError::silent_exit(1));
+        }
+        return Ok(());
     }
 
     let storage = ClientStorage::init(path::objects());

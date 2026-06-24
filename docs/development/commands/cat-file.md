@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra cat-file` 的目标是读取对象仓库中的对象类型、大小和内容，并提供批处理查询能力。实现需要兼顾 Git plumbing 的退出码语义、批量 stdin 解析、对象遍历和符号链接解析，同时声明 `-e` 与机器输出等组合限制。
+`libra cat-file` 的目标是读取对象仓库中的对象类型、大小和内容，并提供批处理查询能力。实现需要兼顾 Git plumbing 的退出码语义、批量 stdin 解析、对象遍历和符号链接解析；`-e --json`/`--machine` 在保留退出码契约的前提下输出 `{ exists: bool }` 信封。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ `--batch-all-objects`（配合 --batch/--batch-check，遍历 loose+packed，按 id 排序）/ batch 格式串（`=<format>`）已支持；`-e` 的 JSON/machine 输出尚未公开（`flush`/`--buffer`、`--follow-symlinks` 未公开）。
+- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ `--batch-all-objects`（配合 --batch/--batch-check，遍历 loose+packed，按 id 排序）/ batch 格式串（`=<format>`）已支持；`-e --json`/`--machine` 输出 `{ exists: bool }` 信封（保留退出码：存在 0 / 缺失 1 / 非法名 129）已支持（`flush`/`--buffer`、`--follow-symlinks` 未公开）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -55,8 +55,8 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `-e` 已支持，但不支持 JSON / machine 输出 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 功能缺口 | cat-file -e does not support --json / --machine (it is purely an exit-code check) | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| 兼容矩阵说明 | `-e` 已支持，且 `-e --json`/`--machine` 输出 `{ exists: bool }`（见下方已实现行） | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| ✅ 已实现 | `cat-file -e --json`/`--machine` 输出 `{ exists: bool }` 信封（`mode: "exists"`），同时保留 `-e` 的退出码语义：对象存在 exit 0、格式正确但缺失 exit 1（JSON 仍写到 stdout）、非法对象名 exit 129（`LBR-CLI-003`，`resolve_object_safe`，与非 JSON `-e` 路径一致，是 Libra 标准 invalid-target 码，与 Git 的 128 有意不同）。带集成测试 `test_cat_file_exist_check_json`。 | — |
 | ✅ 已实现（部分） | Batch mode `--batch-check` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>`，无法解析时输出 `<input> missing`；支持可选 `=<format>` 原子展开（`%(objectname)`/`%(objecttype)`/`%(objectsize)`）。带 stdin 集成测试。 |
 | ✅ 已实现（部分） | Batch mode `--batch` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>` + raw 对象内容 + 换行（二进制安全，单次缓冲写出），无法解析时输出 `<input> missing`；与 `--batch-check` 共享 `build_batch_object` 及同一 `=<format>` 原子展开。带 stdin 集成测试。 |
 | ✅ 已实现（部分） | Batch mode `--batch-command` | 从 stdin 逐行读命令：`info <object>`（header，同 --batch-check）/ `contents <object>`（header + 内容，同 --batch），复用 `build_batch_object`（含同一 `=<format>`）；`flush` 需 `--buffer`（未公开）→报错，未知命令报错。带 stdin 集成测试。 |

@@ -635,6 +635,75 @@ async fn test_cat_file_exist_check() {
     );
 }
 
+/// Scenario: `cat-file -e --json`/`--machine` emits a `{ exists: bool }`
+/// envelope for agents while preserving the status-only exit contract — a
+/// present object exits 0, a well-formed but absent object exits 1 (with the
+/// JSON still written to stdout).
+#[tokio::test]
+async fn test_cat_file_exist_check_json() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "f.txt", "data", "commit");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_libra"))
+            .current_dir(temp_path)
+            .env(
+                "LIBRA_CONFIG_GLOBAL_DB",
+                temp_path.join(".libra-test-global-config.db"),
+            )
+            .args(args)
+            .output()
+            .expect("Failed to execute cat-file")
+    };
+
+    // Present object → exists:true, exit 0.
+    let out = run(&["cat-file", "-e", "HEAD", "--json"]);
+    assert!(
+        out.status.success(),
+        "cat-file -e HEAD --json should exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"exists\"") && stdout.contains("true"),
+        "expected exists:true JSON: {stdout}"
+    );
+
+    // Well-formed but absent object → exists:false, exit 1, JSON still emitted.
+    let out = run(&[
+        "cat-file",
+        "-e",
+        "0000000000000000000000000000000000000000",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "absent object exits 1 even with --json"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"exists\"") && stdout.contains("false"),
+        "expected exists:false JSON: {stdout}"
+    );
+
+    // A malformed/unresolvable name is a hard error (LBR-CLI-003 / exit 129,
+    // the same as the non-JSON path) and emits no `exists` envelope.
+    let out = run(&["cat-file", "-e", "not a valid ref!!", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "malformed name should exit 129 (LBR-CLI-003)"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("\"exists\""),
+        "malformed name must not emit an exists envelope: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// Scenario: `-t -s` together must be rejected — clap's mutual-exclusion
 /// guards prevent ambiguous output. Confirms the CLI grammar.
 #[tokio::test]

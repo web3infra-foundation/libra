@@ -32,7 +32,7 @@ branch.
 | `-t` | | Print the object type (`commit`, `tree`, `blob`, `tag`). |
 | `-s` | | Print the object size in bytes. |
 | `-p` | | Pretty-print the object content. |
-| `-e` | | Check if the object exists (exit status only, no stdout). Does not support `--json`. |
+| `-e` | | Check if the object exists. Without `--json`, exit status only (0 = exists, 1 = absent), no stdout. With `--json`/`--machine`, emits `{ "exists": bool }` while keeping the same exit codes. |
 | `--batch-check[=<fmt>]` | | Read object names from stdin (one per line); print `<sha> <type> <size>` (or `<input> missing`). Optional format atoms `%(objectname)`/`%(objecttype)`/`%(objectsize)`. |
 | `--batch[=<fmt>]` | | Like `--batch-check` plus the raw object contents and a trailing newline. |
 | `--batch-command[=<fmt>]` | | Read commands from stdin: `info <object>` (header only) or `contents <object>` (header + contents). `flush` requires `--buffer`, which is not exposed. |
@@ -57,6 +57,9 @@ libra cat-file -p HEAD
 
 # Check existence (exit code 0 = exists)
 libra cat-file -e abc1234
+
+# Check existence as JSON for agents ({ "exists": bool }; exit code preserved)
+libra cat-file -e abc1234 --json
 
 # Structured JSON type query
 libra cat-file -t HEAD --json
@@ -95,7 +98,7 @@ libra cat-file --ai <session-id>
   - Tree: `<mode> <type> <hash>\t<name>` per entry
   - Blob: raw text content
   - Tag: tag header and message
-- `-e`: no output; exit code 0 if the object exists, non-zero otherwise
+- `-e`: no output; exit code 0 if the object exists, non-zero otherwise (with `--json`/`--machine`, also writes `{ "exists": bool }` to stdout)
 - `--ai <ID>`: prints a formatted summary (session summary for `ai_session` objects, full JSON for others)
 - `--ai-list <TYPE>`: one object ID per line
 - `--ai-list-types`: one type name per line
@@ -169,7 +172,7 @@ libra cat-file --ai <session-id>
 
 Notes:
 
-- `cat-file -e` does not support `--json` / `--machine` (it is purely an exit-code check)
+- `cat-file -e --json` / `--machine` emits `{ "exists": bool }` to stdout while preserving the exit-code contract (present → 0, well-formed-but-absent → 1, malformed name → 129)
 - Blob/tag pretty-print JSON requires UTF-8 content; non-text payloads fail explicitly instead of returning lossy data
 
 ## Design Rationale
@@ -197,14 +200,18 @@ the recommended interface — it returns typed fields in one call. Streaming
 `--buffer`/`flush` and `--follow-symlinks` are not exposed; without `--buffer`,
 the `flush` command is rejected exactly as Git does.
 
-### Why does `-e` stay human-only?
+### How does `-e` behave with `--json`?
 
-The `-e` (existence check) mode communicates its result via exit code: 0 means
-the object exists, non-zero means it does not. This is the Unix convention for
-boolean predicates. Wrapping it in JSON would add no information (`{"exists":
-true}`) while breaking the expectation that `-e` is a silent probe. Scripts
-and agents that need a structured existence check can use `-t` with `--json`
-instead -- if the object does not exist, the JSON response will contain an error.
+By default the `-e` (existence check) mode is a silent probe that communicates
+its result via exit code only: 0 means the object exists, non-zero means it does
+not. This is the Unix convention for boolean predicates, so scripts can write
+`if libra cat-file -e $hash; then ...`.
+
+For agents that prefer structured output, `-e --json` (or `--machine`) emits a
+`{ "exists": bool }` envelope on stdout **without** changing the exit-code
+contract: a present object still exits 0, a well-formed but absent object still
+exits 1 (with the JSON written first), and a malformed object name is still a
+hard error (`LBR-CLI-003`, exit 129) that emits no envelope.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
