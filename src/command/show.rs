@@ -44,6 +44,7 @@ EXAMPLES:
     libra show HEAD:src/main.rs             Show a file from a specific revision
     libra show --stat HEAD~1                Show only diff statistics
     libra show --name-status HEAD           Show changed files with A/M/D status
+    libra show --summary HEAD               Show created/deleted file mode summary
     libra show --format='%h %s' HEAD        Custom header format (alias for --pretty)
     libra show --abbrev-commit HEAD         Abbreviate the commit hash in the header
     libra --json show HEAD                  Structured JSON output for agents";
@@ -97,6 +98,12 @@ pub struct ShowArgs {
     /// Show diff statistics.
     #[clap(long)]
     pub stat: bool,
+
+    /// Show a condensed summary of created and deleted files (their mode and
+    /// path), like `git show --summary`. Mirrors `libra diff --summary`:
+    /// rename/copy and mode-change detection are not implemented.
+    #[clap(long)]
+    pub summary: bool,
 
     /// Do not expand tabs in the commit message. Accepted for Git parity and is
     /// a no-op: Libra's show never expands tabs (it prints them verbatim).
@@ -398,6 +405,16 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
             if !diffstat.is_empty() {
                 output.push_str(&diffstat);
             }
+        } else if args.summary {
+            // Show only the created/deleted-file summary, parsed out of the
+            // commit's unified diff (the same text the patch view renders).
+            let diff_output = generate_diff(&commit, paths).await?;
+            let summary = format_show_summary(&diff_output);
+            if !summary.is_empty() {
+                output.push('\n');
+                output.push_str(&summary);
+                output.push('\n');
+            }
         } else if args.name_status {
             // Show changed file names prefixed by their status letter (A/M/D),
             // tab-separated, matching `git show --name-status`.
@@ -432,6 +449,63 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
         }
     }
     Ok(output)
+}
+
+/// Build the `--summary` view from a commit's full unified diff text: one
+/// ` create mode <mode> <path>` line per created file and ` delete mode <mode>
+/// <path>` per deleted file. Mirrors `libra diff --summary` (created/deleted
+/// files only — rename/copy and mode-change detection are not implemented).
+/// Returns an empty string when nothing was created or deleted.
+fn format_show_summary(diff_text: &str) -> String {
+    let mut lines = Vec::new();
+    // Path of the file in the current `diff --git` block, recovered from the
+    // header (see `reconstruct_identical_diff_path`) and reset at every header.
+    // The `new file mode`/`deleted file mode` line — which is present for binary
+    // files too (their hunks carry no `---`/`+++` path lines) — then emits using
+    // that path, so binary creates/deletes are handled and a stale path can
+    // never leak into the next file's block.
+    let mut current_path: Option<String> = None;
+    for line in diff_text.lines() {
+        if let Some(body) = line.strip_prefix("diff --git a/") {
+            current_path = reconstruct_identical_diff_path(body);
+        } else if line.starts_with("diff --git ") {
+            // A header not in the expected `a/<P> b/<P>` shape (should not occur
+            // for created/deleted files): drop any path so we never misattribute.
+            current_path = None;
+        } else if let Some(mode) = line.strip_prefix("new file mode ")
+            && let Some(path) = &current_path
+        {
+            lines.push(format!(" create mode {} {}", mode.trim(), path));
+        } else if let Some(mode) = line.strip_prefix("deleted file mode ")
+            && let Some(path) = &current_path
+        {
+            lines.push(format!(" delete mode {} {}", mode.trim(), path));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Recover the file path from the body of a `diff --git a/<P> b/<P>` header (the
+/// text after the leading `a/`). For created/deleted files the a-side and
+/// b-side are the identical `<P>`, so the body is exactly `<P> b/<P>`; we split
+/// at the unique midpoint and verify the reconstruction, which recovers paths
+/// containing " b/" or spaces. Returns `None` for rename headers (a-side !=
+/// b-side), since those are neither creates nor deletes.
+fn reconstruct_identical_diff_path(body: &str) -> Option<String> {
+    // `body` == "<P> b/<P>" ⇒ len == 2*len(P) + len(" b/").
+    const SEP: &str = " b/";
+    if body.len() <= SEP.len() || !(body.len() - SEP.len()).is_multiple_of(2) {
+        return None;
+    }
+    let plen = (body.len() - SEP.len()) / 2;
+    // `plen` is a char boundary for any genuine `<P> b/<P>` body (it lands at the
+    // end of the first `<P>`); `get` returns None otherwise, declining safely.
+    let candidate = body.get(..plen)?;
+    if body == format!("{candidate} b/{candidate}") {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
 }
 
 async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
@@ -1076,9 +1150,72 @@ mod tests {
         let args = ShowArgs::try_parse_from(["show", "--stat"]).unwrap();
         assert!(args.stat);
 
+        // `--summary` flag.
+        let args = ShowArgs::try_parse_from(["show", "--summary"]).unwrap();
+        assert!(args.summary);
+
         // `<revision>:<path>` syntax.
         let args = ShowArgs::try_parse_from(["show", "HEAD:test.txt"]).unwrap();
         assert_eq!(args.object, Some("HEAD:test.txt".to_string()));
+    }
+
+    #[test]
+    fn format_show_summary_reports_only_created_and_deleted_files() {
+        // A text create (whose path contains " b/", proving the path comes from
+        // the reconstructed header, not a naive split), a BINARY create with no
+        // `---`/`+++` lines (proving the mode line alone drives emission and a
+        // stale path cannot leak into the next block), a delete, and a modified
+        // file (omitted). Each emitted line carries the file's mode.
+        let diff = "\
+diff --git a/has b/space.txt b/has b/space.txt
+new file mode 100644
+index 0000000..89b24ec
+--- /dev/null
++++ b/has b/space.txt
+@@ -0,0 +1 @@
++hello
+diff --git a/logo.png b/logo.png
+new file mode 100755
+index 0000000..0a1b2c3
+Binary files /dev/null and b/logo.png differ
+diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+index 89b24ec..0000000
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+diff --git a/edited.txt b/edited.txt
+index 1111111..2222222 100644
+--- a/edited.txt
++++ b/edited.txt
+@@ -1 +1 @@
+-old
++new
+";
+        assert_eq!(
+            super::format_show_summary(diff),
+            " create mode 100644 has b/space.txt\n create mode 100755 logo.png\n delete mode 100644 gone.txt"
+        );
+        // No created or deleted files → empty summary.
+        assert_eq!(
+            super::format_show_summary("diff --git a/x b/x\nindex 1..2 100644\n"),
+            ""
+        );
+        // Header path reconstruction: identical a/b sides (incl. " b/" paths)
+        // recover the path; a rename (a != b) is declined.
+        assert_eq!(
+            super::reconstruct_identical_diff_path("dir/f.txt b/dir/f.txt"),
+            Some("dir/f.txt".to_string())
+        );
+        assert_eq!(
+            super::reconstruct_identical_diff_path("has b/x.txt b/has b/x.txt"),
+            Some("has b/x.txt".to_string())
+        );
+        assert_eq!(
+            super::reconstruct_identical_diff_path("old.txt b/new.txt"),
+            None
+        );
     }
 
     #[test]

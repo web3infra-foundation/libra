@@ -35,6 +35,7 @@ list their entries and blobs print their text content (or a binary summary).
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
+| `--summary` | | Show a condensed summary of created and deleted files (their mode and path), like `git show --summary`. Created/deleted files only — no rename/copy detection. |
 | `--no-expand-tabs` | | Do not expand tabs in the commit message. Accepted no-op: Libra's show prints tabs verbatim. |
 | `--no-notes` | | Do not show commit notes. Accepted no-op: Libra's show never displays notes inline. |
 | `--no-mailmap` | | Do not apply a `.mailmap`. Accepted no-op: Libra's show shows the raw recorded identities. |
@@ -73,6 +74,7 @@ libra show HEAD:Cargo.toml          # print a file at HEAD
 libra show --name-only HEAD         # list changed files
 libra show --name-status HEAD       # list changed files with A/M/D status
 libra show --stat HEAD              # diff statistics
+libra show --summary HEAD           # created/deleted file mode summary
 libra --json show HEAD              # structured JSON output
 ```
 

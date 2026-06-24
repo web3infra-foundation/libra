@@ -151,6 +151,26 @@ fn test_show_cli_badref_returns_cli_exit_code() {
 }
 
 #[test]
+fn test_show_summary_reports_created_files() {
+    // The initial commit creates `tracked.txt`, so `show --summary` on the root
+    // commit (diffed against the empty tree) must list it as a create-mode entry
+    // and must not emit the full patch body.
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["show", "--summary", "HEAD"], repo.path());
+    assert_cli_success(&output, "show --summary HEAD");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("create mode") && stdout.contains("tracked.txt"),
+        "show --summary should list the created file: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\n+") && !stdout.contains("@@ "),
+        "show --summary should not print the patch body: {stdout}"
+    );
+}
+
+#[test]
 fn test_show_pretty_custom_format() {
     let repo = create_committed_repo_via_cli();
 
@@ -259,6 +279,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
         name_only: false,
         name_status: false,
         stat: false,
+        summary: false,
         pathspec: vec![],
     };
 
@@ -315,6 +336,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         name_only: false,
         name_status: false,
         stat: false,
+        summary: false,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -372,6 +394,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         name_only: false,
         name_status: false,
         stat: true,
+        summary: false,
         pathspec: vec![],
     };
     let output = OutputConfig {
@@ -838,6 +861,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         name_only: false,
         name_status: false,
         stat: false,
+        summary: false,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
@@ -886,6 +910,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         name_only: false,
         name_status: false,
         stat: false,
+        summary: false,
         pathspec: vec![],
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
