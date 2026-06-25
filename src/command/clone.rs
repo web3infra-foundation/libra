@@ -893,6 +893,12 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout reported a missing conflict stage {stage} for '{path}'"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        // `clone` never passes `--merge`/`--conflict`, so this is unreachable;
+        // surface rather than panic.
+        RestoreError::UnsupportedConflictStyle(style) => CliError::fatal(format!(
+            "internal error: clone checkout reported an unsupported conflict style '{style}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 
@@ -1437,6 +1443,8 @@ async fn clone_cloud_publish_into_destination(
         ours: false,
         theirs: false,
         ignore_unmerged: false,
+        merge: false,
+        conflict: None,
         worktree: true,
         staged: true,
         source: None,
@@ -3032,6 +3040,8 @@ pub(crate) async fn setup_repository(
                 ours: false,
                 theirs: false,
                 ignore_unmerged: false,
+                merge: false,
+                conflict: None,
                 worktree: true,
                 staged: true,
                 source: None,

@@ -8,7 +8,7 @@ Restore working tree files or index entries from a source.
 
 ```
 libra restore [--source <tree-ish>] [--staged] [--worktree] <pathspec>...
-libra restore (--ours | --theirs) <pathspec>...
+libra restore (--ours | --theirs | --merge | --conflict <style>) <pathspec>...
 libra restore --ignore-unmerged [--source <tree-ish>] <pathspec>...
 ```
 
@@ -34,6 +34,8 @@ LFS-managed files are automatically downloaded from the LFS server when restorin
 | Worktree | `-W` | `--worktree` | Restore the working tree. This is the default when `--staged` is not given. |
 | Ours | `-2` | `--ours` | For an unmerged path, write conflict stage 2 (our side) to the working tree. Mutually exclusive with `--theirs`, `--source`, `--staged`, and `--ignore-unmerged`. |
 | Theirs | `-3` | `--theirs` | For an unmerged path, write conflict stage 3 (their side) to the working tree. Same exclusions as `--ours`. |
+| Merge | | `--merge` | For an unmerged path, rewrite the working tree with the conflict markers rebuilt from the index stages (`ours` from stage 2, `theirs` from stage 3), leaving the index unmerged. Libra writes whole-file `ours`/`theirs` markers (the same whole-file marker shape `libra merge` produces, with generic `ours`/`theirs` labels) — not Git's line-level 3-way. Same exclusions as `--ours`. |
+| Conflict style | | `--conflict <style>` | Implies `--merge`. `merge` (default) writes `ours`/`theirs` blocks; `diff3` also includes the `base` block (stage 1). `zdiff3` is not supported. |
 | Ignore unmerged | | `--ignore-unmerged` | Skip unmerged paths instead of erroring; the remaining paths still restore. |
 | Pathspec from file | | `--pathspec-from-file <FILE>` | Read pathspecs from `<FILE>` (one per line; `-` reads stdin). When given, the file contents replace any positional pathspecs (which then need not be supplied). |
 | Pathspec file NUL | | `--pathspec-file-nul` | Pathspecs read via `--pathspec-from-file` are separated by NUL, not newlines (requires `--pathspec-from-file`). |
@@ -99,7 +101,7 @@ A plain `libra restore` over an unmerged path refuses to act and reports `path '
 libra restore --ignore-unmerged --source HEAD .
 ```
 
-> **Not yet supported:** `--merge` / `--conflict=<style>` (re-render conflict markers) and `-p` / `--patch` are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
+> **Not yet supported:** Git's line-level 3-way conflict markers and the `zdiff3` style (Libra rebuilds whole-file `ours`/`theirs` markers, consistent with `libra merge`), and `-p` / `--patch`, are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
 
 ## Common Commands
 
@@ -205,7 +207,7 @@ Unlike `git restore` which can operate on the entire worktree with `--worktree`,
 | Both targets | `-S -W` | `-S -W` | N/A |
 | Pathspec from file | `--pathspec-from-file <FILE>` / `--pathspec-file-nul` | `--pathspec-from-file` / `--pathspec-file-nul` | N/A |
 | Overlay mode | `--overlay` / `--no-overlay` (last wins; default is no-overlay = remove absent paths) | `--overlay` / `--no-overlay` | N/A |
-| Conflict resolution | `--ours` / `-2`, `--theirs` / `-3` (worktree-only); `--merge` / `--conflict` deferred | `--ours` / `--theirs` / `--merge` | `--restore-descendants` |
+| Conflict resolution | `--ours` / `-2`, `--theirs` / `-3`, `--merge`, `--conflict=merge\|diff3` (worktree-only; whole-file markers) | `--ours` / `--theirs` / `--merge` / `--conflict` | `--restore-descendants` |
 | Skip unmerged | `--ignore-unmerged` | `--ignore-unmerged` | N/A |
 | Patch mode | Not supported | `-p` / `--patch` | N/A |
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |

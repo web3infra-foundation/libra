@@ -1537,6 +1537,8 @@ async fn restore_worktree_to_head(render_human: bool) -> CloudResult<()> {
         ours: false,
         theirs: false,
         ignore_unmerged: false,
+        merge: false,
+        conflict: None,
         pathspec: vec![".".to_string()], // restore everything
         source: Some("HEAD".to_string()),
         worktree: true,

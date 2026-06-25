@@ -849,3 +849,66 @@ fn test_restore_overlay_recreates_deleted_tracked_directory() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn test_restore_merge_rewrites_conflict_markers() {
+    // `restore --merge` rebuilds the conflict markers in the working tree from
+    // the index stages (ours = stage 2, theirs = stage 3), leaving the index
+    // unmerged. `--conflict=diff3` also emits the base block; an unsupported
+    // style is a usage error.
+    let repo = create_conflicted_repo();
+    let p = repo.path();
+
+    // Overwrite the worktree so --merge has something to regenerate.
+    std::fs::write(p.join("tracked.txt"), "hand-edited\n").unwrap();
+
+    let out = run_libra_command(&["restore", "--merge", "tracked.txt"], p);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let content = std::fs::read_to_string(p.join("tracked.txt")).unwrap();
+    assert!(
+        content.contains("<<<<<<< ours")
+            && content.contains("=======")
+            && content.contains(">>>>>>> theirs"),
+        "merge markers must be present:\n{content}"
+    );
+    assert!(
+        content.contains("main change") && content.contains("feature change"),
+        "both conflict sides must be present:\n{content}"
+    );
+    assert!(
+        !content.contains("||||||| base"),
+        "default merge style omits the base block:\n{content}"
+    );
+
+    // --conflict=diff3 includes the base block (and implies --merge). The index
+    // is still unmerged after --merge, so this regenerates from the same stages.
+    let out3 = run_libra_command(&["restore", "--conflict=diff3", "tracked.txt"], p);
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out3.stderr)
+    );
+    let content3 = std::fs::read_to_string(p.join("tracked.txt")).unwrap();
+    assert!(
+        content3.contains("||||||| base"),
+        "diff3 style must include the base block:\n{content3}"
+    );
+
+    // Unsupported style → usage error (exit 129) carrying the stable CLI code.
+    let bad = run_libra_command(&["restore", "--conflict=zdiff3", "tracked.txt"], p);
+    assert_eq!(bad.status.code(), Some(129), "zdiff3 is unsupported");
+    let (human, report) = parse_cli_error_stderr(&bad.stderr);
+    assert_eq!(
+        report.error_code, "LBR-CLI-002",
+        "unsupported conflict style should carry the CLI-arguments stable code"
+    );
+    assert!(
+        human.contains("unsupported conflict style"),
+        "stderr should name the unsupported style: {human}"
+    );
+}

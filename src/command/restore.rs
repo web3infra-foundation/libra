@@ -43,6 +43,7 @@ EXAMPLES:
     libra restore -S -W file.txt          Restore both worktree and index
     libra restore --ours file.txt         Take the 'our' side of a merge conflict
     libra restore --theirs file.txt       Take the 'their' side of a merge conflict
+    libra restore --merge file.txt        Recreate the conflict markers from the index stages
     libra restore --json --source HEAD .  Structured JSON output for agents";
 
 // ── Typed error ──────────────────────────────────────────────────────
@@ -90,6 +91,10 @@ pub enum RestoreError {
     /// have. Mirrors Git's `path '<file>' does not have our/their version`.
     #[error("path '{path}' does not have {} version", stage_side(*stage))]
     MissingStageVersion { path: String, stage: u8 },
+    /// `--conflict=<style>` was given an unsupported value (only `merge` and
+    /// `diff3` are accepted; `zdiff3` is not implemented).
+    #[error("unsupported conflict style '{0}' (expected 'merge' or 'diff3')")]
+    UnsupportedConflictStyle(String),
 }
 
 /// Human label for a conflict stage used by [`RestoreError::MissingStageVersion`].
@@ -118,6 +123,7 @@ impl RestoreError {
             Self::PathspecFileRead(_) => StableErrorCode::IoReadFailed,
             Self::PathUnmerged(_) => StableErrorCode::ConflictUnresolved,
             Self::MissingStageVersion { .. } => StableErrorCode::ConflictUnresolved,
+            Self::UnsupportedConflictStyle(_) => StableErrorCode::CliInvalidArguments,
         }
     }
 }
@@ -162,6 +168,9 @@ impl From<RestoreError> for CliError {
                 .with_stable_code(stable_code)
                 .with_exit_code(128)
                 .with_hint("the path has no version at that conflict stage"),
+            RestoreError::UnsupportedConflictStyle(_) => CliError::command_usage(message)
+                .with_stable_code(stable_code)
+                .with_hint("use --conflict=merge (default) or --conflict=diff3"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -220,6 +229,28 @@ pub struct RestoreArgs {
     /// silently skips them and restores the rest.
     #[clap(long)]
     pub ignore_unmerged: bool,
+    /// Recreate the conflict in the working tree for unmerged paths: write the
+    /// conflict markers from the index stages (ours from stage 2, theirs from
+    /// stage 3), leaving the index unmerged. Mutually exclusive with
+    /// `--ours`/`--theirs`/`--source`/`--staged`/`--ignore-unmerged`. (Implied by
+    /// `--conflict`.) Libra writes whole-file `ours`/`theirs` markers — the same
+    /// whole-file marker shape `libra merge` uses (one `ours` block / one `theirs`
+    /// block), with generic `ours`/`theirs` labels since the index stages carry no
+    /// commit names — not Git's line-level 3-way merge.
+    #[clap(
+        long,
+        conflicts_with_all = ["ours", "theirs", "source", "staged", "ignore_unmerged"],
+    )]
+    pub merge: bool,
+    /// Conflict-marker style for `--merge` (implies `--merge`): `merge` (default —
+    /// `ours`/`theirs` blocks) or `diff3` (also include the `base` from stage 1).
+    /// `zdiff3` is not supported.
+    #[clap(
+        long,
+        value_name = "STYLE",
+        conflicts_with_all = ["ours", "theirs", "source", "staged", "ignore_unmerged"],
+    )]
+    pub conflict: Option<String>,
     /// Read pathspecs from the given file, one per line (`-` reads stdin).
     #[clap(long = "pathspec-from-file", value_name = "FILE")]
     pub pathspec_from_file: Option<String>,
@@ -343,6 +374,26 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
     if args.ours || args.theirs {
         let stage = if args.ours { 2 } else { 3 };
         let restored = restore_conflict_stage(&args.pathspec, stage).await?;
+        return Ok(RestoreOutput {
+            source: None,
+            worktree: true,
+            staged: false,
+            restored_files: restored,
+            deleted_files: Vec::new(),
+        });
+    }
+
+    // Conflict re-materialization (`--merge` / `--conflict=<style>`): rewrite the
+    // working tree for unmerged paths with the conflict markers rebuilt from the
+    // index stages, leaving the index unmerged. clap guarantees
+    // `--source`/`--staged` are absent here.
+    if args.merge || args.conflict.is_some() {
+        let diff3 = match args.conflict.as_deref() {
+            None | Some("merge") => false,
+            Some("diff3") => true,
+            Some(other) => return Err(RestoreError::UnsupportedConflictStyle(other.to_string())),
+        };
+        let restored = restore_conflict_merge(&args.pathspec, diff3).await?;
         return Ok(RestoreOutput {
             source: None,
             worktree: true,
@@ -965,6 +1016,99 @@ async fn restore_conflict_stage(
     Ok(restored)
 }
 
+/// `restore --merge` / `--conflict=<style>`: for each matched unmerged path,
+/// rebuild the conflict markers from the index stages (ours = stage 2, theirs =
+/// stage 3, base = stage 1) and write them to the working tree, leaving the index
+/// unmerged. `diff3` additionally emits the base block. The markers use the same
+/// whole-file SHAPE as `libra merge`'s `write_conflict_markers` (one `ours` block /
+/// one `theirs` block), with generic `ours`/`theirs` labels (the index stages carry
+/// no commit names) — not Git's line-level 3-way merge.
+async fn restore_conflict_merge(
+    pathspec: &[String],
+    diff3: bool,
+) -> Result<Vec<String>, RestoreError> {
+    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let unmerged = collect_unmerged_paths(&index);
+    let filter: Vec<PathBuf> = pathspec.iter().map(PathBuf::from).collect();
+    let matched = util::filter_to_fit_paths(&unmerged, &filter);
+    if matched.is_empty() {
+        let first = filter.first().cloned().unwrap_or_default();
+        return Err(pathspec_not_matched(&first));
+    }
+
+    let eol = if cfg!(windows) { "\r\n" } else { "\n" };
+    let mut restored = Vec::new();
+    for path in &matched {
+        let path_str = path_to_utf8_typed(path)?;
+        let ours = stage_payload(&index, path_str, 2)?;
+        let theirs = stage_payload(&index, path_str, 3)?;
+        let base = if diff3 {
+            stage_payload(&index, path_str, 1)?
+        } else {
+            None
+        };
+        let content =
+            build_conflict_markers(ours.as_deref(), theirs.as_deref(), base.as_deref(), eol);
+        let path_abs = util::workdir_to_absolute(path);
+        if let Some(parent) = path_abs.parent() {
+            fs::create_dir_all(parent).map_err(|_| RestoreError::WriteWorktree)?;
+        }
+        util::write_file(content.as_bytes(), &path_abs).map_err(|_| RestoreError::WriteWorktree)?;
+        restored.push(path.display().to_string());
+    }
+    Ok(restored)
+}
+
+/// Load the blob content for a conflict stage, rendered for inclusion in a
+/// conflict marker (UTF-8 text, or a `[binary content, N bytes]` placeholder —
+/// matching `libra merge`'s `conflict_payload`). `None` when the stage is absent
+/// (e.g. an add/add conflict has no base; a modify/delete conflict lacks a side).
+fn stage_payload(index: &Index, path: &str, stage: u8) -> Result<Option<String>, RestoreError> {
+    let Some(hash) = stage_blob(index, path, stage) else {
+        return Ok(None);
+    };
+    let blob = load_object::<Blob>(&hash).map_err(|_| RestoreError::ReadObject)?;
+    let rendered = match std::str::from_utf8(&blob.data) {
+        Ok(text) => text.to_string(),
+        Err(_) => format!("[binary content, {} bytes]", blob.data.len()),
+    };
+    Ok(Some(rendered))
+}
+
+/// Build conflict-marker content from the present stages: a single `<<<<<<<
+/// ours` block, `=======`, a single `>>>>>>> theirs` block, with an optional
+/// `||||||| base` block for `diff3`. A missing ours/theirs side is rendered as
+/// `(deleted)`. This is the same whole-file marker SHAPE that `libra merge`'s
+/// `write_conflict_markers` produces (one `ours` block / one `theirs` block, not
+/// Git's line-level 3-way hunks), but the labels are the generic `ours`/`theirs`
+/// rather than merge's `HEAD` / commit-abbrev — the index stages do not carry the
+/// original commit names. (If the labels are ever unified, update both sites.)
+fn build_conflict_markers(
+    ours: Option<&str>,
+    theirs: Option<&str>,
+    base: Option<&str>,
+    eol: &str,
+) -> String {
+    let mut out = String::new();
+    match ours {
+        Some(text) => {
+            out.push_str(&format!("<<<<<<< ours{eol}{text}{eol}"));
+        }
+        None => out.push_str(&format!("<<<<<<< ours (deleted){eol}")),
+    }
+    if let Some(base_text) = base {
+        out.push_str(&format!("||||||| base{eol}{base_text}{eol}"));
+    }
+    out.push_str(&format!("======={eol}"));
+    match theirs {
+        Some(text) => {
+            out.push_str(&format!("{text}{eol}>>>>>>> theirs{eol}"));
+        }
+        None => out.push_str(&format!(">>>>>>> theirs (deleted){eol}")),
+    }
+    out
+}
+
 async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), RestoreError> {
     let blob = load_object::<Blob>(hash).map_err(|_| RestoreError::ReadObject)?;
     let path_abs = util::workdir_to_absolute(path);
@@ -1353,6 +1497,10 @@ mod tests {
             .to_string(),
             "path 'src/conflict.rs' does not have their version",
         );
+        assert_eq!(
+            RestoreError::UnsupportedConflictStyle("zdiff3".to_string()).to_string(),
+            "unsupported conflict style 'zdiff3' (expected 'merge' or 'diff3')",
+        );
     }
 
     /// Pin the `stable_code()` mapping for every variant of
@@ -1423,6 +1571,35 @@ mod tests {
             }
             .stable_code(),
             StableErrorCode::ConflictUnresolved,
+        );
+        assert_eq!(
+            RestoreError::UnsupportedConflictStyle("zdiff3".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+    }
+
+    /// Pin the externally-visible `--merge` / `--conflict` marker contract,
+    /// including the deleted-side (modify/delete) and `diff3` base-block cases,
+    /// independently of how a particular merge stages a conflict.
+    #[test]
+    fn build_conflict_markers_covers_present_deleted_and_diff3() {
+        assert_eq!(
+            build_conflict_markers(Some("A"), Some("B"), None, "\n"),
+            "<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n",
+        );
+        assert_eq!(
+            build_conflict_markers(Some("A"), Some("B"), Some("BASE"), "\n"),
+            "<<<<<<< ours\nA\n||||||| base\nBASE\n=======\nB\n>>>>>>> theirs\n",
+        );
+        // Stage 2 (ours) missing — theirs modified, ours deleted.
+        assert_eq!(
+            build_conflict_markers(None, Some("B"), None, "\n"),
+            "<<<<<<< ours (deleted)\n=======\nB\n>>>>>>> theirs\n",
+        );
+        // Stage 3 (theirs) missing — ours modified, theirs deleted.
+        assert_eq!(
+            build_conflict_markers(Some("A"), None, None, "\n"),
+            "<<<<<<< ours\nA\n=======\n>>>>>>> theirs (deleted)\n",
         );
     }
 }
