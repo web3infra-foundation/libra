@@ -2,13 +2,13 @@
 
 ## 命令实现目标
 
-`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、Libra 自有 pre-commit hook、结构化输出和兼容拒绝。这里的 hook 只指 `.libra/hooks/pre-commit.*`；Git hooks bridge（`.git/hooks` / `core.hooksPath`，包括 stock `commit-msg` bridge）按 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性) 拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）、`--status`/`--no-status`（last-wins 切换：`--status` 把工作树 status 以 `#` 注释行注入编辑器模板，随后被 cleanup 剥离；仅当生效 cleanup 会剥离注释时才注入，`--cleanup=verbatim`/`whitespace` 下省略以免泄漏；默认不含 status 段）也已支持，同时对 `-t/--template`、`commit.cleanup`/`commit.verbose` 配置等未完成行为明确说明。
+`libra commit` 的目标是把索引快照记录为新的提交，并处理消息来源、作者、签名、Libra 自有 pre-commit hook、结构化输出和兼容拒绝。这里的 hook 只指 `.libra/hooks/pre-commit.*`；Git hooks bridge（`.git/hooks` / `core.hooksPath`，包括 stock `commit-msg` bridge）按 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性) 拒绝。实现已支持 `--all`、`--author`、`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`（复用提交消息）、`--trailer`、`--reset-author`、`-e/--edit`（始终开编辑器）、`-v/--verbose`（编辑器模板含 staged diff，经 scissors 剥离）、bare `commit` 在可用编辑器时开编辑器、autosquash、dry-run porcelain、commit trailers 和稳定错误码，`--porcelain`（would-be-committed 状态的 porcelain v1 机器输出，隐含 `--dry-run`，不创建提交）、`--status`/`--no-status`（last-wins 切换：`--status` 把工作树 status 以 `#` 注释行注入编辑器模板，随后被 cleanup 剥离；仅当生效 cleanup 会剥离注释时才注入，`--cleanup=verbatim`/`whitespace` 下省略以免泄漏；默认不含 status 段）、`commit.cleanup`/`commit.verbose` 配置默认（CLI flag 未给时由 `read_cascaded_config_value` 读 local→global 配置：`commit.cleanup` 经 `parse_cleanup_mode` 解析为 `CleanupMode`、`commit.verbose` 经 `parse_git_config_bool` 解析为 bool-or-int（非零即 verbose）；显式 `--cleanup`/`-v` 短路覆盖配置，无效配置值 fatal。**已知限制**：`commit.verbose` 仅 on/off——`=2`/`=1k` 等非零整数等同 `true`（支持 git bool-or-int 的 k/m/g 后缀），无 `-vv`/未暂存 diff 的 level-2 渲染，也无 `--no-verbose` 单次关闭，因 Libra 的 `-v` 本就是 bool；另：present-but-empty 的配置值（如 `commit.verbose =`）经共享 `read_cascaded_config_value` 被规整为 unset（全 diff/config 共有的既有行为），故读作未设置而非 git 的 false）也已支持，同时对 `-t/--template` 等未完成行为明确说明。
 
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
 
-- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--status`/`--no-status`（last-wins 切换，`--status` 注入注释化 status 段，仅在 cleanup 会剥离注释时）已补齐，`-t/--template`/`commit.cleanup`/`commit.verbose` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
+- 当前矩阵承诺常用 Git commit 子集已支持；`--cleanup`、`--dry-run`、`--fixup`、`--squash`、`-C/-c`、`--trailer`、`--reset-author`、`-e/--edit`、`-v/--verbose`、`--porcelain`、`--status`/`--no-status`（last-wins 切换，`--status` 注入注释化 status 段，仅在 cleanup 会剥离注释时）、`commit.cleanup`/`commit.verbose` 配置默认已补齐，`-t/--template` 仍为缺口。新增语义必须同步矩阵、用户文档和测试。
 - `--amend` 作者归属与 Git 对齐：默认**保留**被修订提交的原作者（name/email/authored date），只有显式 `--reset-author` 或 `--author <AUTHOR>` 才会改写为当前身份；committer 始终取当前身份。此前 `--amend` 会静默把作者改成当前身份、使 `--reset-author` 沦为空操作，已修正（见 `src/command/commit.rs` amend 分支）。
 
 
@@ -59,8 +59,9 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | common Git commit surface plus `--cleanup`, `--dry-run`, `--fixup`, `--squash`, `-C/-c`, `--trailer`, and `--reset-author` supported | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | ✅ 已实现 | `--porcelain` 机器输出 | 输出 would-be-committed 状态的 porcelain v1（复用 `status::output_porcelain` + 折叠 untracked 目录），替代人类摘要；与 Git 一致 **隐含 `--dry-run`**（不创建提交）；`-a` 仅为预览自动暂存，dry-run 后通过 index 快照还原（不改动 index），`--json` 模式下惰性。带集成测试（`test_commit_porcelain_outputs_status_format`、`test_commit_all_porcelain_shows_autostaged_as_staged`）。 |
-| ✅ 已实现 | `--status` / `--no-status` | last-wins 切换。`--status` 在打开编辑器时把工作树 status（经 `status::execute_to` 长格式）以 `#` 注释行注入模板（`-v` 时置于 scissors 之上），随后被 `cleanup_commit_message` 当作注释行剥离 → 不进入最终消息。**仅当生效的 cleanup 会剥离注释时才注入**（`cleanup_strips_comments = verbose || matches!(mode, Strip\|Default\|Scissors)`）：`--cleanup=verbatim`/`whitespace`（保留注释行）下不注入，故绝不泄漏。无 `-m`/`-F`（不开编辑器）时无效果。默认与 `--no-status` 不含 status 段。带集成测试（`status_flag_seeds_commented_status_into_template_and_strips_it`、`default_and_no_status_omit_status_from_template`、`status_not_seeded_under_non_comment_stripping_cleanup`）。 |
-| 功能缺口 | `-t/--template` 初始模板、`commit.cleanup`/`commit.verbose` 配置默认 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| ✅ 已实现 | `--status` / `--no-status` | last-wins 切换。`--status` 在打开编辑器时把工作树 status（经 `status::execute_to` 长格式）以 `#` 注释行注入模板（`-v` 时置于 scissors 之上），随后被 `cleanup_commit_message` 当作注释行剥离 → 不进入最终消息。**仅当生效的 cleanup 会剥离注释时才注入**（`cleanup_strips_comments = matches!(mode, Strip\|Default)`）：`--cleanup=verbatim`/`whitespace`/`scissors`（保留注释行——显式 scissors 是 whitespace cleanup + 截断，marker 之上的 `#` 行保留）下不注入，故绝不泄漏。`-v` 仅截断附加 diff、不再强制 strip，故 `build_verbose_template` 的 `# Please enter` 帮助注释也仅在 `strips_comments` 时注入（否则非剥离模式会把模板自身的 `#` 行提交进去）。无 `-m`/`-F`（不开编辑器）时无效果。默认与 `--no-status` 不含 status 段。带集成测试（`status_flag_seeds_commented_status_into_template_and_strips_it`、`default_and_no_status_omit_status_from_template`、`status_not_seeded_under_non_comment_stripping_cleanup`）。 |
+| ✅ 已实现 | `commit.cleanup`/`commit.verbose` 配置默认（CLI flag 未给时回退到 local→global 配置，flag 优先；`parse_cleanup_mode` + `parse_git_config_bool`）。带集成测试 `test_commit_honors_cleanup_and_verbose_config`（verbatim 保留 `#` 注释、verbose=true 在 `-m` 提交时把 staged diff 打到 stderr）。 | 与 git 一致；经真实 git 对照。 |
+| 功能缺口 | `-t/--template` 初始模板 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

@@ -286,7 +286,6 @@ fn cleanup_strip_drops_comment_lines() {
 }
 
 #[test]
-#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
 fn cleanup_config_default_strips_comment_lines() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -313,7 +312,6 @@ fn cleanup_config_default_strips_comment_lines() {
 }
 
 #[test]
-#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
 fn cleanup_flag_overrides_config() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -347,7 +345,7 @@ fn cleanup_flag_overrides_config() {
 }
 
 #[test]
-#[ignore = "PR-15 scope: -t/--template and commit.cleanup config are deferred (see plan D10)"]
+#[ignore = "PR-15 scope: -t/--template is deferred (see plan D10)"]
 fn template_t_flag_loads_initial_content() {
     // -t supplies the initial message; with --no-edit it is used directly.
     let temp = tempdir().unwrap();
@@ -434,6 +432,106 @@ fn verbose_template_includes_diff_but_message_excludes_it() {
     assert!(
         !msg.contains("hello world"),
         "staged diff must not enter the message: {msg}"
+    );
+}
+
+/// `-v` only truncates the appended diff; the selected `--cleanup` mode still
+/// governs the message. With `--cleanup=verbatim -v`, a `#` comment line above the
+/// scissors marker is preserved (verbatim does not strip comments), while the diff
+/// below the marker is still dropped.
+#[cfg(unix)]
+#[test]
+fn verbose_with_verbatim_cleanup_keeps_comment_lines() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "base.txt", "base\n");
+    assert!(run_libra(&["commit", "-m", "base"], &repo).status.success());
+    stage_file(&repo, "a.txt", "hello\n");
+
+    // Editor writes a message with a `#` comment, then a scissors marker and a diff
+    // below it (mimicking the `-v` template the user edited).
+    let editor = temp.path().join("ed.sh");
+    fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'subject line\\n# keep this comment\\n# ------------------------ >8 ------------------------\\nDIFFBODYLINE\\n' > \"$1\"\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&editor).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&editor, perms).unwrap();
+
+    let out = run_libra_env(
+        &["commit", "-v", "--cleanup=verbatim"],
+        &repo,
+        &[("EDITOR", editor.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "commit -v --cleanup=verbatim failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let msg = last_commit_message(&repo);
+    assert!(
+        msg.contains("# keep this comment"),
+        "verbatim keeps `#` comment lines above the scissors even with -v: {msg}"
+    );
+    assert!(
+        !msg.contains("DIFFBODYLINE"),
+        "the diff below the scissors marker is still truncated: {msg}"
+    );
+}
+
+/// Regression: `commit -v --cleanup=verbatim` must not commit Libra's own
+/// verbose-template helper comments (`# Please enter ...`). The template omits
+/// those `#` helper lines under a non-comment-stripping cleanup, so even an editor
+/// that leaves the template intact (here it only prepends a subject) cannot leak
+/// them into the message.
+#[cfg(unix)]
+#[test]
+fn verbose_verbatim_does_not_commit_template_helper_comments() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "base.txt", "base\n");
+    assert!(run_libra(&["commit", "-m", "base"], &repo).status.success());
+    stage_file(&repo, "a.txt", "hello\n");
+
+    // Editor prepends a subject and keeps the rest of the template verbatim.
+    let editor = temp.path().join("ed.sh");
+    fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'subject line\\n' > \"$1.new\"\ncat \"$1\" >> \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&editor).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&editor, perms).unwrap();
+
+    let out = run_libra_env(
+        &["commit", "-v", "--cleanup=verbatim"],
+        &repo,
+        &[("EDITOR", editor.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let msg = last_commit_message(&repo);
+    assert!(
+        msg.contains("subject line"),
+        "the edited subject is committed: {msg}"
+    );
+    assert!(
+        !msg.contains("Please enter") && !msg.contains(">8") && !msg.contains("hello"),
+        "no template helper comments / scissors / diff leak into the message: {msg}"
     );
 }
 
@@ -526,10 +624,11 @@ fn default_and_no_status_omit_status_from_template() {
 #[cfg(unix)]
 #[test]
 fn status_not_seeded_under_non_comment_stripping_cleanup() {
-    // Under `--cleanup=verbatim`/`whitespace` the `#` comment lines are NOT
-    // stripped, so `--status` must NOT seed the status block (it would leak into
-    // the verbatim message). The status section is omitted for those modes.
-    for mode in ["verbatim", "whitespace"] {
+    // Under `--cleanup=verbatim`/`whitespace`/`scissors` the `#` comment lines
+    // above the message are NOT stripped (explicit scissors is whitespace cleanup
+    // plus truncation), so `--status` must NOT seed the status block (it would leak
+    // into the message). The status section is omitted for those modes.
+    for mode in ["verbatim", "whitespace", "scissors"] {
         let temp = tempdir().unwrap();
         let repo = temp.path().join("repo");
         init_repo(&repo);

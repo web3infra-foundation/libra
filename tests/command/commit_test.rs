@@ -1242,6 +1242,154 @@ async fn test_commit_cleanup_strips_comments() {
     assert!(commit_obj.message.contains("body"));
 }
 
+#[test]
+fn test_commit_honors_cleanup_and_verbose_config() {
+    // `commit.cleanup` supplies the default cleanup mode when `--cleanup` is unset,
+    // and `commit.verbose` makes `-v` the default — both matching Git.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // commit.cleanup=verbatim keeps a `#` comment line a default Strip would remove.
+    assert_cli_success(
+        &run_libra_command(&["config", "commit.cleanup", "verbatim"], p),
+        "set commit.cleanup",
+    );
+    std::fs::write(p.join("c.txt"), "one\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "c.txt"], p), "add c");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "subject\n\n# keep me\nbody", "--no-verify"],
+            p,
+        ),
+        "commit with verbatim cleanup",
+    );
+    let msg = String::from_utf8_lossy(&run_libra_command(&["cat-file", "-p", "HEAD"], p).stdout)
+        .into_owned();
+    assert!(
+        msg.contains("# keep me"),
+        "commit.cleanup=verbatim keeps the comment line:\n{msg}"
+    );
+
+    // commit.verbose=true prints the staged diff to stderr on a plain `-m` commit.
+    assert_cli_success(
+        &run_libra_command(&["config", "commit.verbose", "true"], p),
+        "set commit.verbose",
+    );
+    std::fs::write(p.join("c.txt"), "one\ntwo\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "c.txt"], p), "add c2");
+    let out = run_libra_command(&["commit", "-m", "verbose default", "--no-verify"], p);
+    assert_cli_success(&out, "commit with verbose config");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("@@") || stderr.contains("+two"),
+        "commit.verbose=true prints the staged diff to stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn test_commit_cleanup_default_on_non_editor_keeps_comments() {
+    // Git's `default` cleanup means strip when the message is edited, otherwise
+    // whitespace. On the non-editor `-m` path it must behave like whitespace, so a
+    // `#` comment line is kept (it is NOT treated as strip).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("d.txt"), "one\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "d.txt"], p), "add d");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--cleanup=default",
+                "-m",
+                "subject\n\n# keep on default\nbody",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "commit --cleanup=default",
+    );
+    let msg = String::from_utf8_lossy(&run_libra_command(&["cat-file", "-p", "HEAD"], p).stdout)
+        .into_owned();
+    assert!(
+        msg.contains("# keep on default"),
+        "--cleanup=default on a non-editor -m commit keeps comment lines (whitespace semantics):\n{msg}"
+    );
+
+    // `--cleanup=scissors` likewise behaves like whitespace on the non-editor path:
+    // it does NOT truncate at the scissors marker (Git only truncates when edited).
+    std::fs::write(p.join("d.txt"), "two\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "d.txt"], p), "add d2");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--cleanup=scissors",
+                "-m",
+                "subj2\n# ------------------------ >8 ------------------------\nbelow scissors",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "commit --cleanup=scissors",
+    );
+    let scissors_msg =
+        String::from_utf8_lossy(&run_libra_command(&["cat-file", "-p", "HEAD"], p).stdout)
+            .into_owned();
+    assert!(
+        scissors_msg.contains("below scissors"),
+        "--cleanup=scissors on a non-editor -m commit does not truncate at the marker:\n{scissors_msg}"
+    );
+}
+
+#[test]
+fn test_commit_config_invalid_is_fatal_but_flag_overrides() {
+    // An invalid `commit.cleanup` is fatal when no `--cleanup` is given, but an
+    // explicit `--cleanup` flag wins and overrides the bad config; `commit.verbose`
+    // accepts an integer (Git's bool-or-int).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "commit.cleanup", "bogus"], p),
+        "set invalid commit.cleanup",
+    );
+    std::fs::write(p.join("e.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "e.txt"], p), "add e");
+
+    // No flag: the invalid configured mode is fatal.
+    let bad = run_libra_command(&["commit", "-m", "x", "--no-verify"], p);
+    assert_ne!(
+        bad.status.code(),
+        Some(0),
+        "invalid commit.cleanup should be fatal: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // Explicit `--cleanup` overrides the bad config and succeeds.
+    assert_cli_success(
+        &run_libra_command(&["commit", "--cleanup=strip", "-m", "x", "--no-verify"], p),
+        "explicit --cleanup overrides invalid commit.cleanup",
+    );
+
+    // `commit.verbose=2` (integer) is accepted and enables the verbose diff.
+    assert_cli_success(
+        &run_libra_command(&["config", "--unset", "commit.cleanup"], p),
+        "unset commit.cleanup",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "commit.verbose", "2"], p),
+        "set commit.verbose=2",
+    );
+    std::fs::write(p.join("e.txt"), "1\n2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "e.txt"], p), "add e2");
+    let v = run_libra_command(&["commit", "-m", "v", "--no-verify"], p);
+    assert_cli_success(&v, "commit.verbose=2 accepted");
+    let stderr = String::from_utf8_lossy(&v.stderr);
+    assert!(
+        stderr.contains("@@") || stderr.contains("+2"),
+        "commit.verbose=2 enables the staged-diff output:\n{stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_commit_trailer_appended() {

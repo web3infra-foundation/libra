@@ -112,7 +112,7 @@ libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 
 ### `--status` / `--no-status`
 
-`--status` 把工作树状态以 `#` 注释行注入提交消息编辑器模板（Git 默认显示；Libra 默认省略，故用 `--status` 主动开启）。由于是注释行，消息 cleanup 会将其剥离——仅供参考，不进入最终提交消息。未打开编辑器时（例如带 `-m`）无效果。在保留注释行的 cleanup 模式下也会省略（`--cleanup=verbatim` 与 `--cleanup=whitespace`，除非 `-v` 强制 scissors），从而绝不泄漏进消息；仅当打开编辑器且生效的 cleanup 会剥离注释时才注入。`--no-status`（默认）不含 status 段。两者构成 last-wins 切换。
+`--status` 把工作树状态以 `#` 注释行注入提交消息编辑器模板（Git 默认显示；Libra 默认省略，故用 `--status` 主动开启）。由于是注释行，消息 cleanup 会将其剥离——仅供参考，不进入最终提交消息。未打开编辑器时（例如带 `-m`）无效果。在保留注释行的 cleanup 模式下也会省略（`--cleanup=verbatim`、`--cleanup=whitespace` 与 `--cleanup=scissors`——显式 scissors 保留 marker 之上的 `#` 行），从而绝不泄漏进消息；仅当打开编辑器且生效的 cleanup 会剥离注释（`strip`/`default`）时才注入。`-v` 仅截断附加的 diff，不强制 strip，故上述模式下即便加 `-v` 也不注入 status。`--no-status`（默认）不含 status 段。两者构成 last-wins 切换。
 
 ```bash
 libra commit --status          # 打开编辑器，模板中含注释化的状态
@@ -285,13 +285,15 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 | Conventional 检查 | 外部工具（commitlint） | N/A | `libra commit --conventional` |
 | 只跳过 pre-commit | N/A | N/A | `libra commit --disable-pre` |
 | 跳过所有 hooks | `git commit --no-verify` | N/A | `libra commit --no-verify` |
-| Fixup commit | `git commit --fixup=<commit>` | N/A | N/A |
-| Squash commit | `git commit --squash=<commit>` | `jj squash` | N/A |
-| 交互式消息 | `git commit`（打开编辑器） | `jj commit`（打开编辑器） | N/A（需要通过 -m 或 -F 提供消息） |
-| 编辑器中 verbose diff | `git commit -v` | N/A | N/A |
-| 重置作者日期 | `git commit --reset-author` | N/A | N/A |
-| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | N/A |
-| Trailer | `git commit --trailer="..."` | N/A | N/A |
+| Fixup commit | `git commit --fixup=<commit>` | N/A | `libra commit --fixup=<commit>` |
+| Squash commit | `git commit --squash=<commit>` | `jj squash` | `libra commit --squash=<commit>` |
+| 交互式消息 | `git commit`（打开编辑器） | `jj commit`（打开编辑器） | `libra commit`（无 -m/-F 时打开编辑器）/ `-e` |
+| 编辑器中 verbose diff | `git commit -v` | N/A | `libra commit -v` |
+| verbose 配置默认 | `commit.verbose`（未给 `-v` 时回退；CLI flag 优先） | N/A | `libra config commit.verbose true` |
+| 重置作者日期 | `git commit --reset-author` | N/A | `libra commit --reset-author` |
+| Cleanup 模式 | `git commit --cleanup=<mode>` | N/A | `libra commit --cleanup=<mode>` |
+| Cleanup 配置默认 | `commit.cleanup`（未给 `--cleanup` 时回退；CLI flag 优先） | N/A | `libra config commit.cleanup <mode>` |
+| Trailer | `git commit --trailer="..."` | N/A | `libra commit --trailer="..."` |
 | 结构化 JSON 输出 | N/A | N/A | `--json` / `--machine` |
 | 错误提示 | 最少 | 最少 | 每种错误类型都有可操作提示 |
 
@@ -323,8 +325,8 @@ Git 没有内置提交消息格式验证；团队依赖 commitlint、husky 或 C
 
 ## 兼容性说明
 
-- Libra 不打开编辑器进行交互式消息编写；始终需要 `-m` 或 `-F`（`--amend --no-edit` 除外）
+- Libra 支持交互式编辑器消息编写（`-e/--edit`，以及无 `-m`/`-F` 的裸 `commit` 在有可用编辑器时打开）
 - jj 没有带暂存的传统 `commit` 命令；`jj commit` 会完成 working copy commit
-- 不支持 `--fixup` 和 `--squash`；使用 `libra rebase -i` 进行提交重组
+- 支持 `--fixup` 和 `--squash`（autosquash 提交重组）
 - Vault signing 替代 Git 的 `commit.gpgsign` 和 `user.signingkey` 配置
-- 不支持用于剥离注释的 `--cleanup` 模式；消息按原样使用
+- 支持 `--cleanup=<mode>` 消息清理（`strip`/`whitespace`/`verbatim`/`scissors`/`default`），未给时回退到 `commit.cleanup` 配置；`commit.verbose` 配置可使 `-v` 成为默认

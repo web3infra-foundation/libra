@@ -172,10 +172,12 @@ pub struct CommitArgs {
     /// editor template (Git shows this by default; Libra defaults to omitting
     /// it, so `--status` opts in). The status lines are `#`-commented and so are
     /// stripped from the final message — informational only. Seeded only when an
-    /// editor opens and the effective cleanup strips comments; it is omitted
-    /// under `--cleanup=verbatim`/`--cleanup=whitespace` (unless `-v` forces the
-    /// scissors cleanup) so it never leaks into the message. Toggle pair with
-    /// `--no-status`; the last one wins.
+    /// editor opens and the effective cleanup strips comments (`strip`/`default`);
+    /// it is omitted under `--cleanup=verbatim`/`whitespace`/`scissors` (which keep
+    /// `#` lines above the marker). `-v` only truncates the appended diff and does
+    /// NOT force a strip, so the status stays omitted under those modes even with
+    /// `-v`, and never leaks into the message. Toggle pair with `--no-status`; the
+    /// last one wins.
     #[arg(long = "status", overrides_with = "no_status")]
     pub status: bool,
 
@@ -266,6 +268,9 @@ pub enum CommitError {
 
     #[error("{0}")]
     EditorFailed(String),
+
+    #[error("{0}")]
+    InvalidConfig(String),
 }
 
 impl From<CommitError> for CliError {
@@ -297,6 +302,9 @@ impl From<CommitError> for CliError {
             CommitError::InvalidAuthor(..) => CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("expected format: 'Name <email>'"),
+            CommitError::InvalidConfig(..) => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("fix the offending value with 'libra config <key> <value>'"),
             CommitError::MessageFileRead { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -848,7 +856,44 @@ async fn resolve_final_message(
         None => String::new(),
     };
 
-    let mode = args.cleanup.unwrap_or(CleanupMode::Strip);
+    // The cleanup mode and verbose flag fall back to `commit.cleanup` /
+    // `commit.verbose` config (cascade: local repo, then global) when the CLI flag
+    // is unset — the CLI flag always WINS and short-circuits the config read, so a
+    // bad repo/global config can still be overridden for a single commit. Only when
+    // the flag is unset is the config consulted, and an invalid configured value is
+    // then fatal (Git rejects a bad commit.cleanup mode / commit.verbose value).
+    let mode = match args.cleanup {
+        Some(mode) => mode,
+        None => match read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.cleanup")
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(value) => parse_cleanup_mode(&value).ok_or_else(|| {
+                CommitError::InvalidConfig(format!(
+                    "invalid commit.cleanup config value '{value}' (expected strip/whitespace/verbatim/scissors/default)"
+                ))
+            })?,
+            None => CleanupMode::Strip,
+        },
+    };
+
+    let verbose = if args.verbose {
+        true
+    } else {
+        match read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.verbose")
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(value) => parse_git_config_bool(&value).ok_or_else(|| {
+                CommitError::InvalidConfig(format!(
+                    "bad boolean config value '{value}' for 'commit.verbose'"
+                ))
+            })?,
+            None => false,
+        }
+    };
 
     // Pick the editor: an explicitly configured one runs regardless of TTY; the
     // `vi` fallback only applies on an interactive terminal.
@@ -863,17 +908,13 @@ async fn resolve_final_message(
     };
 
     // `--status`: a `#`-commented status section to seed into the editor
-    // template (informational only). Seed it ONLY when an editor will open AND
-    // the cleanup that will be applied actually strips `#` comments —
-    // Strip/Default/Scissors, or Scissors as forced by `-v`. Under
-    // `--cleanup=verbatim`/`whitespace` the comment lines are preserved, so
-    // injecting the status would leak it into the final message (like Git, which
-    // omits the status cruft when it will not be stripped).
-    let cleanup_strips_comments = args.verbose
-        || matches!(
-            mode,
-            CleanupMode::Strip | CleanupMode::Default | CleanupMode::Scissors
-        );
+    // template (informational only). Seed it ONLY when an editor will open AND the
+    // cleanup that will be applied actually strips `#` comments — Strip/Default.
+    // `-v` no longer forces a strip (it only truncates the appended diff, then the
+    // selected mode cleans the message), so under `--cleanup=verbatim`/`whitespace`/
+    // `scissors` (which keep `#` lines above the marker) the status is NOT seeded —
+    // even with `-v` — so it can never leak into the final message (matching Git).
+    let cleanup_strips_comments = matches!(mode, CleanupMode::Strip | CleanupMode::Default);
     let status_section = if args.status && editor_cmd.is_some() && cleanup_strips_comments {
         build_status_section().await
     } else {
@@ -881,8 +922,9 @@ async fn resolve_final_message(
     };
 
     let resolved = if let Some(editor_cmd) = editor_cmd {
-        let buffer = if args.verbose {
-            build_verbose_template(&initial, status_section.as_deref()).await?
+        let buffer = if verbose {
+            build_verbose_template(&initial, status_section.as_deref(), cleanup_strips_comments)
+                .await?
         } else {
             append_status_section(initial.clone(), status_section.as_deref())
         };
@@ -890,17 +932,21 @@ async fn resolve_final_message(
         let raw = editor::edit_message(&path, &buffer, &editor_cmd, true)
             .await
             .map_err(|e| CommitError::EditorFailed(e.to_string()))?;
-        // `-v` always strips at the scissors marker; otherwise honor --cleanup.
-        let effective_mode = if args.verbose {
-            CleanupMode::Scissors
+        // `-v` only appends the staged diff below a scissors marker — drop that
+        // diff first, then apply the SELECTED cleanup to the edited message. `-v`
+        // does not force a strip, so `--cleanup=verbatim`/`whitespace -v` still keep
+        // `#` lines above the marker (matching Git, where the cleanup mode governs
+        // the message regardless of `-v`).
+        let edited = if verbose {
+            truncate_at_scissors(&raw)
         } else {
-            mode
+            raw
         };
-        cleanup_commit_message(&raw, effective_mode)
+        cleanup_commit_message(&edited, mode)
     } else {
         // No editor was opened. `-v` here just prints the staged diff to stderr
         // (it never enters the message).
-        if args.verbose
+        if verbose
             && !output.is_json()
             && !output.quiet
             && let Ok(diff) = diff::staged_diff_text().await
@@ -908,7 +954,16 @@ async fn resolve_final_message(
         {
             eprintln!("{diff}");
         }
-        cleanup_commit_message(&initial, mode)
+        // Git's `default` and `scissors` cleanup both carry an "if the message is
+        // edited" clause: `default` is strip-when-edited / whitespace-otherwise, and
+        // `scissors` truncates at the scissors marker only when edited. No editor
+        // opened here, so both resolve to whitespace (comment/scissors lines kept);
+        // every other mode is applied as-is.
+        let effective_mode = match mode {
+            CleanupMode::Default | CleanupMode::Scissors => CleanupMode::Whitespace,
+            other => other,
+        };
+        cleanup_commit_message(&initial, effective_mode)
     };
 
     if resolved.trim().is_empty() {
@@ -930,6 +985,7 @@ async fn resolve_final_message(
 async fn build_verbose_template(
     initial: &str,
     status_section: Option<&str>,
+    strips_comments: bool,
 ) -> Result<String, CommitError> {
     let diff = diff::staged_diff_text()
         .await
@@ -940,14 +996,22 @@ async fn build_verbose_template(
         buffer.push('\n');
     }
     buffer.push('\n');
-    buffer.push_str("# Please enter the commit message for your changes. Lines starting\n");
-    buffer.push_str("# with '#' will be ignored, and an empty message aborts the commit.\n");
-    // `--status`: commented status, above the scissors so it stays visible while
-    // editing (Git places the status section here too).
-    if let Some(section) = status_section {
-        buffer.push_str(section);
+    // The `#`-prefixed helper/status lines ABOVE the scissors marker would survive
+    // into the message under a cleanup mode that keeps comments (verbatim/whitespace/
+    // explicit scissors). Emit them ONLY when the effective cleanup strips comments,
+    // so a non-stripping `-v` commit cannot commit Libra's own template cruft. The
+    // scissors marker and the staged diff below it are always truncated away.
+    if strips_comments {
+        buffer.push_str("# Please enter the commit message for your changes. Lines starting\n");
+        buffer.push_str("# with '#' will be ignored, and an empty message aborts the commit.\n");
+        // `--status`: commented status, above the scissors so it stays visible
+        // while editing (Git places the status section here too). It is only ever
+        // `Some` when the cleanup strips comments, so it is gated here too.
+        if let Some(section) = status_section {
+            buffer.push_str(section);
+        }
+        buffer.push_str("#\n");
     }
-    buffer.push_str("#\n");
     buffer.push_str("# ------------------------ >8 ------------------------\n");
     buffer.push_str("# Do not modify or remove the line above.\n");
     buffer.push_str("# Everything below it will be ignored.\n");
@@ -1019,27 +1083,77 @@ fn commit_subject(message: &str) -> &str {
     message.lines().next().unwrap_or(message).trim()
 }
 
+/// Parse a `commit.cleanup` config value into a [`CleanupMode`], case-insensitively
+/// (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Returns `None` for an
+/// unrecognized value so the caller falls back to the built-in default.
+fn parse_cleanup_mode(value: &str) -> Option<CleanupMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "strip" => Some(CleanupMode::Strip),
+        "whitespace" => Some(CleanupMode::Whitespace),
+        "verbatim" => Some(CleanupMode::Verbatim),
+        "scissors" => Some(CleanupMode::Scissors),
+        "default" => Some(CleanupMode::Default),
+        _ => None,
+    }
+}
+
+/// Interpret a Git "bool-or-int" config value for `commit.verbose`: `true`/`yes`/
+/// `on` are `Some(true)` and `false`/`no`/`off` are `Some(false)`; an integer is
+/// truthy when non-zero (Git documents `commit.verbose` as boolean-or-int, where
+/// `0` is off and any positive level enables the verbose diff); any other value is
+/// `None` (invalid — Git treats a bad value as fatal). A present-but-empty value is
+/// not reachable here: the shared config reader maps it to "unset".
+fn parse_git_config_bool(value: &str) -> Option<bool> {
+    let v = value.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "true" | "yes" | "on" => Some(true),
+        "false" | "no" | "off" => Some(false),
+        _ => {
+            // Git bool-or-int: an integer with an optional case-insensitive
+            // `k`/`m`/`g` 1024-based multiplier suffix, truthy when non-zero.
+            let (digits, mult) = match v.as_bytes().last() {
+                Some(b'k') => (&v[..v.len() - 1], 1024_i64),
+                Some(b'm') => (&v[..v.len() - 1], 1024 * 1024),
+                Some(b'g') => (&v[..v.len() - 1], 1024 * 1024 * 1024),
+                _ => (v.as_str(), 1),
+            };
+            digits
+                .parse::<i64>()
+                .ok()
+                .and_then(|n| n.checked_mul(mult))
+                .map(|n| n != 0)
+        }
+    }
+}
+
+/// Truncate a message at the scissors marker (everything from the marker line
+/// onward is dropped). Accepts both a bare marker and Git's comment-prefixed form
+/// (`# ------------------------ >8 ...`), so the `commit -v` template (Git-standard
+/// `#` form) and the staged diff below it are removed.
+fn truncate_at_scissors(message: &str) -> String {
+    message
+        .lines()
+        .take_while(|line| {
+            !line
+                .trim()
+                .trim_start_matches('#')
+                .trim_start()
+                .starts_with("------------------------ >8 ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Apply Git-style cleanup to a commit message.
 fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String {
     match mode {
         CleanupMode::Verbatim => message.to_string(),
         CleanupMode::Scissors => {
-            // Truncate at the scissors marker. Accept both a bare marker and
-            // Git's comment-prefixed form (`# ------------------------ >8 ...`),
-            // so the `commit -v` template (which uses the Git-standard `#` form)
-            // is stripped along with the staged diff below it.
-            let trimmed = message
-                .lines()
-                .take_while(|line| {
-                    !line
-                        .trim()
-                        .trim_start_matches('#')
-                        .trim_start()
-                        .starts_with("------------------------ >8 ")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            cleanup_commit_message(&trimmed, CleanupMode::Strip)
+            // Git's `scissors` is whitespace cleanup PLUS truncation at the marker:
+            // the message above the marker keeps its `#` comment lines (unlike
+            // strip). The verbose path, which needs a post-truncation strip, calls
+            // `truncate_at_scissors` + `Strip` directly instead.
+            cleanup_commit_message(&truncate_at_scissors(message), CleanupMode::Whitespace)
         }
         CleanupMode::Whitespace => {
             let lines: Vec<String> = message
@@ -1722,6 +1836,41 @@ mod test {
     use tokio::{fs::File, io::AsyncWriteExt};
 
     use super::*;
+
+    #[test]
+    fn parse_git_config_bool_handles_bool_int_and_suffixes() {
+        // Boolean spellings.
+        for t in ["true", "yes", "on", "TRUE", "On"] {
+            assert_eq!(parse_git_config_bool(t), Some(true), "{t}");
+        }
+        for f in ["false", "no", "off", "FALSE"] {
+            assert_eq!(parse_git_config_bool(f), Some(false), "{f}");
+        }
+        // Bare integers: non-zero is truthy (Git bool-or-int).
+        assert_eq!(parse_git_config_bool("0"), Some(false));
+        assert_eq!(parse_git_config_bool("1"), Some(true));
+        assert_eq!(parse_git_config_bool("2"), Some(true));
+        // k/m/g 1024-multiplier suffixes (case-insensitive), non-zero -> true.
+        assert_eq!(parse_git_config_bool("1k"), Some(true));
+        assert_eq!(parse_git_config_bool("1K"), Some(true));
+        assert_eq!(parse_git_config_bool("0k"), Some(false));
+        // Invalid values are rejected (None -> the caller makes it fatal).
+        assert_eq!(parse_git_config_bool("garbage"), None);
+        assert_eq!(parse_git_config_bool("1x"), None);
+    }
+
+    #[test]
+    fn parse_cleanup_mode_is_case_insensitive_and_rejects_unknown() {
+        assert_eq!(parse_cleanup_mode("strip"), Some(CleanupMode::Strip));
+        assert_eq!(
+            parse_cleanup_mode("WHITESPACE"),
+            Some(CleanupMode::Whitespace)
+        );
+        assert_eq!(parse_cleanup_mode("verbatim"), Some(CleanupMode::Verbatim));
+        assert_eq!(parse_cleanup_mode("scissors"), Some(CleanupMode::Scissors));
+        assert_eq!(parse_cleanup_mode("default"), Some(CleanupMode::Default));
+        assert_eq!(parse_cleanup_mode("bogus"), None);
+    }
     use crate::utils::test::*;
 
     #[test]

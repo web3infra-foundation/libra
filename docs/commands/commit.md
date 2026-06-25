@@ -53,8 +53,14 @@ libra commit -e -m "Draft message"
 Show the staged diff in the editor template (below a scissors line, stripped on save) or, when
 no editor is opened, on stderr. The diff never enters the commit message.
 
+Setting the `commit.verbose` config to true makes `-v` the default (an explicit `-v` on the
+command line still forces it on). The value is a Git `bool-or-int`, so `commit.verbose=2` is
+accepted and enables verbose — but Libra's `-v` is on/off only: there is no `-vv` verbosity
+level (no unstaged-diff rendering) and no `--no-verbose` to force it off for a single commit.
+
 ```bash
 libra commit -v
+libra config commit.verbose true   # make -v the default
 ```
 
 ### `--no-edit`
@@ -162,10 +168,17 @@ libra commit --author "Jane Doe <jane@example.com>" -m "Patch"
 
 Clean up the commit message before committing. Accepted values: `strip` (default, removes
 commentary lines and trims whitespace), `whitespace` (only trims whitespace), `verbatim` (no
-cleanup), `scissors` (stops at scissors line), `default`.
+cleanup), `scissors` (whitespace cleanup plus truncation at the scissors line — the truncation
+only applies when the message is edited; on a non-editor `-m`/`-F` commit it behaves like
+`whitespace`, with no truncation), `default` (strip when the message is edited, otherwise
+whitespace).
+
+When `--cleanup` is not given, the `commit.cleanup` config value is used as the default (config
+cascade: local repo, then global); the CLI flag always takes precedence.
 
 ```bash
 libra commit --cleanup=strip -m "feat: add login"
+libra config commit.cleanup whitespace   # default cleanup when --cleanup is omitted
 ```
 
 ### `--dry-run`
@@ -198,9 +211,11 @@ omitting it, so `--status` opts in). Because the lines are comments, the message
 cleanup strips them — they are informational only and never enter the final
 commit message. This has no effect when no editor is opened (e.g. with `-m`).
 The status is also omitted under cleanup modes that keep comment lines
-(`--cleanup=verbatim` and `--cleanup=whitespace`, unless `-v` forces the
-scissors cleanup), so it can never leak into the message; it is seeded only when
-an editor opens and the effective cleanup strips comments. `--no-status` (the
+(`--cleanup=verbatim`, `--cleanup=whitespace`, and `--cleanup=scissors` — explicit
+scissors keeps `#` lines above the marker), so it can never leak into the message;
+it is seeded only when an editor opens and the effective cleanup strips comments
+(`strip`/`default`). `-v` only truncates the appended diff — it does not force a
+strip — so the status stays omitted under those modes even with `-v`. `--no-status` (the
 default) omits the status section. The two are a last-one-wins toggle.
 
 ```bash
