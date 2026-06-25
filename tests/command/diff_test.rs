@@ -1413,3 +1413,76 @@ fn test_diff_unified_zero_context_anchors_pure_insert_delete() {
         "second hunk anchors after the separator line (-2,0 +2,1):\n{s}"
     );
 }
+
+#[test]
+fn test_diff_ignore_all_space_drops_whitespace_only_and_rediffs() {
+    // `-w` ignores whitespace when comparing: a whitespace-only change is not
+    // reported (file drops out), context lines come from the new side, and
+    // counts/name/numstat all reflect the whitespace-ignored re-diff.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_f = |content: &str, msg: &str| {
+        std::fs::write(p.join("f.txt"), content).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+            "commit f",
+        );
+    };
+    let out =
+        |args: &[&str]| String::from_utf8_lossy(&run_libra_command(args, p).stdout).into_owned();
+
+    // 1) Whitespace-only change → plain diff shows it, `-w` shows nothing.
+    commit_f("alpha\nbeta\ngamma\n", "base1");
+    std::fs::write(p.join("f.txt"), "alpha   \n  beta\ngamma\t\n").unwrap();
+    assert!(
+        out(&["diff", "f.txt"]).contains("alpha"),
+        "plain diff shows the whitespace change"
+    );
+    assert!(
+        out(&["diff", "-w", "f.txt"]).trim().is_empty(),
+        "-w drops a whitespace-only change"
+    );
+    assert!(
+        out(&["diff", "-w", "--name-only", "f.txt"])
+            .trim()
+            .is_empty(),
+        "-w --name-only drops the whitespace-only file"
+    );
+
+    // 2) Whitespace-only context line + a real change → shown; context from new side.
+    commit_f("a  \nFOO\nc\n", "base2");
+    std::fs::write(p.join("f.txt"), "a\nBAR\nc\n").unwrap();
+    let w2 = out(&["diff", "-w", "f.txt"]);
+    assert!(
+        w2.contains("-FOO") && w2.contains("+BAR"),
+        "real change shown:\n{w2}"
+    );
+    assert!(
+        w2.contains("\n a\n"),
+        "context line shown from the new side (no trailing spaces):\n{w2}"
+    );
+    assert!(
+        !w2.contains("a  "),
+        "old-side trailing whitespace not shown:\n{w2}"
+    );
+
+    // 3) `-w` honors `-U0` (no context lines).
+    let w3 = out(&["diff", "-w", "-U0", "f.txt"]);
+    assert!(
+        w3.contains("-FOO") && w3.contains("+BAR"),
+        "-w -U0 shows the change:\n{w3}"
+    );
+    assert!(
+        !w3.contains("\n a\n") && !w3.contains("\n c\n"),
+        "-w -U0 emits no context lines:\n{w3}"
+    );
+
+    // 4) `--numstat` under `-w` counts only the real change (1 insertion, 1 deletion).
+    assert!(
+        out(&["diff", "-w", "--numstat", "f.txt"])
+            .lines()
+            .any(|l| l == "1\t1\tf.txt"),
+        "-w numstat counts only the real change"
+    );
+}

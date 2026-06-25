@@ -46,6 +46,7 @@ EXAMPLES:
     libra diff --stat src/                  Show diff statistics under src/
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
     libra diff -U0                          Patch with no surrounding context (default is 3)
+    libra diff -w                           Ignore whitespace-only changes
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra diff --cached --check             Warn about whitespace errors on added lines
@@ -107,6 +108,14 @@ pub struct DiffArgs {
     /// `--numstat` counts are unaffected; the `--json` hunk ranges/lines follow `<n>`.
     #[clap(short = 'U', long = "unified", value_name = "N")]
     pub unified: Option<usize>,
+
+    /// Ignore whitespace entirely when comparing lines: a change that is only
+    /// whitespace is not reported (the file drops out if that is its only change),
+    /// and context lines are shown from the new side. This re-diffs affected files,
+    /// so `--stat`/`--name-only`/`--numstat`/JSON all reflect the whitespace-ignored
+    /// result. Honors `-U<n>`.
+    #[clap(short = 'w', long = "ignore-all-space")]
+    pub ignore_all_space: bool,
 
     /// Show a condensed summary of created and deleted files
     #[clap(long)]
@@ -447,14 +456,18 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
 
     let mut files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
 
-    // `-U<n>` (when `n != 3`, git_internal's hard-coded default): regenerate each
-    // text file's hunk body at `n` context lines, reusing git_internal's header.
-    // The +/- lines are unchanged, so insertions/deletions are untouched; only
-    // the surrounding context (and the re-parsed `hunks`) change. Binary/large
-    // files (no hunk line) are left as-is by `rewrite_unified_diff_context`.
-    if let Some(context) = args.unified
-        && context != 3
-    {
+    // Post-pass regeneration (both reuse the blob text the diff closure cached —
+    // keyed by hash — with no re-load; the default path leaves git_internal's
+    // output untouched):
+    //   * `-w` re-diffs each text file ignoring whitespace, DROPS files whose only
+    //     change is whitespace, and recomputes that file's +/- counts (so
+    //     stat/name/numstat/JSON all reflect the whitespace-ignored result).
+    //   * `-U<n>` (when `n != 3`, git_internal's hard-coded default) regenerates
+    //     hunk bodies at `n` context lines; +/- lines are unchanged so counts are
+    //     untouched — only the surrounding context (and re-parsed `hunks`) change.
+    // `-w` honors `-U<n>` for its context width.
+    let regen_context = args.unified.unwrap_or(3);
+    if args.ignore_all_space || (args.unified.is_some() && regen_context != 3) {
         let blob_text = |map: &HashMap<PathBuf, ObjectHash>, path: &Path| -> String {
             let Some(hash) = map.get(path) else {
                 return String::new();
@@ -469,13 +482,45 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default()
         };
-        for file in files.iter_mut() {
-            let path = PathBuf::from(&file.path);
-            let old_text = blob_text(&first_map, &path);
-            let new_text = blob_text(&second_map, &path);
-            file.raw_diff =
-                rewrite_unified_diff_context(&file.raw_diff, &old_text, &new_text, context);
-            file.hunks = parse_diff_hunks(&file.raw_diff);
+        if args.ignore_all_space {
+            files.retain_mut(|file| {
+                // Binary / no-hunk diffs have no body to re-diff: keep as-is.
+                if !file.raw_diff.contains("\n@@ ") {
+                    return true;
+                }
+                let path = PathBuf::from(&file.path);
+                let old_text = blob_text(&first_map, &path);
+                let new_text = blob_text(&second_map, &path);
+                let body = compute_unified_hunks_normalized(
+                    &old_text,
+                    &new_text,
+                    regen_context,
+                    normalize_ignore_all_space,
+                );
+                // No real (non-whitespace) change → drop the file entirely.
+                if body.trim().is_empty() {
+                    return false;
+                }
+                let (insertions, deletions) = count_body_changes(&body);
+                file.insertions = insertions;
+                file.deletions = deletions;
+                file.raw_diff = splice_unified_body(&file.raw_diff, &body);
+                file.hunks = parse_diff_hunks(&file.raw_diff);
+                true
+            });
+        } else {
+            for file in files.iter_mut() {
+                let path = PathBuf::from(&file.path);
+                let old_text = blob_text(&first_map, &path);
+                let new_text = blob_text(&second_map, &path);
+                file.raw_diff = rewrite_unified_diff_context(
+                    &file.raw_diff,
+                    &old_text,
+                    &new_text,
+                    regen_context,
+                );
+                file.hunks = parse_diff_hunks(&file.raw_diff);
+            }
         }
     }
 
@@ -1068,13 +1113,21 @@ fn rewrite_unified_diff_context(
     new_text: &str,
     context: usize,
 ) -> String {
+    splice_unified_body(
+        raw_diff,
+        &compute_unified_hunks(old_text, new_text, context),
+    )
+}
+
+/// Replace a single file's hunk body with `body`, keeping git_internal's header
+/// (`diff --git` / mode / `index` / `---` / `+++`). A diff with no hunk line
+/// (binary marker or identical content) is returned unchanged.
+fn splice_unified_body(raw_diff: &str, body: &str) -> String {
     // The header runs up to and including the newline before the first hunk.
     let Some(nl_before_hunk) = raw_diff.find("\n@@ ") else {
         return raw_diff.to_string();
     };
-    let header = &raw_diff[..=nl_before_hunk];
-    let body = compute_unified_hunks(old_text, new_text, context);
-    format!("{header}{body}")
+    format!("{}{}", &raw_diff[..=nl_before_hunk], body)
 }
 
 /// Internal representation of diff lines used while assembling unified hunks.
@@ -1096,8 +1149,90 @@ fn compute_unified_hunks(old_text: &str, new_text: &str, context: usize) -> Stri
     let diff = TextDiff::configure()
         .algorithm(Algorithm::Myers)
         .diff_lines(old_text, new_text);
+    let changes: Vec<(ChangeTag, &str)> = diff
+        .iter_all_changes()
+        .map(|c| (c.tag(), c.value().trim_end_matches(['\r', '\n'])))
+        .collect();
+    assemble_unified_hunks(&changes, context, old_text.len() + new_text.len())
+}
 
-    let mut out = String::with_capacity(((old_text.len() + new_text.len()) / 16).max(256));
+/// Normalizer for `-w` / `--ignore-all-space`: drop every whitespace character
+/// so two lines compare equal iff they match after all whitespace is removed.
+fn normalize_ignore_all_space(line: &str) -> String {
+    line.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Compute the unified-diff hunk body for `old_text` vs `new_text` at `context`
+/// lines, comparing lines through `normalize` (e.g. whitespace-insensitive for
+/// `-w`) while EMITTING the original line text. Returns an empty string when the
+/// two sides are equal under `normalize` (so the caller drops the file, matching
+/// `git diff -w`). Context lines are emitted from the new (post-image) side, as
+/// Git does; deletes from the old side, inserts from the new side.
+fn compute_unified_hunks_normalized(
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+    normalize: fn(&str) -> String,
+) -> String {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let old_norm: Vec<String> = old_lines.iter().map(|l| normalize(l)).collect();
+    let new_norm: Vec<String> = new_lines.iter().map(|l| normalize(l)).collect();
+    // `diff_slices` compares `&[&str]` elements; borrow the normalized strings.
+    let old_norm_ref: Vec<&str> = old_norm.iter().map(String::as_str).collect();
+    let new_norm_ref: Vec<&str> = new_norm.iter().map(String::as_str).collect();
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_slices(&old_norm_ref, &new_norm_ref);
+    let mut changes: Vec<(ChangeTag, &str)> = Vec::with_capacity(old_lines.len() + new_lines.len());
+    for change in diff.iter_all_changes() {
+        let tag = change.tag();
+        let text = match tag {
+            ChangeTag::Delete => change.old_index().map(|i| old_lines[i]).unwrap_or(""),
+            ChangeTag::Insert => change.new_index().map(|i| new_lines[i]).unwrap_or(""),
+            // Context: both sides are equal under `normalize`; Git emits the
+            // post-image (new) line, falling back to the old side.
+            ChangeTag::Equal => change
+                .new_index()
+                .map(|i| new_lines[i])
+                .or_else(|| change.old_index().map(|i| old_lines[i]))
+                .unwrap_or(""),
+        };
+        changes.push((tag, text));
+    }
+    assemble_unified_hunks(&changes, context, old_text.len() + new_text.len())
+}
+
+/// Count added (`+`) and removed (`-`) lines in a unified-diff hunk BODY (no file
+/// header). Used to recompute per-file insertion/deletion counts after a `-w`
+/// re-diff drops whitespace-only changes. Hunk headers (`@@`) and context lines
+/// (leading space) are ignored.
+fn count_body_changes(body: &str) -> (usize, usize) {
+    let mut insertions = 0;
+    let mut deletions = 0;
+    for line in body.lines() {
+        match line.as_bytes().first() {
+            Some(b'+') => insertions += 1,
+            Some(b'-') => deletions += 1,
+            _ => {}
+        }
+    }
+    (insertions, deletions)
+}
+
+/// Assemble a unified-diff hunk body (the `@@ … @@` blocks, no file header) from
+/// an ordered edit list of `(tag, line)` pairs at `context` lines of surrounding
+/// context — a context-parameterized port of git_internal's private
+/// `compute_unified_diff` rolling-context assembler. Shared by the plain `-U<n>`
+/// path (lines from a normal line diff) and the whitespace-ignoring `-w` path
+/// (the diff is computed on a normalized view but the ORIGINAL line text is
+/// emitted). `size_hint` is the combined input length for output preallocation.
+fn assemble_unified_hunks(
+    changes: &[(ChangeTag, &str)],
+    context: usize,
+    size_hint: usize,
+) -> String {
+    let mut out = String::with_capacity((size_hint / 16).max(256));
     // Not `with_capacity(context)`: `context` is caller-supplied (`-U<n>`) and may
     // be arbitrarily large; preallocating it would let `-U99999999999` OOM/panic.
     let mut prefix_ctx: VecDeque<UnifiedEditLine> = VecDeque::new();
@@ -1109,9 +1244,8 @@ fn compute_unified_hunks(old_text: &str, new_text: &str, context: usize) -> Stri
     let mut old_line_no = 1usize;
     let mut new_line_no = 1usize;
 
-    for change in diff.iter_all_changes() {
-        let line = change.value().trim_end_matches(['\r', '\n']);
-        match change.tag() {
+    for &(tag, line) in changes {
+        match tag {
             ChangeTag::Equal => {
                 let entry = UnifiedEditLine::Context(Some(old_line_no), Some(new_line_no), line);
                 if in_hunk {
@@ -1307,6 +1441,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         numstat: false,
         stat: false,
         unified: None,
+        ignore_all_space: false,
         summary: false,
         shortstat: false,
         exit_code: false,

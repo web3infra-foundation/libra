@@ -36,6 +36,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
 | Context lines | `-U<n>` | `--unified=<n>` | Number of context lines around each change in the patch (default 3). Changes only the surrounding context, not the `+`/`-` lines, so `--stat`/`--name-only`/`--numstat` counts are unaffected; the `--json` hunk ranges and line arrays follow `<n>`. |
+| Ignore whitespace | `-w` | `--ignore-all-space` | Ignore all whitespace when comparing lines. A change that is only whitespace is not reported (the file drops out if that is its only change); context lines are shown from the new side. Affected files are re-diffed, so `--stat`/`--name-only`/`--numstat`/JSON all reflect the whitespace-ignored result. Honors `-U<n>`. |
 | Shortstat | | `--shortstat` | Show only the trailing summary line of `--stat` (files changed / insertions / deletions), omitting a clause when its count is zero. |
 | Summary | | `--summary` | Show a condensed summary of created and deleted files (no line for plain content edits). Libra's diff does not detect renames (shown as delete + create) or surface mode-only changes. |
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
@@ -132,6 +133,9 @@ libra diff --stat src/
 # Patch with a different amount of context (0, or more than the default 3)
 libra diff -U0
 libra diff --unified=5 src/main.rs
+
+# Ignore whitespace-only changes (re-indentation shows nothing)
+libra diff -w
 
 # Save diff to a file
 libra diff --output my.patch
@@ -246,7 +250,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
 | Binary diff (binary patch) | Not supported | `--binary` | N/A |
 | Context lines | `-U<n>` / `--unified=<n>` (default 3) | `-U<n>` / `--unified=<n>` | `--context <n>` |
-| Ignore whitespace | Not supported | `-w` / `--ignore-all-space` | N/A |
+| Ignore whitespace | `-w` / `--ignore-all-space` | `-w` / `--ignore-all-space` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
 | Disallow external diff | `--no-ext-diff` (no-op; always built-in) | `--no-ext-diff` | N/A |
 | External diff tool | Not supported | `--ext-diff` / `diff.external` | `--tool <name>` |
