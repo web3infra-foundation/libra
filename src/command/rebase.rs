@@ -630,6 +630,7 @@ EXAMPLES:
     libra rebase --autosquash main Fold fixup!/squash! commits while replaying
     libra rebase --reapply-cherry-picks main
     libra rebase --onto main dev  Replay dev..HEAD onto main, keeping the upstream range
+    libra rebase --keep-empty main Keep empty commits while replaying (Libra's default)
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
     libra rebase --abort          Restore the original branch and clear rebase state
@@ -685,6 +686,16 @@ pub struct RebaseArgs {
     /// update. (Git's opposite `--rerere-autoupdate` is not exposed.)
     #[clap(long = "no-rerere-autoupdate")]
     pub no_rerere_autoupdate: bool,
+
+    /// Keep commits that begin empty (already empty before replay) rather than
+    /// dropping them. Accepted for Git parity and is a no-op: Libra's rebase
+    /// already keeps empty commits by default, so this matches existing behavior.
+    /// (The reverse `--no-keep-empty` — drop commits that start empty — is not
+    /// implemented; nor is `--empty=drop`, the distinct flag that drops commits
+    /// which *become* empty after replay. Both need empty-commit detection in the
+    /// replay engine.)
+    #[clap(long = "keep-empty")]
+    pub keep_empty: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
