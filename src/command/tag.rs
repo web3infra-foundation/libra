@@ -444,14 +444,14 @@ fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
 
 #[cfg(test)]
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
-    if let Err(err) = create_tag_safe(tag_name, message, force).await {
+    if let Err(err) = Box::pin(create_tag_safe(tag_name, message, force)).await {
         err.print_stderr();
     }
 }
 
 #[cfg(test)]
 async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
-    run_create_tag(tag_name, message, force, false)
+    Box::pin(run_create_tag(tag_name, message, force, false))
         .await
         .map(|_| ())
         .map_err(CliError::from)?;
@@ -680,7 +680,7 @@ async fn collect_tags(
     merged: Option<&ObjectHash>,
     no_merged: Option<&ObjectHash>,
 ) -> Result<Vec<TagListEntry>, TagError> {
-    let tags = tag::list().await.map_err(TagError::ListFailed)?;
+    let tags = Box::pin(tag::list()).await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
         // `tag -l <pattern>` keeps only tags whose name matches the fnmatch glob.
@@ -966,7 +966,7 @@ async fn resolve_tag_ref_for_delete(tag_name: &str) -> Result<tag::TagReference,
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, future::Future};
 
     use git_internal::internal::object::types::ObjectType;
     use sea_orm::DbErr;
@@ -1025,99 +1025,133 @@ mod tests {
         (temp_dir, guard)
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn test_create_and_list_lightweight_tag() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-light", None, false).await;
-        let tags = tag::list().await.unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].name, "v1.0-light");
-        assert_eq!(tags[0].object.get_type(), ObjectType::Commit);
+    fn run_async_tag_test<F, Fut>(body: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        std::thread::Builder::new()
+            .name("tag-test-runtime".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build tag test runtime");
+                runtime.block_on(body());
+            })
+            .expect("failed to spawn tag test thread")
+            .join()
+            .expect("tag test thread panicked");
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_create_and_list_lightweight_tag_force() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-light", None, false).await;
-        create_tag("v1.0-light", None, true).await;
-        let tags = tag::list().await.unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].name, "v1.0-light");
-        assert_eq!(tags[0].object.get_type(), ObjectType::Commit);
+    fn test_create_and_list_lightweight_tag() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-light", None, false).await;
+            let tags = Box::pin(tag::list()).await.unwrap();
+            assert_eq!(tags.len(), 1);
+            assert_eq!(tags[0].name, "v1.0-light");
+            assert_eq!(tags[0].object.get_type(), ObjectType::Commit);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_create_and_list_annotated_tag() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
-        let tags = tag::list().await.unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].name, "v1.0-annotated");
-        assert_eq!(tags[0].object.get_type(), ObjectType::Tag);
+    fn test_create_and_list_lightweight_tag_force() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-light", None, false).await;
+            create_tag("v1.0-light", None, true).await;
+            let tags = Box::pin(tag::list()).await.unwrap();
+            assert_eq!(tags.len(), 1);
+            assert_eq!(tags[0].name, "v1.0-light");
+            assert_eq!(tags[0].object.get_type(), ObjectType::Commit);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_create_and_list_annotated_tag_force() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
-        create_tag("v1.0-annotated", Some("Release v2.0".to_string()), true).await;
-        let tags = tag::list().await.unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].name, "v1.0-annotated");
-        assert_eq!(tags[0].object.get_type(), ObjectType::Tag);
-
-        // Check message
-        let result = tag::find_tag_and_commit("v1.0-annotated").await;
-        assert!(result.is_ok());
-        let (object, _) = result.unwrap().unwrap();
-        if let tag::TagObject::Tag(tag_object) = object {
-            assert_eq!(tag_object.message, "Release v2.0");
-        }
+    fn test_create_and_list_annotated_tag() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
+            let tags = Box::pin(tag::list()).await.unwrap();
+            assert_eq!(tags.len(), 1);
+            assert_eq!(tags[0].name, "v1.0-annotated");
+            assert_eq!(tags[0].object.get_type(), ObjectType::Tag);
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_show_lightweight_tag() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-light", None, false).await;
-        let result = tag::find_tag_and_commit("v1.0-light").await;
-        assert!(result.is_ok());
-        let (object, commit) = result.unwrap().unwrap();
-        assert_eq!(object.get_type(), ObjectType::Commit);
-        assert_eq!(commit.message.trim(), "Initial commit");
+    fn test_create_and_list_annotated_tag_force() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
+            create_tag("v1.0-annotated", Some("Release v2.0".to_string()), true).await;
+            let tags = Box::pin(tag::list()).await.unwrap();
+            assert_eq!(tags.len(), 1);
+            assert_eq!(tags[0].name, "v1.0-annotated");
+            assert_eq!(tags[0].object.get_type(), ObjectType::Tag);
+
+            // Check message
+            let result = tag::find_tag_and_commit("v1.0-annotated").await;
+            assert!(result.is_ok());
+            let (object, _) = result.unwrap().unwrap();
+            if let tag::TagObject::Tag(tag_object) = object {
+                assert_eq!(tag_object.message, "Release v2.0");
+            }
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_show_annotated_tag() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0-annotated", Some("Test message".to_string()), false).await;
-        let result = tag::find_tag_and_commit("v1.0-annotated").await;
-        assert!(result.is_ok());
-        let (object, commit) = result.unwrap().unwrap();
-        assert_eq!(object.get_type(), ObjectType::Tag);
-        assert_eq!(commit.message.trim(), "Initial commit");
-
-        // Verify tag object content directly from the TagObject enum
-        if let tag::TagObject::Tag(tag_object) = object {
-            assert_eq!(tag_object.message, "Test message");
-        } else {
-            panic!("Expected Tag object type");
-        }
+    fn test_show_lightweight_tag() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-light", None, false).await;
+            let result = tag::find_tag_and_commit("v1.0-light").await;
+            assert!(result.is_ok());
+            let (object, commit) = result.unwrap().unwrap();
+            assert_eq!(object.get_type(), ObjectType::Commit);
+            assert_eq!(commit.message.trim(), "Initial commit");
+        });
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_delete_tag() {
-        let (_temp_dir, _guard) = setup_repo_with_commit().await;
-        create_tag("v1.0", None, false).await;
-        delete_tag("v1.0").await;
-        let tags = tag::list().await.unwrap();
-        assert!(tags.is_empty());
+    fn test_show_annotated_tag() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0-annotated", Some("Test message".to_string()), false).await;
+            let result = tag::find_tag_and_commit("v1.0-annotated").await;
+            assert!(result.is_ok());
+            let (object, commit) = result.unwrap().unwrap();
+            assert_eq!(object.get_type(), ObjectType::Tag);
+            assert_eq!(commit.message.trim(), "Initial commit");
+
+            // Verify tag object content directly from the TagObject enum
+            if let tag::TagObject::Tag(tag_object) = object {
+                assert_eq!(tag_object.message, "Test message");
+            } else {
+                panic!("Expected Tag object type");
+            }
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_delete_tag() {
+        run_async_tag_test(|| async {
+            let (_temp_dir, _guard) = Box::pin(setup_repo_with_commit()).await;
+            create_tag("v1.0", None, false).await;
+            delete_tag("v1.0").await;
+            let tags = Box::pin(tag::list()).await.unwrap();
+            assert!(tags.is_empty());
+        });
     }
 
     #[test]

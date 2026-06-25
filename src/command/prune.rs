@@ -144,12 +144,17 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
 
     let objects_dir = path::objects();
     let objects_dir_existed = objects_dir.exists();
+    let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
+    if args.dry_run && !objects_dir_existed {
+        render_prune_json(&PrunePlan { prunable: vec![] }, &args, output)?;
+        return Ok(());
+    }
+
     let storage = if args.dry_run {
         ClientStorage::init_local(objects_dir.clone())
     } else {
         ClientStorage::init(objects_dir.clone())
     };
-    let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
 
     let (reachable, protected) = collect_reachable_objects(&storage, &args.heads).await?;
     let packed = collect_packed_objects(&storage).await?;
@@ -166,27 +171,33 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
     let should_report = (args.verbose || args.dry_run) && (!output.is_json() && !output.quiet);
     apply_prune_plan(&plan, &storage, args.dry_run, should_report).await?;
 
-    if output.is_json() {
-        let prune_output = PruneOutput {
-            objects: plan
-                .prunable
-                .iter()
-                .map(|info| PruneObjectInfo {
-                    object_id: info.hash.to_string(),
-                    object_type: info.obj_type.to_string(),
-                })
-                .collect(),
-            expire: args.expire,
-            heads: args.heads,
-            dry_run: args.dry_run,
-            verbose: args.verbose,
-        };
-        emit_json_data("prune", &prune_output, output)?;
-    }
+    render_prune_json(&plan, &args, output)?;
 
     cleanup_dry_run_objects_dir(args.dry_run, objects_dir_existed, &objects_dir)?;
 
     Ok(())
+}
+
+fn render_prune_json(plan: &PrunePlan, args: &PruneArgs, output: &OutputConfig) -> CliResult<()> {
+    if !output.is_json() {
+        return Ok(());
+    }
+
+    let prune_output = PruneOutput {
+        objects: plan
+            .prunable
+            .iter()
+            .map(|info| PruneObjectInfo {
+                object_id: info.hash.to_string(),
+                object_type: info.obj_type.to_string(),
+            })
+            .collect(),
+        expire: args.expire.clone(),
+        heads: args.heads.clone(),
+        dry_run: args.dry_run,
+        verbose: args.verbose,
+    };
+    emit_json_data("prune", &prune_output, output)
 }
 
 fn cleanup_dry_run_objects_dir(

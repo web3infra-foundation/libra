@@ -62,6 +62,13 @@ impl LocalStorage {
         }
     }
 
+    pub fn new_without_create(base_path: PathBuf) -> Self {
+        Self {
+            base_path,
+            hash_kind: Some(get_hash_kind()),
+        }
+    }
+
     /// Transforms an object hash into a path like "ab/cdef...". This is used for loose objects.
     fn transform_path(&self, hash: &ObjectHash) -> String {
         let hash = hash.to_string();

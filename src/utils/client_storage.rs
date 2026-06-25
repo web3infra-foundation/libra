@@ -177,9 +177,10 @@ impl ClientStorage {
     ///
     /// This bypasses remote/tiered storage configuration entirely. Use it for
     /// read-only scans that must not promote remote objects into the local object
-    /// directory, such as `gc --dry-run`.
+    /// directory, such as `gc --dry-run`. The local backend is non-creating so
+    /// preview scans do not create a missing `.libra/objects` directory.
     pub fn init_local(base_path: PathBuf) -> ClientStorage {
-        let storage = Arc::new(LocalStorage::new(base_path.clone()));
+        let storage = Arc::new(LocalStorage::new_without_create(base_path.clone()));
         ClientStorage { storage, base_path }
     }
 

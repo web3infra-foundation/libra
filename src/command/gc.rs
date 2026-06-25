@@ -458,12 +458,14 @@ async fn expire_reflogs_for_gc(
     };
 
     for ref_name in refs {
+        let parent_storage = storage.clone();
+        let commit_storage = storage.clone();
         let result = expire_reflog(
             &db,
             &ref_name,
             &options,
-            gc_load_commit_parents,
-            gc_oid_is_commit,
+            move |oid| gc_load_commit_parents(&parent_storage, oid),
+            move |oid| gc_oid_is_commit(&commit_storage, oid),
         )
         .await
         .map_err(map_gc_reflog_error)?;
@@ -542,9 +544,9 @@ fn reflog_parent_traversal_warning(storage: &ClientStorage, tips: &[ObjectHash])
 }
 
 /// Load commit parents for reflog reachability expiration.
-fn gc_load_commit_parents(oid: &str) -> Option<Vec<String>> {
+fn gc_load_commit_parents(storage: &ClientStorage, oid: &str) -> Option<Vec<String>> {
     let hash = ObjectHash::from_str(oid).ok()?;
-    let commit: Commit = load_object_for_gc(&hash).ok()?;
+    let commit: Commit = load_object_from_storage(storage, &hash).ok()?;
     Some(
         commit
             .parent_commit_ids
@@ -555,10 +557,10 @@ fn gc_load_commit_parents(oid: &str) -> Option<Vec<String>> {
 }
 
 /// Return whether a reflog object ID still loads as a commit.
-fn gc_oid_is_commit(oid: &str) -> bool {
+fn gc_oid_is_commit(storage: &ClientStorage, oid: &str) -> bool {
     ObjectHash::from_str(oid)
         .ok()
-        .is_some_and(|hash| load_object_for_gc::<Commit>(&hash).is_ok())
+        .is_some_and(|hash| load_object_from_storage::<Commit>(storage, &hash).is_ok())
 }
 
 /// Convert reflog-expiration failures into GC CLI errors.
@@ -2003,15 +2005,6 @@ where
 {
     let data = storage.get(hash)?;
     T::from_bytes(&data, *hash)
-}
-
-/// Load one object through the GC-local storage backend.
-fn load_object_for_gc<T>(hash: &ObjectHash) -> Result<T, GitError>
-where
-    T: ObjectTrait,
-{
-    let storage = ClientStorage::init(path::objects());
-    load_object_from_storage(&storage, hash)
 }
 
 /// Convert an object-load failure into a repository-corruption CLI error.
