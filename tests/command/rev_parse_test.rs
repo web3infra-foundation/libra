@@ -658,3 +658,127 @@ fn test_rev_parse_sq_single_quotes_resolved_object() {
         "query modes must not be shell-quoted: {path:?}"
     );
 }
+
+#[test]
+fn test_rev_parse_symbolic_full_name() {
+    // `--symbolic-full-name` resolves a spec to its full ref name (refs/heads,
+    // refs/tags, or HEAD's branch), prints nothing for a valid non-ref object, and
+    // fails with exit 128 for an unresolvable name — matching git rev-parse.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let head_branch = String::from_utf8_lossy(
+        &run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], p).stdout,
+    )
+    .trim()
+    .to_string();
+    let full = format!("refs/heads/{head_branch}");
+
+    let out = |args: &[&str]| {
+        let o = run_libra_command(args, p);
+        (
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            o.status.code(),
+        )
+    };
+
+    // HEAD -> its branch's full name.
+    let (v, code) = out(&["rev-parse", "--symbolic-full-name", "HEAD"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, full, "HEAD resolves to its full branch ref");
+
+    // A bare branch name -> refs/heads/<name>.
+    let (v, _) = out(&["rev-parse", "--symbolic-full-name", &head_branch]);
+    assert_eq!(v, full);
+
+    // refs/heads/<name> is returned verbatim.
+    let (v, _) = out(&["rev-parse", "--symbolic-full-name", &full]);
+    assert_eq!(v, full);
+
+    // A tag -> refs/tags/<name>.
+    assert_cli_success(&run_libra_command(&["tag", "v9.9"], p), "create tag v9.9");
+    let (v, code) = out(&["rev-parse", "--symbolic-full-name", "v9.9"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, "refs/tags/v9.9");
+
+    // A valid object that is not a ref (the commit SHA) prints nothing, exit 0 —
+    // byte-exact empty stdout (not even a trailing newline).
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    let commit_out = run_libra_command(&["rev-parse", "--symbolic-full-name", &sha], p);
+    assert_eq!(commit_out.status.code(), Some(0));
+    assert!(
+        commit_out.stdout.is_empty(),
+        "a non-ref commit object emits no bytes: {:?}",
+        String::from_utf8_lossy(&commit_out.stdout)
+    );
+
+    // A raw tree object id (not a ref) also prints nothing, exit 0.
+    let tree_sha =
+        String::from_utf8_lossy(&run_libra_command(&["cat-file", "-p", "HEAD"], p).stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("tree ").map(|s| s.trim().to_string()))
+            .expect("HEAD commit lists a tree");
+    let tree_out = run_libra_command(&["rev-parse", "--symbolic-full-name", &tree_sha], p);
+    assert_eq!(tree_out.status.code(), Some(0));
+    assert!(
+        tree_out.stdout.is_empty(),
+        "a raw tree object id emits no bytes: {:?}",
+        String::from_utf8_lossy(&tree_out.stdout)
+    );
+
+    // An unresolvable spec fails with exit 128 (git's "ambiguous argument").
+    let (_, code) = out(&["rev-parse", "--symbolic-full-name", "definitely-not-a-ref"]);
+    assert_eq!(code, Some(128), "unresolvable spec exits 128");
+
+    // A malformed revision expression the strict parser rejects is unresolvable
+    // (exit 128) — it must NOT be permissively re-resolved to empty/exit 0.
+    let (_, code) = out(&["rev-parse", "--symbolic-full-name", "HEAD^garbage"]);
+    assert_eq!(code, Some(128), "malformed peel/navigation spec exits 128");
+
+    // Detached HEAD -> "HEAD".
+    assert_cli_success(
+        &run_libra_command(&["checkout", &sha], p),
+        "detach HEAD at the commit",
+    );
+    let (v, code) = out(&["rev-parse", "--symbolic-full-name", "HEAD"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, "HEAD", "detached HEAD resolves to literal HEAD");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rev_parse_symbolic_full_name_remote_tracking_ref() {
+    // A remote-tracking spec resolves to its full `refs/remotes/<remote>/<branch>`.
+    let repo = tempdir().expect("failed to create repository root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let head = Head::current_commit().await.expect("expected HEAD commit");
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .expect("failed to create remote-tracking ref");
+
+    let output = run_libra_command(
+        &["rev-parse", "--symbolic-full-name", "origin/main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "rev-parse --symbolic-full-name origin/main");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "refs/remotes/origin/main"
+    );
+}

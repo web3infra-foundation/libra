@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 revision 解析、`--short[=<n>]`、`--abbrev-ref`、`--show-toplevel`、`--verify`/`--default`、`--sq`（对解析出的对象名做 shell 引用）及仓库状态查询（`--show-prefix`/`--show-cdup`/`--is-inside-work-tree`/`--is-inside-git-dir`/`--is-bare-repository`/`--git-dir`/`--absolute-git-dir`）已支持；其余输出过滤（`--symbolic`/`--flags`/`--abbrev=<n>`）和 parseopt 子模式尚未公开。
+- 兼容级别：`partial`。基础 revision 解析、`--short[=<n>]`、`--abbrev-ref`、`--symbolic-full-name`（将 spec 解析为完整 ref 名：`refs/heads/…`/`refs/tags/…`/`refs/remotes/…`，分离 HEAD 输出 `HEAD`；有效但非 ref 的对象不输出且退出码 0，不可解析名退出码 128——Libra 在 stderr 报错而非像 git 那样把 spec 回显到 stdout）、`--show-toplevel`、`--verify`/`--default`、`--sq`（对解析出的对象名做 shell 引用）及仓库状态查询（`--show-prefix`/`--show-cdup`/`--is-inside-work-tree`/`--is-inside-git-dir`/`--is-bare-repository`/`--git-dir`/`--absolute-git-dir`）已支持；其余输出过滤（`--symbolic`/`--flags`/`--abbrev=<n>`）和 parseopt 子模式尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -55,7 +55,8 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | ✅ 已实现（仓库状态查询） | `--show-toplevel`、`--show-prefix`、`--show-cdup`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir`、`--absolute-git-dir` 均已支持。 | `--is-inside-git-dir` 带单元测试与集成测试（worktree→`false`，`.libra` 内→`true`）；`--absolute-git-dir` 带集成测试（绝对路径、以 `.libra` 结尾、与 `--git-dir` 一致、与 `--git-dir` 互斥）。 |
-| 输出过滤 | Git `--symbolic`、`--symbolic-full-name`、`--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>` 等输出/过滤选项。（`--short[=<n>]` 与 `--sq` 已实现，不再列为缺口。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| ✅ 已实现（部分输出过滤） | `--symbolic-full-name`（spec → 完整 ref 名；`resolve_symbolic_full_name`：HEAD→分支全名/分离时 `HEAD`，分支→`refs/heads/…`，tag→`refs/tags/…`，远程跟踪→`refs/remotes/…`；有效非 ref 对象→空输出退出 0：先试 commit-ish（`get_commit_base_typed`，并按 `CommitBaseError` 区分 ReadFailure/CorruptReference 透传正确错误码），再按任意类型对象 id 查存储（`ClientStorage::search_result`，覆盖 tree/blob/tag 原始 SHA）；不可解析→fatal 退出 128）已实现，带集成测试 `test_rev_parse_symbolic_full_name` 与解析冲突单元测试（与全部仓库查询模式互斥）。 | 与 git 的有意/既有差异：①不可解析 spec 不回显到 stdout（git 会回显），改为 stderr 报错+退出 128；②`^{tree}`/`^{commit}` 等剥离到非 commit 对象的 revision 语法 → 退出 128（libra rev-parse 的 revision 解析器本就不支持剥离到非 commit 类型，全命令共有，非本 flag 引入）。原始 tree/blob/commit SHA 与 ref 名均与 git 一致。 |
+| 输出过滤（仍缺口） | Git `--symbolic`（更宽松、保留缩写形式，与 `--symbolic-full-name` 不同）、`--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>` 等输出/过滤选项。（`--short[=<n>]`、`--sq`、`--abbrev-ref`、`--symbolic-full-name` 已实现，不再列为缺口。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 参数解析模式 | Git `--parseopt`、`--keep-dashdash`、`--stuck-long`、`--sq-quote` 等 `--parseopt` 子模式；当前未实现。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 
 ## 维护要求

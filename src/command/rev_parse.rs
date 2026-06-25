@@ -11,10 +11,13 @@ use crate::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
         head::Head,
+        tag,
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        path,
         text::SHORT_HASH_LEN,
         util::{self, CommitBaseError},
     },
@@ -35,6 +38,7 @@ EXAMPLES:
     libra rev-parse --short HEAD        Print a non-ambiguous short hash
     libra rev-parse --sq HEAD           Print the resolved object name, shell-quoted
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
+    libra rev-parse --symbolic-full-name HEAD  Print HEAD's full ref name (refs/heads/...)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
@@ -53,6 +57,12 @@ pub struct RevParseArgs {
     /// Show the branch name instead of the commit hash.
     #[clap(long = "abbrev-ref", conflicts_with_all = ["show_toplevel", "short"])]
     pub abbrev_ref: bool,
+
+    /// Resolve SPEC to its full ref name (`refs/heads/…` / `refs/tags/…` /
+    /// `refs/remotes/…`, or `HEAD` when detached). A valid object that is not a
+    /// ref prints nothing (exit 0); an unresolvable name fails (exit 128).
+    #[clap(long = "symbolic-full-name", conflicts_with_all = ["show_toplevel", "short", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir", "show_prefix", "show_cdup"])]
+    pub symbolic_full_name: bool,
 
     /// Show the absolute path of the top-level working tree.
     #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec"])]
@@ -142,7 +152,8 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
                 return Err(CliError::fatal(format!(
                     "Needed a single revision (could not resolve '{spec}')"
                 ))
-                .with_exit_code(128));
+                .with_exit_code(128)
+                .with_stable_code(StableErrorCode::CliInvalidTarget));
             }
             return Err(error);
         }
@@ -151,6 +162,10 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
     if output.is_json() {
         emit_json_data("rev-parse", &result, output)
     } else if output.quiet {
+        Ok(())
+    } else if result.mode == "symbolic_full_name" && result.value.is_empty() {
+        // `--symbolic-full-name` of a valid object that is not a ref prints
+        // nothing at all (not even a blank line), matching Git.
         Ok(())
     } else {
         let stdout = std::io::stdout();
@@ -299,6 +314,15 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
+    if args.symbolic_full_name {
+        let value = resolve_symbolic_full_name(spec).await?;
+        return Ok(RevParseOutput {
+            mode: "symbolic_full_name",
+            input: Some(spec.to_string()),
+            value,
+        });
+    }
+
     let commit = util::get_commit_base_typed(spec)
         .await
         .map_err(|err| rev_parse_target_error(spec, err))?;
@@ -384,6 +408,150 @@ async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<
     }
 
     Ok(false)
+}
+
+/// Resolve `spec` to its full ref name for `--symbolic-full-name`, in Git's
+/// precedence (branch → tag → remote-tracking). `HEAD` yields the branch it points
+/// to (or `"HEAD"` when detached). A valid object that is not a ref yields an empty
+/// string (Git prints nothing, exit 0); a name that is neither a ref nor a valid
+/// object is an unresolvable spec (fatal, exit 128).
+async fn resolve_symbolic_full_name(spec: &str) -> CliResult<String> {
+    if spec == "HEAD" {
+        return match Head::current_result().await {
+            Ok(Head::Branch(name)) => Ok(format!("refs/heads/{name}")),
+            Ok(Head::Detached(_)) => Ok("HEAD".to_string()),
+            Err(error) => Err(map_head_resolution_error(error)),
+        };
+    }
+
+    // A fully-qualified ref that exists is returned verbatim.
+    if let Some(branch_name) = spec.strip_prefix("refs/heads/")
+        && Branch::find_branch_result(branch_name, None)
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
+    {
+        return Ok(spec.to_string());
+    }
+    if let Some(tag_name) = spec.strip_prefix("refs/tags/")
+        && find_tag_ref_named(spec, tag_name).await?
+    {
+        return Ok(spec.to_string());
+    }
+    if let Some(short_name) = spec.strip_prefix("refs/remotes/")
+        && let Some(full) = resolve_remote_tracking_full(spec, short_name).await?
+    {
+        return Ok(full);
+    }
+
+    // Short forms, in Git's precedence: branch, then tag, then remote-tracking.
+    if let Some(branch) = Branch::find_branch_result(spec, None)
+        .await
+        .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+    {
+        return Ok(format!("refs/heads/{}", branch.name));
+    }
+    if find_tag_ref_named(spec, spec).await? {
+        return Ok(format!("refs/tags/{spec}"));
+    }
+    if let Some(full) = resolve_remote_tracking_full(spec, spec).await? {
+        return Ok(full);
+    }
+
+    // Not a ref. A valid object prints nothing (exit 0); a genuine read/corruption
+    // failure propagates with its own code; anything else is an unresolvable spec
+    // (fatal, exit 128). First try a commit-ish revision expression (HEAD~3, main^,
+    // a commit id), then fall back to an object id of any type (tree/blob/tag).
+    match util::get_commit_base_typed(spec).await {
+        Ok(_) => return Ok(String::new()),
+        Err(CommitBaseError::ReadFailure(detail)) => {
+            return Err(
+                CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed),
+            );
+        }
+        Err(CommitBaseError::CorruptReference(detail)) => {
+            return Err(
+                CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt),
+            );
+        }
+        // Not commit-ish: fall through to the any-type object-id check.
+        Err(CommitBaseError::HeadUnborn | CommitBaseError::InvalidReference(_)) => {}
+    }
+
+    // A valid object of ANY type, addressed by a BARE object id (full or
+    // abbreviated hex), prints nothing (exit 0) — matching Git for
+    // `--symbolic-full-name <tree-or-blob-sha>`. We restrict the fallback to bare
+    // hex ids so a malformed revision expression the strict parser already rejected
+    // (e.g. `HEAD^garbage`, `HEAD^{tree}`) is NOT permissively re-resolved by
+    // `search_result`'s parent-navigation path — it stays unresolvable (exit 128).
+    if is_bare_object_id(spec) {
+        let storage = ClientStorage::init(path::objects());
+        match storage.search_result(spec).await {
+            Ok(matches) if matches.len() == 1 => return Ok(String::new()),
+            Ok(_) => return Err(unresolvable_symbolic_spec(spec)),
+            Err(error) => {
+                return Err(
+                    CliError::fatal(format!("failed to resolve '{spec}': {error}"))
+                        .with_stable_code(StableErrorCode::IoReadFailed),
+                );
+            }
+        }
+    }
+
+    Err(unresolvable_symbolic_spec(spec))
+}
+
+/// Whether `spec` is a bare object-id prefix (4..=64 hex chars, no revision
+/// operators) — the only non-ref form that may name a raw tree/blob/commit object.
+fn is_bare_object_id(spec: &str) -> bool {
+    (4..=64).contains(&spec.len()) && spec.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Fatal error (exit 128) for a `--symbolic-full-name` spec that is neither a ref
+/// nor a valid object — Git's "ambiguous argument" diagnostic. Libra reports on
+/// stderr rather than echoing the spec to stdout.
+fn unresolvable_symbolic_spec(spec: &str) -> CliError {
+    CliError::fatal(format!(
+        "ambiguous argument '{spec}': unknown revision or path not in the working tree"
+    ))
+    .with_exit_code(128)
+    .with_stable_code(StableErrorCode::CliInvalidTarget)
+}
+
+/// Whether `tag_name` names an existing tag ref (mapping the lookup error to a
+/// CLI failure tagged with `spec`).
+async fn find_tag_ref_named(spec: &str, tag_name: &str) -> CliResult<bool> {
+    tag::find_tag_ref(tag_name)
+        .await
+        .map(|found| found.is_some())
+        .map_err(|error| {
+            // A tag lookup fails on a database/query error, i.e. a storage read
+            // failure — not an internal invariant.
+            CliError::fatal(format!("failed to look up tag '{spec}': {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })
+}
+
+/// The full `refs/remotes/<remote>/<branch>` name for a remote-tracking spec, or
+/// `None` when no candidate exists.
+async fn resolve_remote_tracking_full(spec: &str, short_name: &str) -> CliResult<Option<String>> {
+    for (remote, branch_name) in util::remote_tracking_candidates(short_name) {
+        let full_ref = format!("refs/remotes/{remote}/{branch_name}");
+        let exists = Branch::find_branch_result(&full_ref, Some(remote))
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
+            || Branch::find_branch_result(branch_name, Some(remote))
+                .await
+                .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+                .is_some();
+        if exists {
+            return Ok(Some(full_ref));
+        }
+    }
+    Ok(None)
 }
 
 async fn resolve_short_commit(
@@ -692,6 +860,30 @@ mod tests {
             rendered.contains("cannot be used with"),
             "unexpected clap error: {rendered}"
         );
+    }
+
+    #[test]
+    fn test_rev_parse_args_symbolic_full_name_conflicts_with_query_modes() {
+        // `--symbolic-full-name` must not silently coexist with the repository-query
+        // modes (evaluated first) or the other revision-output modes.
+        for other in [
+            "--git-dir",
+            "--show-prefix",
+            "--show-cdup",
+            "--is-inside-work-tree",
+            "--is-inside-git-dir",
+            "--is-bare-repository",
+            "--absolute-git-dir",
+            "--show-toplevel",
+            "--abbrev-ref",
+        ] {
+            let err = RevParseArgs::try_parse_from(["rev-parse", "--symbolic-full-name", other])
+                .expect_err(&format!("--symbolic-full-name should reject {other}"));
+            assert!(
+                err.to_string().contains("cannot be used with"),
+                "unexpected clap error for {other}: {err}"
+            );
+        }
     }
 
     #[test]
