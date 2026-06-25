@@ -642,7 +642,7 @@ async fn run_create_tag(
     force: bool,
     sign: bool,
 ) -> Result<TagOutput, TagError> {
-    let created = tag::create(tag_name, message, force, sign)
+    let created = Box::pin(tag::create(tag_name, message, force, sign))
         .await
         .map_err(|error| map_create_tag_error(tag_name, error))?;
     Ok(TagOutput::Create {
