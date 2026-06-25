@@ -142,7 +142,13 @@ pub async fn execute(args: PruneArgs) -> Result<(), String> {
 pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
-    let storage = ClientStorage::init(path::objects());
+    let objects_dir = path::objects();
+    let objects_dir_existed = objects_dir.exists();
+    let storage = if args.dry_run {
+        ClientStorage::init_local(objects_dir.clone())
+    } else {
+        ClientStorage::init(objects_dir.clone())
+    };
     let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
 
     let (reachable, protected) = collect_reachable_objects(&storage, &args.heads).await?;
@@ -178,6 +184,28 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
         emit_json_data("prune", &prune_output, output)?;
     }
 
+    cleanup_dry_run_objects_dir(args.dry_run, objects_dir_existed, &objects_dir)?;
+
+    Ok(())
+}
+
+fn cleanup_dry_run_objects_dir(
+    dry_run: bool,
+    objects_dir_existed: bool,
+    objects_dir: &Path,
+) -> CliResult<()> {
+    if !dry_run || objects_dir_existed || !objects_dir.exists() {
+        return Ok(());
+    }
+    if is_dir_empty(objects_dir)? {
+        fs::remove_dir(objects_dir).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to remove empty dry-run objects directory '{}': {error}",
+                objects_dir.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+    }
     Ok(())
 }
 
@@ -798,6 +826,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::utils::test;
 
     #[test]
     fn list_idx_objects_reads_v2_hashes() {
@@ -861,5 +890,30 @@ mod tests {
             !has_outside,
             "symlinked outside object should not be listed"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers dry-run prune inspecting a missing object directory without creating it.
+    async fn execute_safe_dry_run_does_not_create_missing_object_directory() {
+        let repo = tempdir().expect("tempdir");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let objects = path::objects();
+        fs::remove_dir_all(&objects).expect("remove objects directory");
+
+        execute_safe(
+            PruneArgs {
+                dry_run: true,
+                verbose: false,
+                expire: None,
+                heads: Vec::new(),
+            },
+            &OutputConfig::default(),
+        )
+        .await
+        .expect("prune dry-run should succeed");
+
+        assert!(!objects.exists());
     }
 }
