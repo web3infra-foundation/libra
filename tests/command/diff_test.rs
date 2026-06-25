@@ -1486,3 +1486,132 @@ fn test_diff_ignore_all_space_drops_whitespace_only_and_rediffs() {
         "-w numstat counts only the real change"
     );
 }
+
+#[test]
+fn test_diff_ignore_space_change_and_ignore_space_at_eol() {
+    // `-b` ignores changes in the AMOUNT of whitespace (runs collapse to one
+    // space, trailing dropped) but the PRESENCE of whitespace still matters;
+    // `--ignore-space-at-eol` ignores only trailing whitespace.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_f = |content: &str, msg: &str| {
+        std::fs::write(p.join("f.txt"), content).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+            "commit f",
+        );
+    };
+    let out =
+        |args: &[&str]| String::from_utf8_lossy(&run_libra_command(args, p).stdout).into_owned();
+
+    // -b: collapsing "foo  bar" -> "foo bar" is a whitespace-amount-only change → ignored.
+    commit_f("foo  bar\nbaz\n", "b1");
+    std::fs::write(p.join("f.txt"), "foo bar\nbaz\n").unwrap();
+    assert!(
+        out(&["diff", "f.txt"]).contains("foo"),
+        "plain diff shows the change"
+    );
+    assert!(
+        out(&["diff", "-b", "f.txt"]).trim().is_empty(),
+        "-b ignores a whitespace-amount-only change"
+    );
+
+    // -b: removing internal whitespace entirely IS a real change.
+    commit_f("foo bar\n", "b2");
+    std::fs::write(p.join("f.txt"), "foobar\n").unwrap();
+    let b = out(&["diff", "-b", "f.txt"]);
+    assert!(
+        b.contains("-foo bar") && b.contains("+foobar"),
+        "-b still reports removing internal whitespace:\n{b}"
+    );
+
+    // --ignore-space-at-eol: trailing-only change is ignored.
+    commit_f("alpha\nbeta\n", "e1");
+    std::fs::write(p.join("f.txt"), "alpha   \nbeta\n").unwrap();
+    assert!(
+        out(&["diff", "--ignore-space-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "--ignore-space-at-eol ignores a trailing-only change"
+    );
+
+    // --ignore-space-at-eol does NOT ignore internal whitespace, but -b does.
+    commit_f("a b\n", "e2");
+    std::fs::write(p.join("f.txt"), "a  b\n").unwrap();
+    assert!(
+        out(&["diff", "--ignore-space-at-eol", "f.txt"]).contains("a  b"),
+        "--ignore-space-at-eol keeps an internal-whitespace change"
+    );
+    assert!(
+        out(&["diff", "-b", "f.txt"]).trim().is_empty(),
+        "-b ignores the same internal-amount change"
+    );
+
+    // -b leading whitespace: the amount/kind of a leading run is ignored, but
+    // adding leading whitespace where there was none is a real change.
+    commit_f("  a\n", "lead1");
+    std::fs::write(p.join("f.txt"), " a\n").unwrap();
+    assert!(
+        out(&["diff", "-b", "f.txt"]).trim().is_empty(),
+        "-b ignores a leading-whitespace-amount change"
+    );
+    commit_f("\ta\n", "lead2");
+    std::fs::write(p.join("f.txt"), "    a\n").unwrap();
+    assert!(
+        out(&["diff", "-b", "f.txt"]).trim().is_empty(),
+        "-b treats a leading tab and leading spaces as equal"
+    );
+    commit_f("a\n", "lead3");
+    std::fs::write(p.join("f.txt"), "  a\n").unwrap();
+    assert!(
+        out(&["diff", "-b", "f.txt"]).contains("+  a"),
+        "-b reports adding leading whitespace where there was none"
+    );
+    assert!(
+        out(&["diff", "-w", "f.txt"]).trim().is_empty(),
+        "-w ignores adding leading whitespace (presence-insensitive)"
+    );
+
+    // Precedence `-w` > `-b` > `--ignore-space-at-eol` for an internal-amount-only
+    // change: `--ignore-space-at-eol` alone keeps it; combined with `-w` or `-b`
+    // the stronger flag wins and the file drops.
+    commit_f("x  y\n", "prec1");
+    std::fs::write(p.join("f.txt"), "x y\n").unwrap();
+    assert!(
+        !out(&["diff", "--ignore-space-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "--ignore-space-at-eol alone keeps an internal-amount change"
+    );
+    assert!(
+        out(&["diff", "-w", "--ignore-space-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "-w takes precedence over --ignore-space-at-eol"
+    );
+    assert!(
+        out(&["diff", "-b", "--ignore-space-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "-b takes precedence over --ignore-space-at-eol"
+    );
+
+    // `--check` ignores the whitespace-ignore flags (matches Git): a line that
+    // gains trailing whitespace is still flagged with -w/-b/--ignore-space-at-eol,
+    // and the whitespace post-pass must NOT drop the file out from under --check.
+    commit_f("hello\n", "chk1");
+    std::fs::write(p.join("f.txt"), "hello   \n").unwrap();
+    for flag in ["--ignore-space-at-eol", "-w", "-b"] {
+        let chk = run_libra_command(&["diff", "--check", flag, "f.txt"], p);
+        assert_eq!(
+            chk.status.code(),
+            Some(2),
+            "diff --check {flag} must still flag added trailing whitespace (exit 2)"
+        );
+        assert!(
+            String::from_utf8_lossy(&chk.stdout).contains("trailing whitespace"),
+            "diff --check {flag} must report the trailing-whitespace error"
+        );
+    }
+}

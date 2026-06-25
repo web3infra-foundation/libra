@@ -47,6 +47,7 @@ EXAMPLES:
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
     libra diff -U0                          Patch with no surrounding context (default is 3)
     libra diff -w                           Ignore whitespace-only changes
+    libra diff -b                           Ignore changes in the amount of whitespace
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra diff --cached --check             Warn about whitespace errors on added lines
@@ -117,6 +118,19 @@ pub struct DiffArgs {
     #[clap(short = 'w', long = "ignore-all-space")]
     pub ignore_all_space: bool,
 
+    /// Ignore changes in the amount of whitespace: runs of whitespace are treated
+    /// as a single space and trailing whitespace is ignored (so `a  b` matches
+    /// `a b`, but `a b` still differs from `ab`). Same re-diff behavior as `-w`;
+    /// `-w` takes precedence if both are given.
+    #[clap(short = 'b', long = "ignore-space-change")]
+    pub ignore_space_change: bool,
+
+    /// Ignore whitespace changes at end of line only; leading and internal
+    /// whitespace compare exactly. Same re-diff behavior as `-w`; `-w`/`-b` take
+    /// precedence if combined.
+    #[clap(long = "ignore-space-at-eol")]
+    pub ignore_space_at_eol: bool,
+
     /// Show a condensed summary of created and deleted files
     #[clap(long)]
     pub summary: bool,
@@ -144,6 +158,8 @@ pub struct DiffArgs {
     /// Warn about whitespace errors on added lines instead of printing the diff.
     /// Detects trailing whitespace and space-before-tab in the indent; exits 2
     /// when any problem is found. (Git's blank-at-eof check is not performed.)
+    /// Unaffected by `-w`/`-b`/`--ignore-space-at-eol` — like Git, the scan runs
+    /// on the full diff, so added trailing whitespace is still reported.
     #[clap(long = "check")]
     pub check: bool,
 
@@ -459,15 +475,31 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     // Post-pass regeneration (both reuse the blob text the diff closure cached —
     // keyed by hash — with no re-load; the default path leaves git_internal's
     // output untouched):
-    //   * `-w` re-diffs each text file ignoring whitespace, DROPS files whose only
-    //     change is whitespace, and recomputes that file's +/- counts (so
-    //     stat/name/numstat/JSON all reflect the whitespace-ignored result).
+    //   * A whitespace-ignoring flag (`-w`/`-b`/`--ignore-space-at-eol`) re-diffs
+    //     each text file through the matching line normalizer, DROPS files whose
+    //     only change is whitespace under that rule, and recomputes that file's
+    //     +/- counts (so stat/name/numstat/JSON all reflect the result).
     //   * `-U<n>` (when `n != 3`, git_internal's hard-coded default) regenerates
     //     hunk bodies at `n` context lines; +/- lines are unchanged so counts are
     //     untouched — only the surrounding context (and re-parsed `hunks`) change.
-    // `-w` honors `-U<n>` for its context width.
+    // The whitespace flags honor `-U<n>` for context width; `-w` > `-b` >
+    // `--ignore-space-at-eol` if more than one is given (matching Git).
     let regen_context = args.unified.unwrap_or(3);
-    if args.ignore_all_space || (args.unified.is_some() && regen_context != 3) {
+    let ws_normalize: Option<fn(&str) -> String> = if args.ignore_all_space {
+        Some(normalize_ignore_all_space)
+    } else if args.ignore_space_change {
+        Some(normalize_ignore_space_change)
+    } else if args.ignore_space_at_eol {
+        Some(normalize_ignore_space_at_eol)
+    } else {
+        None
+    };
+    // `--check` (whitespace-error scan) ignores the whitespace-ignore flags and
+    // operates on git_internal's original diff — matching Git, where
+    // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
+    // whitespace errors. It replaces the patch output, so the post-pass (which
+    // only rewrites the patch/stat/counts) is skipped entirely when `--check`.
+    if !args.check && (ws_normalize.is_some() || (args.unified.is_some() && regen_context != 3)) {
         let blob_text = |map: &HashMap<PathBuf, ObjectHash>, path: &Path| -> String {
             let Some(hash) = map.get(path) else {
                 return String::new();
@@ -482,7 +514,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default()
         };
-        if args.ignore_all_space {
+        if let Some(normalize) = ws_normalize {
             files.retain_mut(|file| {
                 // Binary / no-hunk diffs have no body to re-diff: keep as-is.
                 if !file.raw_diff.contains("\n@@ ") {
@@ -495,7 +527,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                     &old_text,
                     &new_text,
                     regen_context,
-                    normalize_ignore_all_space,
+                    normalize,
                 );
                 // No real (non-whitespace) change → drop the file entirely.
                 if body.trim().is_empty() {
@@ -1162,6 +1194,36 @@ fn normalize_ignore_all_space(line: &str) -> String {
     line.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Normalizer for `-b` / `--ignore-space-change`: ignore changes in the AMOUNT
+/// of whitespace — every maximal run of whitespace collapses to a single space,
+/// and trailing whitespace is dropped. The PRESENCE of whitespace still matters,
+/// so `"a  b"` ≡ `"a b"` and `"\ta"` ≡ `"  a"` (both `" a"`), but `"a b"` ≠ `"ab"`
+/// and `"a"` ≠ `"  a"`. Matches `git diff -b` (verified empirically).
+fn normalize_ignore_space_change(line: &str) -> String {
+    let trimmed = line.trim_end();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut in_ws = false;
+    for c in trimmed.chars() {
+        if c.is_whitespace() {
+            in_ws = true;
+        } else {
+            if in_ws {
+                out.push(' ');
+                in_ws = false;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Normalizer for `--ignore-space-at-eol`: ignore only trailing whitespace;
+/// leading and internal whitespace compare exactly. Matches `git diff
+/// --ignore-space-at-eol` (verified empirically).
+fn normalize_ignore_space_at_eol(line: &str) -> String {
+    line.trim_end().to_string()
+}
+
 /// Compute the unified-diff hunk body for `old_text` vs `new_text` at `context`
 /// lines, comparing lines through `normalize` (e.g. whitespace-insensitive for
 /// `-w`) while EMITTING the original line text. Returns an empty string when the
@@ -1442,6 +1504,8 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         stat: false,
         unified: None,
         ignore_all_space: false,
+        ignore_space_change: false,
+        ignore_space_at_eol: false,
         summary: false,
         shortstat: false,
         exit_code: false,
