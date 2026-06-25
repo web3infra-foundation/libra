@@ -1312,3 +1312,145 @@ fn test_merge_stat_suppressed_in_json_machine_and_quiet_modes() {
         "quiet must suppress the diffstat"
     );
 }
+
+#[test]
+fn test_merge_verify_signatures_accepts_signed_rejects_unsigned() {
+    // `merge --verify-signatures` validates the merged tip's PGP signature
+    // against the local vault key, aborting if it is unsigned (or invalid).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // dev: a branch whose tip is a SIGNED commit (vault PGP signing on; `libra
+    // init` already provisioned the vault key, so enabling the config is enough).
+    assert_cli_success(
+        &run_libra_command(&["config", "vault.signing", "true"], p),
+        "enable vault signing",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "dev"], p), "branch dev");
+    assert_cli_success(&run_libra_command(&["checkout", "dev"], p), "checkout dev");
+    std::fs::write(p.join("dev.txt"), "dev\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dev.txt"], p), "add dev.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "dev-signed", "--no-verify"], p),
+        "signed dev commit",
+    );
+
+    // dev2: a branch (from the original base) whose tip is UNSIGNED.
+    assert_cli_success(
+        &run_libra_command(&["config", "vault.signing", "false"], p),
+        "disable vault signing",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "dev2"], p), "branch dev2");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "dev2"], p),
+        "checkout dev2",
+    );
+    std::fs::write(p.join("dev2.txt"), "dev2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dev2.txt"], p), "add dev2.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "dev2-unsigned", "--no-verify"], p),
+        "unsigned dev2 commit",
+    );
+
+    // Signed tip → merge --verify-signatures succeeds (proves the signed-content
+    // reconstruction round-trips against the vault key).
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main again",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "--verify-signatures", "dev"], p),
+        "merge of a signed tip",
+    );
+
+    // Unsigned tip → aborts before merging.
+    let bad = run_libra_command(&["merge", "--verify-signatures", "dev2"], p);
+    assert!(
+        !bad.status.success(),
+        "merge of an unsigned tip must abort: {}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("does not have a GPG signature"),
+        "unsigned-merge error should name the missing signature: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // Without verification, the unsigned tip merges fine.
+    assert_cli_success(
+        &run_libra_command(&["merge", "--no-verify-signatures", "dev2"], p),
+        "unsigned tip merges without verification",
+    );
+
+    // A signed commit whose message starts with whitespace (preserved via
+    // --cleanup=verbatim) must still verify: the signed-content reconstruction
+    // takes the message verbatim, not trimmed.
+    assert_cli_success(
+        &run_libra_command(&["config", "vault.signing", "true"], p),
+        "re-enable vault signing",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "dev3"], p), "branch dev3");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "dev3"], p),
+        "checkout dev3",
+    );
+    std::fs::write(p.join("dev3.txt"), "dev3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dev3.txt"], p), "add dev3.txt");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-m",
+                "  leading-space subject",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "signed commit with leading-whitespace message",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main for dev3",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "--verify-signatures", "dev3"], p),
+        "signed leading-whitespace-message tip verifies (message taken verbatim)",
+    );
+
+    // A signed message whose body itself contains the signature END-marker text
+    // must still verify: the body is located by the signature block's offset, not
+    // by searching for the marker (which would mis-select the body copy).
+    assert_cli_success(&run_libra_command(&["branch", "dev4"], p), "branch dev4");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "dev4"], p),
+        "checkout dev4",
+    );
+    std::fs::write(p.join("dev4.txt"), "dev4\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dev4.txt"], p), "add dev4.txt");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-m",
+                "body mentions -----END PGP SIGNATURE----- inline",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "signed commit whose body contains the END marker text",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main for dev4",
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "--verify-signatures", "dev4"], p),
+        "signed tip whose message contains the END marker still verifies",
+    );
+}

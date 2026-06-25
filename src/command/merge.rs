@@ -51,6 +51,7 @@ EXAMPLES:
     libra merge feature-x          Fast-forward current branch onto feature-x if possible
     libra merge origin/main        Fast-forward onto a remote-tracking branch
     libra merge feature-x --no-edit  Accept the default merge message (no editor)
+    libra merge --verify-signatures feature-x  Require a valid PGP signature on the merged tip
     libra merge --continue         Finish an in-progress merge after resolving conflicts
     libra merge --abort            Restore the pre-merge HEAD, index, and worktree
     libra merge --json feature-x   Structured JSON output for agents
@@ -120,11 +121,17 @@ pub struct MergeArgs {
     #[arg(long = "no-progress")]
     pub no_progress: bool,
 
-    /// Do not verify that the merged commits carry a valid GPG signature.
-    /// Accepted for Git parity and is a no-op: Libra's merge never verifies
-    /// commit signatures, so it already matches the default. (Git's opposite
-    /// `--verify-signatures` is not implemented.)
-    #[arg(long = "no-verify-signatures")]
+    /// Verify that the tip commit of the branch being merged carries a valid PGP
+    /// signature, aborting the merge if it is unsigned or the signature is bad.
+    /// Like `tag -v`, only signatures made by this repository's vault PGP key can
+    /// be validated (Libra has no external GPG keyring), so a commit signed
+    /// elsewhere — or with an SSH signature — is treated as not verifiable.
+    #[arg(long = "verify-signatures", overrides_with = "no_verify_signatures", conflicts_with_all = ["continue_merge", "abort"])]
+    pub verify_signatures: bool,
+
+    /// Do not verify that the merged commits carry a valid GPG signature (the
+    /// default). The inverse of `--verify-signatures`; last one wins.
+    #[arg(long = "no-verify-signatures", overrides_with = "verify_signatures")]
     pub no_verify_signatures: bool,
 
     /// Do not update the rerere (reuse recorded resolution) index after the
@@ -177,6 +184,11 @@ pub(crate) struct PullMergeOptions {
     /// fast-forward) but stop before committing, recording a MergeState so
     /// `libra merge --continue` can finalize the two-parent commit.
     pub no_commit: bool,
+    /// `libra merge --verify-signatures`: verify the resolved tip commit's PGP
+    /// signature before mutating any state and abort if it is unsigned or invalid.
+    /// Checked on the SAME loaded commit that is merged (no re-resolution), so the
+    /// verified object is exactly the merged object. Always `false` for `pull`.
+    pub verify_signatures: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +303,12 @@ pub(crate) enum PullMergeError {
     HeadUpdate(String),
     #[error("failed to restore working tree after merge: {0}")]
     Restore(String),
+    #[error("commit {commit} does not have a GPG signature")]
+    UnsignedMergeCommit { commit: String },
+    #[error("commit {commit} has a bad GPG signature")]
+    BadMergeSignature { commit: String },
+    #[error("failed to verify the signature of the merged commit: {0}")]
+    SignatureCheck(String),
 }
 
 pub(crate) type MergeError = PullMergeError;
@@ -313,6 +331,17 @@ impl From<PullMergeError> for CliError {
             }
             PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
+            PullMergeError::UnsignedMergeCommit { .. }
+            | PullMergeError::BadMergeSignature { .. } => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("the tip commit could not be verified against the vault PGP key")
+                .with_hint("re-run without --verify-signatures to merge without verification"),
+            PullMergeError::SignatureCheck(..) => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint(
+                    "ensure the repository vault is initialized and unsealed for signature verification",
+                )
+                .with_hint("re-run without --verify-signatures to merge without verification"),
             PullMergeError::NonFastForward { .. } => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                 .with_hint("run 'libra pull' without --ff-only to allow a merge commit")
@@ -410,6 +439,9 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
                 message: args.message.clone(),
                 squash: args.squash,
                 no_commit: args.no_commit,
+                // `--verify-signatures` is enforced inside the merge on the loaded
+                // tip commit, so the verified object is exactly the merged object.
+                verify_signatures: args.verify_signatures,
             };
             run_merge_for_pull_with_options(branch, branch, output, options).await
         }
@@ -417,6 +449,25 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
         (None, false, true) => run_merge_abort(output).await,
         (None, false, false) => Err(MergeError::MissingAction),
         _ => Err(MergeError::ConflictingAction),
+    }
+}
+
+/// Verify `commit`'s PGP signature for a `--verify-signatures` merge, returning
+/// a typed abort error when it is unsigned or the signature does not validate
+/// against the vault PGP key. Run on the already-loaded tip commit (before any
+/// state mutation) so the verified object is exactly the one being merged.
+async fn verify_merge_commit_signature(commit: &Commit) -> Result<(), MergeError> {
+    use crate::command::commit::{CommitSignatureStatus, verify_commit_signature};
+
+    match verify_commit_signature(commit).await {
+        Ok(CommitSignatureStatus::Good) => Ok(()),
+        Ok(CommitSignatureStatus::Unsigned) => Err(MergeError::UnsignedMergeCommit {
+            commit: commit.id.to_string(),
+        }),
+        Ok(CommitSignatureStatus::Bad) => Err(MergeError::BadMergeSignature {
+            commit: commit.id.to_string(),
+        }),
+        Err(error) => Err(MergeError::SignatureCheck(error.to_string())),
     }
 }
 
@@ -484,6 +535,13 @@ pub(crate) async fn run_merge_for_pull_with_options(
             commit_id: commit_hash.to_string(),
             detail: error.to_string(),
         })?;
+
+    // `--verify-signatures`: validate the resolved tip's PGP signature on the
+    // SAME loaded commit, before any state mutation — so the verified object is
+    // exactly the merged object (no time-of-check/time-of-use re-resolution gap).
+    if options.verify_signatures {
+        verify_merge_commit_signature(&target_commit).await?;
+    }
 
     let Some(current_commit_id) = Head::current_commit().await else {
         let files_changed = count_changed_files(None, &target_commit)?;
@@ -1696,6 +1754,24 @@ mod tests {
         assert_eq!(
             PullMergeError::UnrelatedHistories.to_string(),
             "refusing to merge unrelated histories",
+        );
+        assert_eq!(
+            PullMergeError::UnsignedMergeCommit {
+                commit: "abc1234".to_string(),
+            }
+            .to_string(),
+            "commit abc1234 does not have a GPG signature",
+        );
+        assert_eq!(
+            PullMergeError::BadMergeSignature {
+                commit: "def5678".to_string(),
+            }
+            .to_string(),
+            "commit def5678 has a bad GPG signature",
+        );
+        assert_eq!(
+            PullMergeError::SignatureCheck("vault sealed".to_string()).to_string(),
+            "failed to verify the signature of the merged commit: vault sealed",
         );
         assert_eq!(
             PullMergeError::NonFastForward {

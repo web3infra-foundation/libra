@@ -1386,6 +1386,108 @@ pub(crate) async fn vault_sign_commit(
     Ok(Some(gpgsig))
 }
 
+/// Result of checking a commit's embedded PGP signature (for
+/// `merge --verify-signatures`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitSignatureStatus {
+    /// The commit carries no `gpgsig` header.
+    Unsigned,
+    /// The signature validates against the local vault PGP key.
+    Good,
+    /// A signature is present but does not validate.
+    Bad,
+}
+
+/// Verify the PGP signature embedded in `commit`'s `gpgsig` header against the
+/// local vault key. Reconstructs the exact bytes that were signed (the commit
+/// content minus the signature — the same serialization [`vault_sign_commit`]
+/// produces) and checks them via the vault.
+///
+/// Like `tag -v`, this can only validate signatures made by THIS repository's
+/// vault key — Libra has no external GPG keyring, so a commit signed elsewhere
+/// (or with an SSH signature) cannot be verified and reports [`CommitSignatureStatus::Bad`].
+pub(crate) async fn verify_commit_signature(
+    commit: &Commit,
+) -> Result<CommitSignatureStatus, CommitError> {
+    use crate::{common_utils::parse_commit_msg, internal::vault};
+
+    let (_, signature) = parse_commit_msg(&commit.message);
+    let Some(sig_block) = signature else {
+        return Ok(CommitSignatureStatus::Unsigned);
+    };
+
+    // Recover the EXACT signed message body. `vault_sign_commit` signs the raw
+    // message, and `format_commit_msg` stores it as `"{gpgsig}\n\n{message}"`, so
+    // the message is the bytes immediately after the signature block and the single
+    // blank-line separator — taken VERBATIM (NOT via `parse_commit_msg`, whose
+    // `trim_start()` would drop leading whitespace and break verification of a
+    // commit whose message starts with blanks/spaces).
+    //
+    // `sig_block` is a subslice of `commit.message`, so locate the body by the
+    // block's END OFFSET rather than searching for marker text — the message body
+    // itself may legitimately contain `-----END … SIGNATURE-----`, which a text
+    // search could mis-select.
+    let base = commit.message.as_ptr() as usize;
+    let sig_end = (sig_block.as_ptr() as usize - base) + sig_block.len();
+    debug_assert!(sig_end <= commit.message.len());
+    let after_signature = &commit.message[sig_end..];
+    let message = after_signature
+        .strip_prefix("\n\n")
+        .unwrap_or(after_signature);
+
+    // Git prefixes each `gpgsig` continuation line with a single space; strip it
+    // to recover the clean armored block `armored_to_signature_hex` expects.
+    let armored: String = sig_block
+        .lines()
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sig_hex = match vault::armored_to_signature_hex(&armored) {
+        Ok(hex) => hex,
+        // A malformed / non-PGP (e.g. SSH) signature block cannot be validated
+        // against the vault PGP key — treat it as a bad signature, not an error.
+        Err(_) => return Ok(CommitSignatureStatus::Bad),
+    };
+
+    // Reconstruct the signed content byte-for-byte, matching `vault_sign_commit`.
+    let mut content: Vec<u8> = Vec::new();
+    content.extend(b"tree ");
+    content.extend(commit.tree_id.to_string().as_bytes());
+    content.extend(b"\n");
+    for parent in &commit.parent_commit_ids {
+        content.extend(b"parent ");
+        content.extend(parent.to_string().as_bytes());
+        content.extend(b"\n");
+    }
+    let author_data = commit
+        .author
+        .to_data()
+        .map_err(|e| CommitError::VaultSign(format!("failed to serialize author: {e}")))?;
+    content.extend(author_data);
+    content.extend(b"\n");
+    let committer_data = commit
+        .committer
+        .to_data()
+        .map_err(|e| CommitError::VaultSign(format!("failed to serialize committer: {e}")))?;
+    content.extend(committer_data);
+    content.extend(b"\n\n");
+    content.extend(message.as_bytes());
+
+    let unseal_key = vault::load_unseal_key().await.ok_or_else(|| {
+        CommitError::VaultSign("signature verification requires a vault unseal key".to_string())
+    })?;
+    let root_dir = util::storage_path();
+    let valid = vault::pgp_verify(&root_dir, &unseal_key, &content, &sig_hex)
+        .await
+        .map_err(|e| CommitError::VaultSign(format!("vault PGP verification failed: {e}")))?;
+
+    Ok(if valid {
+        CommitSignatureStatus::Good
+    } else {
+        CommitSignatureStatus::Bad
+    })
+}
+
 /// recursively create tree from index's tracked entries
 pub async fn create_tree(
     index: &Index,

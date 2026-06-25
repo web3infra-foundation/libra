@@ -362,6 +362,8 @@ pub(crate) async fn run_pull(
                 message: None,
                 squash: args.squash,
                 no_commit: args.no_commit,
+                // `pull` does not expose `--verify-signatures`.
+                verify_signatures: false,
             },
         )
         .await
@@ -745,6 +747,14 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         }
         merge::PullMergeError::HeadUpdate(..) | merge::PullMergeError::Restore(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+        }
+        // Signature-verification failures only arise from `merge --verify-signatures`;
+        // `pull` never requests verification, so these are unreachable here, but the
+        // match must stay exhaustive.
+        merge::PullMergeError::UnsignedMergeCommit { .. }
+        | merge::PullMergeError::BadMergeSignature { .. }
+        | merge::PullMergeError::SignatureCheck(..) => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
     }
 }

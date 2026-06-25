@@ -5,7 +5,7 @@
 ## 概要
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -18,7 +18,7 @@ libra merge --abort
 
 干净的三方合并会创建双父合并提交、更新 HEAD、重建索引、恢复工作树，并写入 merge reflog 条目。有冲突的三方合并会向工作树写入冲突标记，写入未合并的索引 stage，保存 Libra merge 状态，并返回 `LBR-CONFLICT-002`，同时给出 `libra merge --continue` 和 `libra merge --abort` 的提示。
 
-Libra 仍未实现 octopus merge、自定义策略、策略选项、交互式消息编辑（`--edit`/启动编辑器）或签名验证。
+Libra 仍未实现 octopus merge、自定义策略、策略选项或交互式消息编辑（`--edit`/启动编辑器）。签名验证（`--verify-signatures`）已支持，但仅限本仓库 vault PGP key（无外部 GPG keyring）。
 
 ## 选项
 
@@ -34,7 +34,8 @@ Libra 仍未实现 octopus merge、自定义策略、策略选项、交互式消
 | `--stat` | 合并完成后显示 diffstat（合并前 HEAD 与新提交之间的变更）。Git 默认显示；Libra 默认不显示，故用 `--stat` 主动开启。与 `--no-stat`/`-n` 构成 last-wins 切换。仅人类输出。 |
 | `-n`, `--no-stat` | 合并结束时不显示 diffstat（Libra 默认）。与 `--stat` 构成 last-wins 切换。 |
 | `--no-progress` | 不显示进度条。为对齐 Git 而接受的 no-op：Libra 的 merge 从不渲染进度条。 |
-| `--no-verify-signatures` | 不验证被合并提交的 GPG 签名。为对齐 Git 而接受的 no-op：Libra 的 merge 从不验证提交签名。（Git 的反向 `--verify-signatures` 未实现。） |
+| `--verify-signatures` | 验证被合并分支 tip 的 PGP 签名，未签名或签名无效则中止合并。与 `tag -v` 同源：仅能验证本仓库 vault PGP key 所签（无外部 GPG keyring），故他处签名或 SSH 签名视为不可验证。 |
+| `--no-verify-signatures` | 不验证被合并提交的签名（默认）。`--verify-signatures` 的反向；last-wins。 |
 | `--no-rerere-autoupdate` | 合并后不更新 rerere 索引。为对齐 Git 而接受的 no-op：Libra 无 rerere。（Git 的 `--rerere-autoupdate` 未公开。） |
 | `--continue` | 在冲突已解决并暂存后完成进行中的合并。 |
 | `--abort` | 恢复合并前的 HEAD、索引和工作树。 |
@@ -136,10 +137,10 @@ Merge aborted.
 | 不编辑 | `--no-edit`（no-op；从不编辑） | `--no-edit` | N/A |
 | 合并后 diffstat | `--stat`（打印）；`-n` / `--no-stat`（默认：不打印） | `--stat`（默认） / `-n` / `--no-stat` | N/A |
 | 不显示进度条 | `--no-progress`（no-op；从不渲染） | `--no-progress` | N/A |
-| 不验证签名 | `--no-verify-signatures`（no-op；从不验证） | `--no-verify-signatures` | N/A |
+| 禁用签名验证 | `--no-verify-signatures`（默认；关闭 `--verify-signatures`） | `--no-verify-signatures` | N/A |
 | 不更新 rerere | `--no-rerere-autoupdate`（no-op；无 rerere） | `--no-rerere-autoupdate` | N/A |
 | 自定义策略 | 不支持 | `--strategy`, `-X` | N/A |
-| 验证签名 | 不支持 | `--verify-signatures` | N/A |
+| 验证签名 | `--verify-signatures`（仅 vault-key PGP） | `--verify-signatures` | N/A |
 | JSON 输出 | `--json` / `--machine` | 不支持 | N/A |
 
 ## 错误处理
@@ -150,6 +151,7 @@ Merge aborted.
 | 无法解析目标引用 | `LBR-CLI-003` | 129 |
 | 无法加载合并目标/当前提交/树 | `LBR-REPO-002` | 128 |
 | 无关历史 | `LBR-REPO-003` | 128 |
+| `--verify-signatures`：tip 未签名、签名无效或 vault 不可用 | `LBR-REPO-003` | 128 |
 | 合并冲突 | `LBR-CONFLICT-002` | 128 |
 | 脏工作树或暂存更改 | `LBR-CONFLICT-002` | 128 |
 | 未跟踪文件会被覆盖 | `LBR-CONFLICT-002` | 128 |

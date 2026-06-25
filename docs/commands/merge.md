@@ -5,7 +5,7 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--no-verify-signatures] [--no-rerere-autoupdate] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -18,7 +18,7 @@ If the current branch can be fast-forwarded, Libra moves the branch pointer to t
 
 Clean three-way merges create a two-parent merge commit, update HEAD, rebuild the index, restore the working tree, and write a merge reflog entry. Conflicting three-way merges write conflict markers to the working tree, write unmerged index stages, save Libra merge state, and return `LBR-CONFLICT-002` with hints for `libra merge --continue` and `libra merge --abort`.
 
-Libra still does not implement octopus merges, custom strategies, strategy options, interactive message editing (`--edit`/launching an editor), or signature verification.
+Libra still does not implement octopus merges, custom strategies, strategy options, or interactive message editing (`--edit`/launching an editor). Signature verification (`--verify-signatures`) is supported but limited to the local vault PGP key (no external GPG keyring).
 
 ## Options
 
@@ -34,7 +34,8 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `--stat` | Show a diffstat of the merge result (the changes between the pre-merge HEAD and the new commit) after the merge completes. Git shows this by default; Libra defaults to no diffstat, so `--stat` opts in. Last-one-wins toggle with `--no-stat`/`-n`. Human output only. |
 | `-n`, `--no-stat` | Do not show a diffstat at the end of the merge (Libra's default). Last-one-wins toggle with `--stat`. |
 | `--no-progress` | Do not show a progress meter. No-op accepted for Git parity: Libra's merge never renders a progress meter. |
-| `--no-verify-signatures` | Do not verify the GPG signature of the merged commits. No-op accepted for Git parity: Libra's merge never verifies commit signatures. (Git's opposite `--verify-signatures` is not implemented.) |
+| `--verify-signatures` | Verify the PGP signature on the tip commit of the merged branch and abort the merge if it is unsigned or the signature is bad. Like `tag -v`, only signatures made by this repository's vault PGP key can be validated (no external GPG keyring), so a commit signed elsewhere — or with an SSH signature — is treated as not verifiable. |
+| `--no-verify-signatures` | Do not verify the merged commit's signature (the default). The inverse of `--verify-signatures`; the last one wins. |
 | `--no-rerere-autoupdate` | Do not update the rerere index after the merge. No-op accepted for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
@@ -136,10 +137,10 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | No editor | `--no-edit` (no-op; never edits) | `--no-edit` | N/A |
 | Post-merge diffstat | `--stat` (prints it); `-n` / `--no-stat` (default: omit) | `--stat` (default) / `-n` / `--no-stat` | N/A |
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
-| No signature verification | `--no-verify-signatures` (no-op; never verifies) | `--no-verify-signatures` | N/A |
+| Disable signature verification | `--no-verify-signatures` (default; disables `--verify-signatures`) | `--no-verify-signatures` | N/A |
 | No rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere) | `--no-rerere-autoupdate` | N/A |
 | Custom strategy | Not supported | `--strategy`, `-X` | N/A |
-| Verify signatures | Not supported | `--verify-signatures` | N/A |
+| Verify signatures | `--verify-signatures` (vault-key PGP only) | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |
 
 ## Error Handling
@@ -150,6 +151,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | Target ref cannot be resolved | `LBR-CLI-003` | 129 |
 | Failed to load merge target/current commit/tree | `LBR-REPO-002` | 128 |
 | Unrelated histories | `LBR-REPO-003` | 128 |
+| `--verify-signatures`: tip unsigned, signature invalid, or vault unavailable | `LBR-REPO-003` | 128 |
 | Merge conflicts | `LBR-CONFLICT-002` | 128 |
 | Dirty worktree or staged changes | `LBR-CONFLICT-002` | 128 |
 | Untracked file would be overwritten | `LBR-CONFLICT-002` | 128 |
