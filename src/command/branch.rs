@@ -17,7 +17,7 @@
 //!   that BFS-walk the commit graph from each branch tip.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::IsTerminal,
 };
 
@@ -72,6 +72,7 @@ EXAMPLES:
     libra branch --edit-description       Edit the current branch's description in an editor
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
+    libra branch --sort=-committerdate    List branches by tip commit date (newest first)
     libra branch --column                 List branches laid out in columns
     libra branch -v                       List branches with tip sha and subject
     libra branch -vv                      Also show upstream tracking [ahead/behind]
@@ -270,9 +271,10 @@ pub struct BranchArgs {
     #[clap(long = "no-merged", group = "query", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD")]
     pub no_merged: Option<String>,
 
-    /// Sort the listed branches by key: `refname` / `-refname` (default
-    /// reversible) or `version:refname` / `v:refname` (numeric-aware), with a
-    /// leading `-` reversing. Implies --list.
+    /// Sort the listed branches by key: `refname` (default), `version:refname` /
+    /// `v:refname` (numeric-aware), or `committerdate` / `creatordate` (the tip
+    /// commit's committer date). A leading `-` reverses (e.g. `-committerdate`
+    /// lists newest first). Implies --list.
     #[clap(long, group = "query", value_name = "key")]
     pub sort: Option<String>,
 
@@ -470,7 +472,7 @@ impl From<BranchError> for CliError {
             ))
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint(
-                "supported keys: refname, -refname, version:refname (v:refname), -version:refname",
+                "supported keys: refname, version:refname (v:refname), committerdate, creatordate, each reversible with a leading '-'",
             ),
             BranchError::InvalidUpstream(upstream) => {
                 CliError::fatal(format!("invalid upstream '{upstream}'"))
@@ -1826,18 +1828,53 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
     Ok(set)
 }
 
-/// Sort branch list entries in place by `--sort` key. Supports `refname` /
-/// `-refname` and `version:refname` / `v:refname` (numeric-aware), with a
+/// Sort branch list entries in place by `--sort` key. Supports `refname`,
+/// `version:refname` / `v:refname` (numeric-aware), and `committerdate` /
+/// `creatordate` (the tip commit's committer date), with a
 /// leading `-` reversing. Unknown keys are a usage error.
 fn sort_branch_entries(
     entries: &mut [BranchListEntry],
     key: &str,
     ignore_case: bool,
 ) -> Result<(), BranchError> {
+    use std::str::FromStr;
+
     let (base, reverse) = match key.strip_prefix('-') {
         Some(rest) => (rest, true),
         None => (key, false),
     };
+
+    // `committerdate`/`creatordate` sort by the tip commit's committer date (for a
+    // branch ref to a commit, Git's creatordate is the committer date). Pre-load the
+    // timestamps once (keyed by tip-commit hash) so the comparator is a cheap
+    // lookup; a commit that fails to load contributes timestamp 0 (sorts oldest)
+    // rather than aborting the listing.
+    let is_date_key = matches!(base, "committerdate" | "creatordate");
+    let timestamps: HashMap<String, i64> = if is_date_key {
+        let mut map = HashMap::new();
+        for entry in entries.iter() {
+            if map.contains_key(&entry.commit) {
+                continue;
+            }
+            let ts = ObjectHash::from_str(&entry.commit)
+                .ok()
+                .and_then(|hash| load_object::<Commit>(&hash).ok())
+                .map(|commit| commit.committer.timestamp as i64)
+                .unwrap_or(0);
+            map.insert(entry.commit.clone(), ts);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
+    if !matches!(
+        base,
+        "refname" | "version:refname" | "v:refname" | "committerdate" | "creatordate"
+    ) {
+        return Err(BranchError::InvalidSortKey(base.to_string()));
+    }
+
     let ordering = |a: &BranchListEntry, b: &BranchListEntry| -> std::cmp::Ordering {
         match base {
             "refname" => {
@@ -1850,12 +1887,16 @@ fn sort_branch_entries(
             "version:refname" | "v:refname" => {
                 crate::utils::util::version_refname_cmp(&a.name, &b.name)
             }
+            // Date keys: ascending by timestamp (oldest first), tie-broken by
+            // refname for a deterministic order, matching Git's for-each-ref.
+            "committerdate" | "creatordate" => {
+                let ta = timestamps.get(&a.commit).copied().unwrap_or(0);
+                let tb = timestamps.get(&b.commit).copied().unwrap_or(0);
+                ta.cmp(&tb).then_with(|| a.name.cmp(&b.name))
+            }
             _ => std::cmp::Ordering::Equal,
         }
     };
-    if !matches!(base, "refname" | "version:refname" | "v:refname") {
-        return Err(BranchError::InvalidSortKey(base.to_string()));
-    }
     entries.sort_by(|a, b| {
         let ord = ordering(a, b);
         if reverse { ord.reverse() } else { ord }

@@ -25,7 +25,7 @@ libra branch --show-current
 
 Deletion comes in two flavours: `-d` performs a safe delete that checks whether the branch has been fully merged into the current branch before removing it, while `-D` force-deletes regardless of merge status. Both refuse to delete the branch you are currently on.
 
-The `--contains` and `--no-contains` filters (aliased as `--with` and `--without`) let you narrow the branch list to those whose history does or does not include a particular commit, defaulting to HEAD when the commit argument is omitted. `--points-at <object>` lists branches whose tip is exactly the resolved object. `--merged [<commit>]` / `--no-merged [<commit>]` list branches already merged (or not yet merged) into the commit — i.e. whose tip is (or is not) reachable from it, defaulting to HEAD; this is the inverse of `--contains`. `--sort <key>` orders the list by `refname` or `version:refname` (numeric-aware), with a leading `-` reversing. `--ignore-case` makes list sorting case-insensitive.
+The `--contains` and `--no-contains` filters (aliased as `--with` and `--without`) let you narrow the branch list to those whose history does or does not include a particular commit, defaulting to HEAD when the commit argument is omitted. `--points-at <object>` lists branches whose tip is exactly the resolved object. `--merged [<commit>]` / `--no-merged [<commit>]` list branches already merged (or not yet merged) into the commit — i.e. whose tip is (or is not) reachable from it, defaulting to HEAD; this is the inverse of `--contains`. `--sort <key>` orders the list by `refname`, `version:refname` (numeric-aware), or `committerdate` / `creatordate` (the tip commit's committer date), with a leading `-` reversing. `--ignore-case` makes list sorting case-insensitive.
 
 ## Options
 
@@ -50,7 +50,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--points-at` | `<object>` | Only list branches whose tip points at the object |
 | | `--merged` | `[commit]` (default HEAD) | Only list branches already merged into the commit (tip reachable from it) |
 | | `--no-merged` | `[commit]` (default HEAD) | Only list branches not yet merged into the commit |
-| | `--sort` | `<key>` | Sort the list by `refname` or `version:refname` (`v:refname`); a leading `-` reverses (use `--sort=-refname` for the dash form) |
+| | `--sort` | `<key>` | Sort the list by `refname`, `version:refname` (`v:refname`), or `committerdate`/`creatordate` (the tip commit's committer date); a leading `-` reverses (use `--sort=-committerdate` for the dash form) |
 | | `--ignore-case` | | Sort branch names case-insensitively where applicable |
 | | `--column[=<mode>]` | `always` / `auto` / `never` | Lay the branch list out in columns instead of one per line (bare `--column` means `always`; `auto` only when stdout is a terminal). Column mode shows plain, uncolored names. |
 | | `--no-column` | | Do not lay the branch list out in columns (equivalent to `--column=never`), countermanding an earlier `--column` (last one wins). Branches list one-per-line by default, so on its own this is a no-op. |
@@ -85,6 +85,9 @@ libra branch --no-merged main
 # Sort branches by name (version-aware), or reversed
 libra branch --sort version:refname
 libra branch --sort=-refname
+
+# Sort branches by tip commit date (most recent first)
+libra branch --sort=-committerdate
 
 # List branches that do NOT contain HEAD
 libra branch --no-contains
@@ -238,7 +241,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Contains filter | `git branch --contains <commit>` | `libra branch --contains <commit>` | `jj log -r 'branches() & ancestors(<rev>)'` |
 | Merged filter | `git branch --merged [<commit>]` / `--no-merged` | `libra branch --merged [<commit>]` / `--no-merged` | `jj log -r 'branches() & ::<rev>'` |
 | Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
-| Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname) | `jj branch list` (revset order) |
+| Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname / committerdate / creatordate) | `jj branch list` (revset order) |
 | Column layout | `git branch --column[=<mode>]` | `libra branch --column[=<mode>]` (`--no-column` countermands) | N/A |
 | Verbose listing | `git branch -v` / `-vv` | `libra branch -v` (sha + subject) / `-vv` (+ upstream tracking) | N/A |
 | Auto-track | `git branch --track` | N/A (use `switch --track`) | N/A |

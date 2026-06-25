@@ -2371,3 +2371,87 @@ fn branch_edit_description_sets_then_unsets_via_editor() {
         String::from_utf8_lossy(&got.stdout)
     );
 }
+
+#[test]
+fn test_branch_sort_by_committer_date() {
+    // `--sort=committerdate` orders branches by their tip commit's committer date
+    // (oldest first), distinct from `--sort=refname`. The branch names are chosen
+    // so the date order is the OPPOSITE of the alphabetical order, proving the date
+    // key (not the name) drives the sort. A short sleep gives the two commits
+    // distinct one-second-granularity timestamps.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // First (older) commit -> branch "zzz" (alphabetically last).
+    std::fs::write(p.join("f.txt"), "1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add 1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit 1",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "zzz"], p), "branch zzz");
+
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    // Second (newer) commit -> branch "aaa" (alphabetically first).
+    std::fs::write(p.join("f.txt"), "1\n2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add 2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit 2",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "aaa"], p), "branch aaa");
+
+    let order = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "branch sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim_start_matches(['*', ' ']).trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+
+    // `expect` both names so a missing branch fails loudly instead of a `None`
+    // position satisfying a relative-order comparison.
+    let pos = |list: &[String], name: &str| -> usize {
+        list.iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("branch '{name}' missing from {list:?}"))
+    };
+
+    // committerdate ascending: zzz (older) before aaa (newer).
+    let by_date = order(&["branch", "--sort=committerdate"]);
+    assert!(
+        pos(&by_date, "zzz") < pos(&by_date, "aaa"),
+        "committerdate: older zzz must precede newer aaa: {by_date:?}"
+    );
+    // refname ascending: aaa before zzz (the OPPOSITE order — proves date != name).
+    let by_name = order(&["branch", "--sort=refname"]);
+    assert!(
+        pos(&by_name, "aaa") < pos(&by_name, "zzz"),
+        "refname: aaa must precede zzz: {by_name:?}"
+    );
+    // -committerdate reverses: newer aaa before older zzz.
+    let by_date_rev = order(&["branch", "--sort=-committerdate"]);
+    assert!(
+        pos(&by_date_rev, "aaa") < pos(&by_date_rev, "zzz"),
+        "-committerdate: newer aaa must precede older zzz: {by_date_rev:?}"
+    );
+
+    // creatordate uses the same committer-date basis for branches: same ordering.
+    let by_creator = order(&["branch", "--sort=creatordate"]);
+    assert!(
+        pos(&by_creator, "zzz") < pos(&by_creator, "aaa"),
+        "creatordate: older zzz must precede newer aaa: {by_creator:?}"
+    );
+    let by_creator_rev = order(&["branch", "--sort=-creatordate"]);
+    assert!(
+        pos(&by_creator_rev, "aaa") < pos(&by_creator_rev, "zzz"),
+        "-creatordate: newer aaa must precede older zzz: {by_creator_rev:?}"
+    );
+
+    // An unknown sort key is a usage error (exit 129).
+    let bad = run_libra_command(&["branch", "--sort=bogus"], p);
+    assert_eq!(bad.status.code(), Some(129), "unknown sort key exits 129");
+}
