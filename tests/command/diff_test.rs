@@ -1278,3 +1278,138 @@ fn diff_no_textconv_flag_is_accepted_noop() {
         "diff --no-textconv matches plain diff (no-op)"
     );
 }
+
+#[test]
+fn test_diff_unified_context_controls_surrounding_lines() {
+    // `-U<n>` sets the number of context lines around each change in the patch.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let ten: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+    std::fs::write(p.join("f.txt"), &ten).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f", "--no-verify"], p),
+        "commit f",
+    );
+    // Change a single line in the middle.
+    std::fs::write(p.join("f.txt"), ten.replace("line5\n", "line5-CHANGED\n")).unwrap();
+
+    let ctx_lines = |s: &str| s.lines().filter(|l| l.starts_with(' ')).count();
+
+    // -U0: no surrounding context.
+    let s0 = String::from_utf8_lossy(&run_libra_command(&["diff", "-U0", "f.txt"], p).stdout)
+        .into_owned();
+    assert_eq!(ctx_lines(&s0), 0, "-U0 must have no context lines:\n{s0}");
+    assert!(
+        s0.contains("-line5") && s0.contains("+line5-CHANGED"),
+        "-U0 still shows the change:\n{s0}"
+    );
+
+    // -U1: exactly one context line on each side.
+    let s1 = String::from_utf8_lossy(&run_libra_command(&["diff", "-U1", "f.txt"], p).stdout)
+        .into_owned();
+    assert_eq!(
+        ctx_lines(&s1),
+        2,
+        "-U1 must have 1 context line each side:\n{s1}"
+    );
+
+    // Default (3 context each side).
+    let sd = String::from_utf8_lossy(&run_libra_command(&["diff", "f.txt"], p).stdout).into_owned();
+    assert_eq!(
+        ctx_lines(&sd),
+        6,
+        "default must have 3 context each side:\n{sd}"
+    );
+
+    // -U5: clamped to the file (4 lines before + 5 after the change).
+    let s5 = String::from_utf8_lossy(&run_libra_command(&["diff", "-U5", "f.txt"], p).stdout)
+        .into_owned();
+    assert_eq!(
+        ctx_lines(&s5),
+        9,
+        "-U5 clamps to file bounds (4 + 5):\n{s5}"
+    );
+
+    // `--unified=N` long form is equivalent to `-U N`.
+    let s1_long =
+        String::from_utf8_lossy(&run_libra_command(&["diff", "--unified=1", "f.txt"], p).stdout)
+            .into_owned();
+    assert_eq!(s1, s1_long, "--unified=N must equal -U N");
+}
+
+#[test]
+fn test_diff_unified_zero_context_anchors_pure_insert_delete() {
+    // At -U0 there are no context lines, so a pure insert/delete produces a hunk
+    // with a zero-count side; its header must anchor at the adjacent line, exactly
+    // as Git does (`@@ -k,0 …` / `… +k,0 @@`, and `-0,0` / `+0,0` at start of file).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_f = |content: &str, msg: &str| {
+        std::fs::write(p.join("f.txt"), content).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+            "commit f",
+        );
+    };
+    let diff_u0 = || {
+        String::from_utf8_lossy(&run_libra_command(&["diff", "-U0", "f.txt"], p).stdout)
+            .into_owned()
+    };
+
+    // Pure insert in the middle: anchor at old line 2 (the line before the insert).
+    commit_f("a\nb\nc\n", "base1");
+    std::fs::write(p.join("f.txt"), "a\nb\nX\nc\n").unwrap();
+    let s = diff_u0();
+    assert!(
+        s.contains("@@ -2,0 +3,1 @@"),
+        "insert-middle anchors at -2,0:\n{s}"
+    );
+
+    // Pure insert at the very start: anchor at -0,0.
+    commit_f("a\nb\n", "base2");
+    std::fs::write(p.join("f.txt"), "X\na\nb\n").unwrap();
+    let s = diff_u0();
+    assert!(
+        s.contains("@@ -0,0 +1,1 @@"),
+        "insert-at-start anchors at -0,0:\n{s}"
+    );
+
+    // Pure delete in the middle: anchor the empty new side at new line 1.
+    commit_f("a\nb\nc\n", "base3");
+    std::fs::write(p.join("f.txt"), "a\nc\n").unwrap();
+    let s = diff_u0();
+    assert!(
+        s.contains("@@ -2,1 +1,0 @@"),
+        "delete-middle anchors at +1,0:\n{s}"
+    );
+
+    // Whole new file (HEAD vs staged): the empty old side anchors at -0,0.
+    std::fs::write(p.join("new.txt"), "X\nY\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "new.txt"], p), "add new");
+    let sn = String::from_utf8_lossy(
+        &run_libra_command(&["diff", "--staged", "-U0", "new.txt"], p).stdout,
+    )
+    .into_owned();
+    assert!(
+        sn.contains("@@ -0,0 +1,2 @@"),
+        "new file anchors at -0,0:\n{sn}"
+    );
+
+    // Two pure hunks separated by exactly one unchanged line. At -U0 the separator
+    // is dropped (not emitted as context), but must still advance the anchor so the
+    // second hunk is not stale. old a,b,c -> new b,X,c: delete `a`, keep `b`, then
+    // insert `X` after it.
+    commit_f("a\nb\nc\n", "base4");
+    std::fs::write(p.join("f.txt"), "b\nX\nc\n").unwrap();
+    let s = diff_u0();
+    assert!(
+        s.contains("@@ -1,1 +0,0 @@"),
+        "first hunk deletes `a` at -1,1 +0,0:\n{s}"
+    );
+    assert!(
+        s.contains("@@ -2,0 +2,1 @@"),
+        "second hunk anchors after the separator line (-2,0 +2,1):\n{s}"
+    );
+}

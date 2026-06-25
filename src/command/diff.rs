@@ -4,7 +4,8 @@
 use std::os::unix::fs::MetadataExt;
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Write as _,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     rc::Rc,
@@ -22,6 +23,7 @@ use git_internal::{
     },
 };
 use serde::Serialize;
+use similar::{Algorithm, ChangeTag, TextDiff};
 
 use crate::{
     command::{get_target_commit, load_object},
@@ -43,6 +45,7 @@ EXAMPLES:
     libra diff --old HEAD~1 --new HEAD      Compare two revisions
     libra diff --stat src/                  Show diff statistics under src/
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
+    libra diff -U0                          Patch with no surrounding context (default is 3)
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra diff --cached --check             Warn about whitespace errors on added lines
@@ -98,6 +101,12 @@ pub struct DiffArgs {
     /// Show diff statistics
     #[clap(long)]
     pub stat: bool,
+
+    /// Generate the patch with `<n>` lines of context (default 3). Changes only
+    /// the surrounding context, not the +/- lines, so `--stat`/`--name-only`/
+    /// `--numstat` counts are unaffected; the `--json` hunk ranges/lines follow `<n>`.
+    #[clap(short = 'U', long = "unified", value_name = "N")]
+    pub unified: Option<usize>,
 
     /// Show a condensed summary of created and deleted files
     #[clap(long)]
@@ -366,8 +375,14 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let worktree_entries = new_side.worktree_entries.clone();
-    let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
-    let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
+    // `Rc` so the `-U<n>` post-pass can read the blob content the diff closure
+    // cached (keyed by hash) without re-loading it from the object store/disk.
+    let worktree_cache: Rc<RefCell<HashMap<ObjectHash, Vec<u8>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let repo_cache: Rc<RefCell<HashMap<ObjectHash, Vec<u8>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let worktree_cache_in = Rc::clone(&worktree_cache);
+    let repo_cache_in = Rc::clone(&repo_cache);
     let load_error = Rc::new(RefCell::new(None::<DiffError>));
     let load_error_for_read = Rc::clone(&load_error);
     // `-R`/`--reverse`: swap the two sides so the diff is computed new->old. The
@@ -388,15 +403,20 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
             new_side.label,
         )
     };
+    // Path → blob-hash for each side (in the diff direction git_internal uses),
+    // captured before the blobs are moved into `Diff::diff`, so the `-U<n>`
+    // post-pass can look up each file's old/new content from the caches.
+    let first_map: HashMap<PathBuf, ObjectHash> = first_blobs.iter().cloned().collect();
+    let second_map: HashMap<PathBuf, ObjectHash> = second_blobs.iter().cloned().collect();
     let diff_output = Diff::diff(first_blobs, second_blobs, paths, move |path, hash| {
         if worktree_entries.get(path) == Some(hash) {
-            if let Some(data) = worktree_cache.borrow().get(hash).cloned() {
+            if let Some(data) = worktree_cache_in.borrow().get(hash).cloned() {
                 return data;
             }
 
             match read_worktree_blob_content(path) {
                 Ok(data) => {
-                    worktree_cache.borrow_mut().insert(*hash, data.clone());
+                    worktree_cache_in.borrow_mut().insert(*hash, data.clone());
                     data
                 }
                 Err(err) => {
@@ -405,13 +425,13 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 }
             }
         } else {
-            if let Some(data) = repo_cache.borrow().get(hash).cloned() {
+            if let Some(data) = repo_cache_in.borrow().get(hash).cloned() {
                 return data;
             }
 
             match load_repo_blob_content(hash) {
                 Ok(data) => {
-                    repo_cache.borrow_mut().insert(*hash, data.clone());
+                    repo_cache_in.borrow_mut().insert(*hash, data.clone());
                     data
                 }
                 Err(err) => {
@@ -425,7 +445,40 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
         return Err(err);
     }
 
-    let files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+    let mut files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
+
+    // `-U<n>` (when `n != 3`, git_internal's hard-coded default): regenerate each
+    // text file's hunk body at `n` context lines, reusing git_internal's header.
+    // The +/- lines are unchanged, so insertions/deletions are untouched; only
+    // the surrounding context (and the re-parsed `hunks`) change. Binary/large
+    // files (no hunk line) are left as-is by `rewrite_unified_diff_context`.
+    if let Some(context) = args.unified
+        && context != 3
+    {
+        let blob_text = |map: &HashMap<PathBuf, ObjectHash>, path: &Path| -> String {
+            let Some(hash) = map.get(path) else {
+                return String::new();
+            };
+            // Clone out of each borrow so no reference escapes the temporary `Ref`.
+            let bytes = worktree_cache
+                .borrow()
+                .get(hash)
+                .cloned()
+                .or_else(|| repo_cache.borrow().get(hash).cloned());
+            bytes
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        for file in files.iter_mut() {
+            let path = PathBuf::from(&file.path);
+            let old_text = blob_text(&first_map, &path);
+            let new_text = blob_text(&second_map, &path);
+            file.raw_diff =
+                rewrite_unified_diff_context(&file.raw_diff, &old_text, &new_text, context);
+            file.hunks = parse_diff_hunks(&file.raw_diff);
+        }
+    }
+
     let total_insertions = files.iter().map(|file| file.insertions).sum();
     let total_deletions = files.iter().map(|file| file.deletions).sum();
     let files_changed = files.len();
@@ -1004,6 +1057,241 @@ fn format_unified_diff(result: &DiffOutput) -> String {
         .join("\n")
 }
 
+/// git_internal's `Diff::diff` hard-codes 3 context lines. For `-U<n>` with a
+/// different `n`, replace a single file's hunk body with one regenerated at `n`
+/// context lines while keeping git_internal's header (`diff --git` / mode /
+/// `index` / `---` / `+++`). A diff with no hunk line (binary marker or
+/// identical content) is returned unchanged.
+fn rewrite_unified_diff_context(
+    raw_diff: &str,
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+) -> String {
+    // The header runs up to and including the newline before the first hunk.
+    let Some(nl_before_hunk) = raw_diff.find("\n@@ ") else {
+        return raw_diff.to_string();
+    };
+    let header = &raw_diff[..=nl_before_hunk];
+    let body = compute_unified_hunks(old_text, new_text, context);
+    format!("{header}{body}")
+}
+
+/// Internal representation of diff lines used while assembling unified hunks.
+/// Ported from git_internal's private `compute_unified_diff` so `-U<n>` matches
+/// its (git-faithful) hunk layout for any context width.
+#[derive(Debug, Clone, Copy)]
+enum UnifiedEditLine<'a> {
+    Context(Option<usize>, Option<usize>, &'a str),
+    Delete(usize, &'a str),
+    Insert(usize, &'a str),
+}
+
+/// Compute the unified-diff hunk body (the `@@ … @@` blocks, no file header)
+/// for `old_text` vs `new_text` at `context` lines of surrounding context.
+/// Myers line diff with a rolling-context assembler — a context-parameterized
+/// copy of git_internal's `compute_unified_diff` so the output matches its
+/// default (3-context) layout that is already validated against real Git.
+fn compute_unified_hunks(old_text: &str, new_text: &str, context: usize) -> String {
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_lines(old_text, new_text);
+
+    let mut out = String::with_capacity(((old_text.len() + new_text.len()) / 16).max(256));
+    // Not `with_capacity(context)`: `context` is caller-supplied (`-U<n>`) and may
+    // be arbitrarily large; preallocating it would let `-U99999999999` OOM/panic.
+    let mut prefix_ctx: VecDeque<UnifiedEditLine> = VecDeque::new();
+    let mut cur_hunk: Vec<UnifiedEditLine> = Vec::new();
+    let mut eq_run: Vec<UnifiedEditLine> = Vec::new();
+    let mut in_hunk = false;
+    let mut last_old_seen = 0usize;
+    let mut last_new_seen = 0usize;
+    let mut old_line_no = 1usize;
+    let mut new_line_no = 1usize;
+
+    for change in diff.iter_all_changes() {
+        let line = change.value().trim_end_matches(['\r', '\n']);
+        match change.tag() {
+            ChangeTag::Equal => {
+                let entry = UnifiedEditLine::Context(Some(old_line_no), Some(new_line_no), line);
+                if in_hunk {
+                    eq_run.push(entry);
+                    // Flush once trailing equal lines exceed 2*context (saturating
+                    // so a huge caller-supplied `context` cannot overflow).
+                    if eq_run.len() > context.saturating_mul(2) {
+                        flush_unified_hunk(
+                            &mut out,
+                            &mut cur_hunk,
+                            &mut eq_run,
+                            &mut prefix_ctx,
+                            context,
+                            &mut last_old_seen,
+                            &mut last_new_seen,
+                        );
+                        in_hunk = false;
+                    }
+                } else {
+                    // Keep only the last `context` equal lines as rolling prefix
+                    // context. `push then trim` is correct for any `context`,
+                    // including 0 (git_internal's original `len == context` check
+                    // only worked for its hard-coded 3 — at 0 it never trimmed).
+                    prefix_ctx.push_back(entry);
+                    while prefix_ctx.len() > context {
+                        prefix_ctx.pop_front();
+                    }
+                }
+                // Record this equal line as the last consumed position on both
+                // sides, AFTER any flush above. A flush therefore anchors the
+                // just-closed hunk at the pre-line state, while the next zero-count
+                // hunk side (a pure insert/delete) anchors just after this line.
+                // This is essential at -U0, where the equal line separating two
+                // pure hunks is dropped rather than emitted as context — without
+                // it the second hunk would fall back to a stale anchor.
+                last_old_seen = old_line_no;
+                last_new_seen = new_line_no;
+                old_line_no += 1;
+                new_line_no += 1;
+            }
+            ChangeTag::Delete => {
+                let entry = UnifiedEditLine::Delete(old_line_no, line);
+                old_line_no += 1;
+                if !in_hunk {
+                    cur_hunk.extend(prefix_ctx.iter().copied());
+                    prefix_ctx.clear();
+                    in_hunk = true;
+                }
+                if !eq_run.is_empty() {
+                    cur_hunk.append(&mut eq_run);
+                }
+                cur_hunk.push(entry);
+            }
+            ChangeTag::Insert => {
+                let entry = UnifiedEditLine::Insert(new_line_no, line);
+                new_line_no += 1;
+                if !in_hunk {
+                    cur_hunk.extend(prefix_ctx.iter().copied());
+                    prefix_ctx.clear();
+                    in_hunk = true;
+                }
+                if !eq_run.is_empty() {
+                    cur_hunk.append(&mut eq_run);
+                }
+                cur_hunk.push(entry);
+            }
+        }
+    }
+
+    if in_hunk {
+        flush_unified_hunk(
+            &mut out,
+            &mut cur_hunk,
+            &mut eq_run,
+            &mut prefix_ctx,
+            context,
+            &mut last_old_seen,
+            &mut last_new_seen,
+        );
+    }
+
+    out
+}
+
+/// Flush the current hunk to `out`, taking up to `context` trailing equal lines
+/// and preserving up to `context` of them as the prefix of the next hunk.
+fn flush_unified_hunk<'a>(
+    out: &mut String,
+    cur_hunk: &mut Vec<UnifiedEditLine<'a>>,
+    eq_run: &mut Vec<UnifiedEditLine<'a>>,
+    prefix_ctx: &mut VecDeque<UnifiedEditLine<'a>>,
+    context: usize,
+    last_old_seen: &mut usize,
+    last_new_seen: &mut usize,
+) {
+    let trail_to_take = eq_run.len().min(context);
+    for entry in eq_run.iter().take(trail_to_take) {
+        cur_hunk.push(*entry);
+    }
+
+    let mut old_first: Option<usize> = None;
+    let mut old_count: usize = 0;
+    let mut new_first: Option<usize> = None;
+    let mut new_count: usize = 0;
+    for e in cur_hunk.iter() {
+        match *e {
+            UnifiedEditLine::Context(o, n, _) => {
+                if let Some(o) = o {
+                    old_first.get_or_insert(o);
+                    old_count += 1;
+                }
+                if let Some(n) = n {
+                    new_first.get_or_insert(n);
+                    new_count += 1;
+                }
+            }
+            UnifiedEditLine::Delete(o, _) => {
+                old_first.get_or_insert(o);
+                old_count += 1;
+            }
+            UnifiedEditLine::Insert(n, _) => {
+                new_first.get_or_insert(n);
+                new_count += 1;
+            }
+        }
+    }
+
+    if old_count == 0 && new_count == 0 {
+        cur_hunk.clear();
+        eq_run.clear();
+        return;
+    }
+
+    // For a zero-count side (pure insert → no old lines, pure delete → no new
+    // lines, including whole new/deleted files) anchor at the last consumed line
+    // on that side, matching Git: `@@ -k,0 …` after old line k, `… +k,0 @@` after
+    // new line k, and `-0,0` / `+0,0` at the start of file. `last_*_seen` is
+    // advanced both by emitted hunk lines and by equal lines scanned outside a
+    // hunk, so the anchor is correct even at -U0 (where no context enters a hunk).
+    let old_start = old_first.unwrap_or(*last_old_seen);
+    let new_start = new_first.unwrap_or(*last_new_seen);
+    let _ = writeln!(
+        out,
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+    );
+
+    for &e in cur_hunk.iter() {
+        match e {
+            UnifiedEditLine::Context(o, n, txt) => {
+                let _ = writeln!(out, " {txt}");
+                if let Some(o) = o {
+                    *last_old_seen = (*last_old_seen).max(o);
+                }
+                if let Some(n) = n {
+                    *last_new_seen = (*last_new_seen).max(n);
+                }
+            }
+            UnifiedEditLine::Delete(o, txt) => {
+                let _ = writeln!(out, "-{txt}");
+                *last_old_seen = (*last_old_seen).max(o);
+            }
+            UnifiedEditLine::Insert(n, txt) => {
+                let _ = writeln!(out, "+{txt}");
+                *last_new_seen = (*last_new_seen).max(n);
+            }
+        }
+    }
+
+    prefix_ctx.clear();
+    if context > 0 {
+        let keep_start = eq_run.len().saturating_sub(context);
+        for entry in eq_run.iter().skip(keep_start) {
+            prefix_ctx.push_back(*entry);
+        }
+    }
+
+    cur_hunk.clear();
+    eq_run.clear();
+}
+
 /// Render the staged (index-vs-HEAD) changes as an uncolorized unified diff.
 /// Used by `commit -v` to embed the diff into the editor template / stderr.
 pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
@@ -1018,6 +1306,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         name_status: false,
         numstat: false,
         stat: false,
+        unified: None,
         summary: false,
         shortstat: false,
         exit_code: false,

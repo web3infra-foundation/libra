@@ -35,6 +35,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Name status | | `--name-status` | Show changed file names with a status letter (A/D/M). |
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
+| Context lines | `-U<n>` | `--unified=<n>` | Number of context lines around each change in the patch (default 3). Changes only the surrounding context, not the `+`/`-` lines, so `--stat`/`--name-only`/`--numstat` counts are unaffected; the `--json` hunk ranges and line arrays follow `<n>`. |
 | Shortstat | | `--shortstat` | Show only the trailing summary line of `--stat` (files changed / insertions / deletions), omitting a clause when its count is zero. |
 | Summary | | `--summary` | Show a condensed summary of created and deleted files (no line for plain content edits). Libra's diff does not detect renames (shown as delete + create) or surface mode-only changes. |
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
@@ -127,6 +128,10 @@ libra diff --old HEAD~1 --new HEAD
 
 # Show diff stats for a subdirectory
 libra diff --stat src/
+
+# Patch with a different amount of context (0, or more than the default 3)
+libra diff -U0
+libra diff --unified=5 src/main.rs
 
 # Save diff to a file
 libra diff --output my.patch
@@ -240,7 +245,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Treat as text | `-a` / `--text` (no-op; always shown) | `-a` / `--text` | N/A |
 | Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
 | Binary diff (binary patch) | Not supported | `--binary` | N/A |
-| Context lines | Not supported | `-U<n>` / `--unified=<n>` | `--context <n>` |
+| Context lines | `-U<n>` / `--unified=<n>` (default 3) | `-U<n>` / `--unified=<n>` | `--context <n>` |
 | Ignore whitespace | Not supported | `-w` / `--ignore-all-space` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
 | Disallow external diff | `--no-ext-diff` (no-op; always built-in) | `--no-ext-diff` | N/A |
