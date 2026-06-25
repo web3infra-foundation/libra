@@ -343,6 +343,69 @@ fn test_blame_invalid_line_range_uses_stable_cli_error() {
     assert_eq!(report.category, "cli");
 }
 
+/// Scenario: `-L` accepts Git's `/regex/` endpoints (start and/or end), a single
+/// endpoint spans to the end of the file, and a non-matching regex errors — all
+/// matching `git blame -L` semantics.
+#[test]
+#[serial]
+fn test_blame_regex_line_range() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(
+        p.join("f.rs"),
+        "fn alpha() {}\nfn beta() {}\nfn gamma() {}\nfn delta() {}\nfn eps() {}\n",
+    )
+    .unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.rs"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+
+    let line_numbers = |args: &[&str]| -> Vec<u64> {
+        let output = run_libra_command(args, p);
+        assert_cli_success(&output, "blame line range");
+        parse_json_stdout(&output)["data"]["lines"]
+            .as_array()
+            .expect("lines array")
+            .iter()
+            .map(|line| line["line_number"].as_u64().expect("line_number"))
+            .collect()
+    };
+
+    // /regex/ start and end resolve to matching line numbers.
+    assert_eq!(
+        line_numbers(&["--json", "blame", "-L", "/beta/,/delta/", "f.rs"]),
+        vec![2, 3, 4]
+    );
+    // A single /regex/ (or numeric) endpoint spans to the end of the file (like Git).
+    assert_eq!(
+        line_numbers(&["--json", "blame", "-L", "/beta/", "f.rs"]),
+        vec![2, 3, 4, 5]
+    );
+    assert_eq!(
+        line_numbers(&["--json", "blame", "-L", "2", "f.rs"]),
+        vec![2, 3, 4, 5]
+    );
+    // Numeric start + regex end, and regex start + `+COUNT`.
+    assert_eq!(
+        line_numbers(&["--json", "blame", "-L", "2,/delta/", "f.rs"]),
+        vec![2, 3, 4]
+    );
+    assert_eq!(
+        line_numbers(&["--json", "blame", "-L", "/beta/,+1", "f.rs"]),
+        vec![2]
+    );
+
+    // A regex with no match is a usage error (LBR-CLI-002, exit 129).
+    let no_match = run_libra_command(&["blame", "-L", "/nomatch/", "f.rs"], p);
+    assert_eq!(no_match.status.code(), Some(129));
+    let (_stderr, report) = parse_cli_error_stderr(&no_match.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
 /// Bootstrap a repo with the requested hash algorithm (`"sha1"` or
 /// `"sha256"`), set a stable identity, and return the
 /// `ChangeDirGuard` that pins the process CWD to the repo for the

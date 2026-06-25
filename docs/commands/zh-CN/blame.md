@@ -36,22 +36,28 @@ libra blame <file> [<commit>] [-L <range>]
 
 ### 行范围格式（`-L`）
 
-`-L` 标志支持三种格式：
+`-L` 的每个端点可以是行号或 `/regex/`；单端点会跨到文件末尾（与 git 一致）：
 
 | 格式 | 含义 | 示例 |
 |--------|---------|---------|
-| `N` | 单行 N | `-L 10` |
+| `N` | 从第 N 行到文件末尾 | `-L 10` |
 | `N,M` | 第 N 到第 M 行（包含两端） | `-L 10,20` |
 | `N,+C` | 从第 N 行开始的 C 行 | `-L 10,+5`（第 10-14 行） |
+| `/regex/` | 从首个匹配该正则的行到文件末尾 | `-L '/fn main/'` |
+| `/start/,/end/` | 从首个 `/start/` 匹配到其后首个 `/end/` 匹配 | `-L '/fn main/,/^}/'` |
+| `/start/,M` 或 `N,/end/` | 正则端点与行号混用 | `-L 10,/^}/` |
 
-行号从 1 开始。越界值会产生错误。
+行号从 1 开始。越界值或无匹配的 `/regex/` 会产生错误。
 
 ```bash
-# Blame 单行
+# 从第 42 行 blame 到文件末尾
 libra blame -L 42 src/main.rs
 
 # Blame 一个范围
 libra blame -L 10,20 src/main.rs
+
+# 从正则匹配 blame 到正则匹配
+libra blame -L '/fn main/,/^}/' src/main.rs
 
 # 从第 100 行开始 blame 5 行
 libra blame -L 100,+5 src/main.rs
@@ -128,9 +134,9 @@ abc12345 (Author Name     2026-03-30 10:00:00 +0800 3) third line
 
 Git 的 `blame --reverse` 会显示一行最后存在于哪个修订中，即向前遍历历史而不是向后。这对寻找一行何时被*删除*很有用，但它需要向前历史遍历，计算代价高，并且在架构上不同于普通 blame。Libra 省略此功能，以保持 blame 实现简单快速。要查找一行何时被删除，请使用 `libra log -p -- <file>` 并搜索删除。
 
-### 为什么使用简化的行范围格式？
+### 行范围格式
 
-Git 的 `-L` 支持复杂格式，包括基于正则的函数匹配（`-L :<funcname>`）和 `/regex/` 行选择。这些功能很强大，但依赖语言特定配置（`.gitattributes` `diff` driver），且很少被正确使用。Libra 仅支持数字范围（`N`、`N,M`、`N,+C`），这些格式无歧义，并足以覆盖绝大多数 blame 操作。AI 代理可以很容易地从文件内容确定行号，而无需基于正则的函数匹配。
+Libra 的 `-L` 支持数字范围（`N`、`N,M`、`N,+C`）以及 `/regex/` 端点（`/regex/`、`/start/,/end/`，以及正则与行号混用），与 git 一致；单端点会跨到文件末尾。Git 的 `-L :<funcname>` 函数名选择尚未支持，因为它依赖语言特定配置（`.gitattributes` 的 `diff` driver）。
 
 ### 为什么默认 HEAD 而不是工作树？
 
@@ -147,7 +153,8 @@ Git 的 blame 默认使用 HEAD，并要求 `git blame --contents <file>` 才能
 | 文件 | `<file>`（位置参数，必需） | `<file>`（位置参数，必需） | N/A（jj 没有 blame；使用 `jj annotate`） |
 | 修订 | `<commit>`（位置参数，默认 HEAD） | `<rev>`（位置参数，默认 HEAD） | `-r <revision>`（在 `jj annotate` 中） |
 | 行范围（数字） | `-L N,M` / `-L N,+C` / `-L N` | `-L <start>,<end>` | N/A |
-| 行范围（正则） | 不支持 | `-L :<funcname>` / `-L /regex/` | N/A |
+| 行范围（正则） | `-L /regex/` / `-L /start/,/end/` | `-L /regex/` | N/A |
+| 行范围（函数名） | 不支持 | `-L :<funcname>` | N/A |
 | Reverse blame | 不支持 | `--reverse` | N/A |
 | 显示 email | `-e` / `--show-email` | `-e` / `--show-email` | N/A |
 | 完整 hash | `-l` | `-l` | N/A |

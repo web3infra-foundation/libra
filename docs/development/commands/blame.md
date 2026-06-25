@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础文件 blame、数字 `-L` 范围、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`-f`（`--show-name`，在 hash 后显示文件名）/`--abbrev <n>`、`--root`（接受式 no-op：Libra 从不给边界/root 提交加 `^` 前缀）已支持；reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
+- 兼容级别：`partial`。基础文件 blame、`-L` 行范围（数字、`START,END`、`START,+COUNT`，以及 `/regex/` start/end 端点；单端点跨到文件末尾，与 git 一致）、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`-f`（`--show-name`，在 hash 后显示文件名）/`--abbrev <n>`、`--root`（接受式 no-op：Libra 从不给边界/root 提交加 `^` 前缀）已支持；`-L :<funcname>`、reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -47,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/blame.md`。
 - Synopsis：`libra blame <file> [<commit>] [-L <range>] [-f] [--root]`。
-- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`、`-f`/`--show-name`（在 hash 列后插入文件名；`name_col` 仅作用于人类格式的 `-s` 与默认两条输出路径，不影响 porcelain——porcelain 已有 `filename` 行；Libra 不跟踪 rename/copy，故每行都是被 blame 的文件）、`--root`（接受式 no-op：字段 `root` 解析后不被读取；Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 `--root` 请求的“root 按普通提交显示”已是默认行为）。
+- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`（数字 `N`/`START,END`/`START,+COUNT` 与 `/regex/` start/end 端点；单端点跨到文件末尾）、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`、`-f`/`--show-name`（在 hash 列后插入文件名；`name_col` 仅作用于人类格式的 `-s` 与默认两条输出路径，不影响 porcelain——porcelain 已有 `filename` 行；Libra 不跟踪 rename/copy，故每行都是被 blame 的文件）、`--root`（接受式 no-op：字段 `root` 解析后不被读取；Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 `--root` 请求的“root 按普通提交显示”已是默认行为）。
 - `-l`/`-s`/`-t`/`--abbrev <N>`（默认人类格式的显示标志，复用现有 `BlameLine` 字段）：`-l` 在每行行首打印完整提交 hash（取代缩写）；`--abbrev=<n>` 用 n 位 hex 缩写（`-l` 优先于 `--abbrev`）；`-s` 整列隐藏作者与日期，仅保留 `<hash> <line>) <content>`；`-t` 在日期列打印原始 author 时间戳（epoch 秒）取代本地化日期。`BlameLine` 现额外序列化 `timestamp`（JSON 加项）。这些标志只影响默认人类格式，不影响 porcelain。
 - `-e`/`--show-email`：默认人类输出中以 `<email>` 形式显示作者邮箱代替作者名；与作者名共用固定 15 列宽（过长按 12 + `...` 截断，属与 Git 动态列宽的既有有意差异）。仅影响默认格式，不影响 `--porcelain`（其本身已含 `author-mail`）。`BlameLine` 现额外序列化 `author_email`（JSON 加项）。
 - `--porcelain`/`--line-porcelain`：机器可读输出，每行先打印 `<sha> <orig> <final> [<group>]` 头部，再（`--porcelain` 每个提交一次、`--line-porcelain` 每行）打印 author/author-mail/author-time/author-tz/committer*/summary/filename 元数据块，最后是 `\t<content>`。元数据通过重新加载归属提交读取。**有意差异/限制**：blame 遍历不跟踪每提交的原始行号，`<orig>` 以 `<final>` 近似。
@@ -57,7 +57,8 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | 正则行范围 | 原始对照：不支持；相关参数/替代：-L :<funcname> / -L /regex/；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | `-L /regex/` 正则行范围 | start/end 均支持 `/regex/`（start 从文件首行搜索、end 从 start 行起搜索首个匹配），与数字 / `+COUNT` 自由组合；单端点 `-L <n>` 或 `-L /regex/` 现在跨到文件末尾（与 git 一致，而非仅单行）；无匹配按 `LBR-CLI-002`/退出 129 报错。`split_line_range_tokens` 处理可含逗号与 `\/` 转义的 `/regex/` start；`resolve_start_endpoint`/`resolve_end_endpoint` 用 `regex` crate 解析。带集成测试 `test_blame_regex_line_range`。 |
+| 兼容差异项 | `-L :<funcname>` 函数名行范围 | 原始对照：git `-L :<funcname>:<file>`；当前说明：尚未实现（需 funcname 语言识别）。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 反向 blame | 原始对照：不支持；相关参数/替代：--reverse；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | 显示邮箱 `-e`/`--show-email` | 默认输出以 `<email>` 显示作者邮箱代替作者名（仅人类格式；porcelain 不受影响）。带集成测试（`test_blame_show_email_displays_author_email`）。 |
 | ✅ 已实现 | 显示标志 `-l`/`-s`/`-t`/`-f`/`--abbrev`/`-p` | `-l` 完整 hash；`--abbrev=<n>` n 位缩写（`-l` 优先）；`-s` 隐藏作者/日期列；`-t` 原始 epoch 时间戳；`-f`/`--show-name` 在 hash 后插入文件名（人类格式两条路径；Libra 不跟踪 rename，每行同名）；`-p` 为 `--porcelain` 短别名。复用现有 `BlameLine` 字段（新增 `timestamp` JSON 项）；仅人类格式。带集成测试（`test_blame_display_flags_long_suppress_timestamp_abbrev`、`test_blame_show_name_flag_prints_filename`）。 |

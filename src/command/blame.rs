@@ -22,6 +22,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use regex::Regex;
 use serde::Serialize;
 
 use crate::{
@@ -41,6 +42,7 @@ EXAMPLES:
     libra blame src/main.rs abc1234        Blame a file at a specific commit
     libra blame -L 10,20 src/main.rs       Blame lines 10-20
     libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
+    libra blame -L '/fn main/,/^}/' src/main.rs  Blame from a regex match to a regex match
     libra blame -l src/main.rs             Show full commit hashes
     libra blame -s src/main.rs             Suppress the author and date columns
     libra --json blame src/main.rs         Structured JSON output for agents";
@@ -159,8 +161,9 @@ enum BlameError {
     #[error("file '{path}' not found in revision '{revision}'")]
     FileNotFound { path: String, revision: String },
 
-    /// `-L` argument did not match `LINE`, `START,END`, or `START,+COUNT`,
-    /// or the numbers were out of range. Mapped to a usage error.
+    /// `-L` argument did not match a supported form (`LINE`, `START,END`,
+    /// `START,+COUNT`, or `/regex/` endpoints), a `/regex/` matched no line, or the
+    /// resolved numbers were out of range. Mapped to a usage error.
     #[error("invalid line range: {0}")]
     InvalidLineRange(String),
 }
@@ -181,7 +184,9 @@ impl From<BlameError> for CliError {
                 .with_hint("check the file path; use 'libra show <rev>:' to list available files"),
             BlameError::InvalidLineRange(_) => CliError::command_usage(message)
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: "10", "10,20", "10,+5""#),
+                .with_hint(
+                    r#"supported formats: "10", "10,20", "10,+5", "/regex/", "/start/,/end/""#,
+                ),
         }
     }
 }
@@ -400,7 +405,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
 
     let filtered_lines = if let Some(ref range) = args.line_range {
         let (start, end) =
-            parse_line_range(range, blame_lines.len()).map_err(BlameError::InvalidLineRange)?;
+            parse_line_range(range, &blame_lines).map_err(BlameError::InvalidLineRange)?;
         blame_lines
             .into_iter()
             .filter(|b| b.line_number >= start && b.line_number <= end)
@@ -563,46 +568,113 @@ fn format_blame_timestamp(timestamp: i64) -> String {
 /// - Returns `Err` for non-numeric tokens, zero indices, indices past the
 ///   file end, or `start > end`. Each error message is suitable for direct
 ///   inclusion in a [`BlameError::InvalidLineRange`].
-fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize), String> {
-    let parts: Vec<&str> = range_str.split(',').collect();
+fn parse_line_range(range_str: &str, lines: &[LineBlame]) -> Result<(usize, usize), String> {
+    let total_lines = lines.len();
+    let (start_token, end_token) = split_line_range_tokens(range_str)?;
 
-    match parts.len() {
-        1 => {
-            // Single line: "10"
-            let line = parts[0]
-                .parse::<usize>()
-                .map_err(|_| format!("Invalid line number: {}", parts[0]))?;
-            if line == 0 || line > total_lines {
-                return Err(format!("Line {} is out of range (1-{})", line, total_lines));
+    // Resolve the start endpoint (a number or `/regex/`, searched from the file start).
+    let start = resolve_start_endpoint(start_token, lines)?;
+
+    // A single endpoint means "from <start> to the end of the file" (matching Git),
+    // not just that one line.
+    let end = match end_token {
+        None => total_lines,
+        Some(token) => resolve_end_endpoint(token, lines, start)?,
+    };
+
+    if start == 0 || start > total_lines || end == 0 || end > total_lines || start > end {
+        return Err(format!(
+            "Invalid range {},{} (total lines: {})",
+            start, end, total_lines
+        ));
+    }
+    Ok((start, end))
+}
+
+/// Split a `-L` argument into its `<start>` token and optional `<end>` token. The
+/// start may be a `/regex/` (which can itself contain commas, and `\/` escapes), so a
+/// regex start is scanned to its closing slash before looking for the `,` separator;
+/// a numeric start is split at the first comma.
+fn split_line_range_tokens(range: &str) -> Result<(&str, Option<&str>), String> {
+    if range.starts_with('/') {
+        let bytes = range.as_bytes();
+        let mut i = 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2, // skip an escaped character (e.g. `\/`)
+                b'/' => {
+                    let start = &range[..=i];
+                    let rest = &range[i + 1..];
+                    return match rest.strip_prefix(',') {
+                        Some(end) => Ok((start, Some(end))),
+                        None if rest.is_empty() => Ok((start, None)),
+                        None => Err(format!("expected ',' after /regex/ in -L: {range}")),
+                    };
+                }
+                _ => i += 1,
             }
-            Ok((line, line))
         }
-        2 => {
-            let start = parts[0]
-                .parse::<usize>()
-                .map_err(|_| format!("Invalid start line: {}", parts[0]))?;
-
-            // Check if second part is relative (+N) or absolute
-            let end = if parts[1].starts_with('+') {
-                let offset = parts[1][1..]
-                    .parse::<usize>()
-                    .map_err(|_| format!("Invalid offset: {}", parts[1]))?;
-                start + offset - 1
-            } else {
-                parts[1]
-                    .parse::<usize>()
-                    .map_err(|_| format!("Invalid end line: {}", parts[1]))?
-            };
-
-            if start == 0 || start > total_lines || end == 0 || end > total_lines || start > end {
-                return Err(format!(
-                    "Invalid range {},{} (total lines: {})",
-                    start, end, total_lines
-                ));
-            }
-            Ok((start, end))
+        Err(format!("unterminated /regex/ in -L: {range}"))
+    } else {
+        match range.find(',') {
+            Some(idx) => Ok((&range[..idx], Some(&range[idx + 1..]))),
+            None => Ok((range, None)),
         }
-        _ => Err("Invalid range format. Use: LINE or START,END or START,+COUNT".to_string()),
+    }
+}
+
+/// If `token` is `/regex/`, return the inner regex source.
+fn regex_token_body(token: &str) -> Option<&str> {
+    token
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_suffix('/'))
+}
+
+fn compile_blame_regex(source: &str) -> Result<Regex, String> {
+    Regex::new(source).map_err(|error| format!("invalid regex /{source}/: {error}"))
+}
+
+/// Resolve a `<start>` token: a line number, or a `/regex/` resolved to the first
+/// matching line (searched from the start of the file), matching Git.
+fn resolve_start_endpoint(token: &str, lines: &[LineBlame]) -> Result<usize, String> {
+    if let Some(source) = regex_token_body(token) {
+        let regex = compile_blame_regex(source)?;
+        lines
+            .iter()
+            .position(|line| regex.is_match(&line.content))
+            .map(|index| index + 1)
+            .ok_or_else(|| format!("/{source}/: no match in file"))
+    } else {
+        token
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid start line: {token}"))
+    }
+}
+
+/// Resolve an `<end>` token: a line number, `+COUNT` relative to `start`, or a
+/// `/regex/` resolved to the first matching line at or after `start` (matching Git).
+fn resolve_end_endpoint(token: &str, lines: &[LineBlame], start: usize) -> Result<usize, String> {
+    if let Some(source) = regex_token_body(token) {
+        let regex = compile_blame_regex(source)?;
+        lines
+            .iter()
+            .enumerate()
+            .skip(start.saturating_sub(1))
+            .find(|(_, line)| regex.is_match(&line.content))
+            .map(|(index, _)| index + 1)
+            .ok_or_else(|| format!("/{source}/: no match at or after line {start}"))
+    } else if let Some(offset_str) = token.strip_prefix('+') {
+        let offset = offset_str
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid offset: {token}"))?;
+        if offset == 0 {
+            return Err(format!("Invalid offset: {token}"));
+        }
+        Ok(start + offset - 1)
+    } else {
+        token
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid end line: {token}"))
     }
 }
 
