@@ -40,6 +40,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, TransactionTrait};
 use thiserror::Error;
 
+/// Embedded canonical SQLite schema used when tests or low-level callers run
+/// built-in migrations against an otherwise empty SQLite database.
+const BOOTSTRAP_SQL: &str = include_str!("../../../sql/sqlite_20260309_init.sql");
+
 /// One named, versioned schema change.
 ///
 /// `up` is required; `down` is optional and only used by
@@ -382,15 +386,33 @@ async fn ensure_schema_versions_table(conn: &DatabaseConnection) -> Result<(), M
 }
 
 async fn schema_versions_table_exists(conn: &DatabaseConnection) -> Result<bool, MigrationError> {
+    sqlite_schema_table_exists(conn, "schema_versions").await
+}
+
+async fn sqlite_schema_table_exists(
+    conn: &DatabaseConnection,
+    table: &str,
+) -> Result<bool, MigrationError> {
     let backend = conn.get_database_backend();
     let row = conn
         .query_one(Statement::from_sql_and_values(
             backend,
             "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
-            ["table".into(), "schema_versions".into()],
+            ["table".into(), table.into()],
         ))
         .await?;
     Ok(row.is_some())
+}
+
+async fn ensure_bootstrap_schema(conn: &DatabaseConnection) -> Result<(), MigrationError> {
+    if sqlite_schema_table_exists(conn, "reference").await? {
+        return Ok(());
+    }
+
+    let backend = conn.get_database_backend();
+    conn.execute(Statement::from_string(backend, BOOTSTRAP_SQL))
+        .await?;
+    Ok(())
 }
 
 async fn max_schema_version(conn: &DatabaseConnection) -> Result<Option<i64>, MigrationError> {
@@ -703,6 +725,9 @@ pub async fn current_builtin_schema_version_readonly(
 /// build errors and per-migration apply errors are surfaced through
 /// `anyhow::Error` so the call site can attach its own context.
 pub async fn run_builtin_migrations(conn: &DatabaseConnection) -> Result<Vec<i64>> {
+    ensure_bootstrap_schema(conn)
+        .await
+        .with_context(|| "failed to ensure bootstrap schema before built-in migrations")?;
     let runner =
         builtin_runner().with_context(|| "failed to build the built-in migration registry")?;
     runner

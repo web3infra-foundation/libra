@@ -16,7 +16,7 @@ use std::{
 use byteorder::{BigEndian, ReadBytesExt};
 use clap::Parser;
 use git_internal::{
-    hash::{ObjectHash, get_hash_kind},
+    hash::{HashKind, ObjectHash, get_hash_kind, set_hash_kind},
     internal::{
         index::Index,
         object::{commit::Commit, tag::Tag, tree::Tree, types::ObjectType},
@@ -141,6 +141,11 @@ pub async fn execute(args: PruneArgs) -> Result<(), String> {
 /// failures while scanning or deleting objects.
 pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let _gc_lock = if args.dry_run {
+        None
+    } else {
+        Some(gc::acquire_gc_lock(false)?)
+    };
 
     let objects_dir = path::objects();
     let objects_dir_existed = objects_dir.exists();
@@ -294,7 +299,7 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "idx") {
                 let pack_path = path.with_extension("pack");
-                if verify_pack::inspect_pack_files(&path, &pack_path).is_err() {
+                if inspect_pack_files_preserving_hash_kind(&path, &pack_path).is_err() {
                     continue;
                 }
                 let packed = list_idx_objects(&path).map_err(|error| {
@@ -310,6 +315,29 @@ async fn collect_packed_objects(storage: &ClientStorage) -> CliResult<HashSet<Ob
     }
 
     Ok(packed_objects)
+}
+
+struct HashKindRestoreGuard {
+    previous: HashKind,
+}
+
+impl HashKindRestoreGuard {
+    fn preserve() -> Self {
+        Self {
+            previous: get_hash_kind(),
+        }
+    }
+}
+
+impl Drop for HashKindRestoreGuard {
+    fn drop(&mut self) {
+        set_hash_kind(self.previous);
+    }
+}
+
+fn inspect_pack_files_preserving_hash_kind(idx_path: &Path, pack_path: &Path) -> CliResult<()> {
+    let _guard = HashKindRestoreGuard::preserve();
+    verify_pack::inspect_pack_files(idx_path, pack_path).map(|_| ())
 }
 
 /// List all objects contained in a pack index file.

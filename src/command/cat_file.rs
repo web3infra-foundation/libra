@@ -53,7 +53,7 @@ Modes:
   - AI listing modes: use --ai-list <TYPE> or --ai-list-types.
 
 Notes:
-  - OBJECT is ignored for all --ai* and --batch* modes.
+  - OBJECT is ignored for all --ai* modes and all --batch* modes.
   - --ai and --ai-type search the AI history branch and can resolve persisted session objects such as ai_session.
   - If the same ID exists under multiple AI types, pass TYPE:ID to disambiguate.
   - --ai on ai_session objects prints a unified session summary before full JSON.

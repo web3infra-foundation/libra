@@ -248,7 +248,7 @@ struct PackGroup {
 }
 
 /// Held while a `gc` process owns `.libra/gc.lock`.
-struct GcLockGuard {
+pub(crate) struct GcLockGuard {
     /// Path to the lock file that should be removed on drop.
     path: PathBuf,
     /// Random owner token written to the lock file for safe cleanup.
@@ -574,7 +574,7 @@ fn map_gc_reflog_error(error: ReflogError) -> CliError {
 }
 
 /// Acquire the repository-local GC lock.
-fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
+pub(crate) fn acquire_gc_lock(force: bool) -> CliResult<GcLockGuard> {
     let path = util::storage_path().join("gc.lock");
     let token = generate_gc_lock_token()?;
     match fs::OpenOptions::new()

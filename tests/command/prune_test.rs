@@ -43,8 +43,16 @@ fn object_exists(repo: &Path, hash: &str) -> bool {
 
 /// Create a loose blob that is not referenced by any refs, index, or reflog.
 fn create_unreachable_blob(repo: &Path, content: &str) -> ObjectHash {
+    create_unreachable_blob_with_hash_kind(repo, content, HashKind::Sha1)
+}
+
+fn create_unreachable_blob_with_hash_kind(
+    repo: &Path,
+    content: &str,
+    hash_kind: HashKind,
+) -> ObjectHash {
     let _guard = ChangeDirGuard::new(repo);
-    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let _hash_guard = set_hash_kind_for_test(hash_kind);
     let blob = Blob::from_content(content);
     save_object(&blob, &blob.id).expect("failed to save blob");
     blob.id
@@ -337,6 +345,33 @@ fn test_prune_removes_synced_object_index_row() {
 
 #[test]
 #[serial]
+/// Tests direct prune respects an active GC lock before deleting objects.
+fn test_prune_rejects_active_gc_lock() {
+    let repo = create_committed_repo_via_cli();
+    let lock_path = repo
+        .path()
+        .join(libra::utils::util::ROOT_DIR)
+        .join("gc.lock");
+    fs::write(
+        &lock_path,
+        format!("pid={}\ntoken=test-lock\n", std::process::id()),
+    )
+    .expect("failed to write gc lock");
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert!(
+        !output.status.success(),
+        "prune should fail while gc lock is active"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("gc is already running"),
+        "expected gc lock conflict, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
 /// Tests --dry-run reports prunable objects without deleting them.
 fn test_prune_dry_run_reports_without_deleting() {
     let repo = create_committed_repo_via_cli();
@@ -567,6 +602,38 @@ fn test_prune_orphan_packed_v1_keeps_reachable_duplicate() {
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should succeed");
     assert!(object_exists(repo.path(), &head));
+}
+
+#[test]
+#[serial]
+/// Tests stale SHA-1 pack indexes do not poison SHA-256 loose-object scans.
+fn test_prune_stale_sha1_idx_preserves_sha256_hash_kind() {
+    let repo = tempdir().expect("failed to create repository root");
+    let init = run_libra_command(&["init", "--object-format", "sha256"], repo.path());
+    assert_cli_success(&init, "failed to initialize sha256 repository");
+    configure_identity_via_cli(repo.path());
+
+    fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("failed to write tracked file");
+    let add = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
+    assert_cli_success(&add, "failed to add tracked file");
+    let commit = run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "failed to create base commit");
+
+    let unreachable =
+        create_unreachable_blob_with_hash_kind(repo.path(), "sha256-garbage", HashKind::Sha256);
+    assert!(object_exists(repo.path(), &unreachable.to_string()));
+
+    let sha1_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let stale_sha1 = ObjectHash::from_bytes(&[1u8; 20]).expect("sha1 test hash should parse");
+    write_fake_idx_v2(repo.path(), &[stale_sha1]);
+    drop(sha1_guard);
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should succeed");
+    assert!(
+        !object_exists(repo.path(), &unreachable.to_string()),
+        "unreachable sha256 loose object should be pruned after stale sha1 idx probe"
+    );
 }
 
 #[test]
