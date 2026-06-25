@@ -19,7 +19,12 @@ use git_internal::{
     hash::{HashKind, ObjectHash, get_hash_kind, set_hash_kind},
     internal::{
         index::Index,
-        object::{commit::Commit, tag::Tag, tree::Tree, types::ObjectType},
+        object::{
+            commit::Commit,
+            tag::Tag,
+            tree::{Tree, TreeItemMode},
+            types::ObjectType,
+        },
     },
     utils::read_sha,
 };
@@ -843,6 +848,9 @@ fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<Vec
                     .with_stable_code(StableErrorCode::RepoCorrupt)
             })?;
             for item in &tree.tree_items {
+                if item.mode == TreeItemMode::Commit {
+                    continue;
+                }
                 refs.push(item.id);
             }
         }

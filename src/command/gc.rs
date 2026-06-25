@@ -349,8 +349,9 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
     } else {
         ClientStorage::init(objects_dir)
     };
-    let (reflogs, reflog_warnings) = expire_reflogs_for_gc(&storage, args.dry_run).await?;
-    let mut reachability = collect_reachability(&storage).await?;
+    let (reflogs, reflog_warnings, projected_reflog_roots) =
+        expire_reflogs_for_gc(&storage, args.dry_run).await?;
+    let mut reachability = collect_reachability(&storage, projected_reflog_roots.as_ref()).await?;
     reachability.warnings.extend(reflog_warnings);
     trace_reachable(&storage, &mut reachability);
     let skip_loose_prune = !args.dry_run && !reachability.warnings.is_empty();
@@ -427,12 +428,12 @@ async fn run_gc(args: &GcArgs) -> CliResult<GcOutput> {
 async fn expire_reflogs_for_gc(
     storage: &ClientStorage,
     dry_run: bool,
-) -> CliResult<(ReflogExpireStats, Vec<String>)> {
+) -> CliResult<(ReflogExpireStats, Vec<String>, Option<HashSet<ObjectHash>>)> {
     ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let refs = reflog_ref_names(&db).await?;
     if refs.is_empty() {
-        return Ok((ReflogExpireStats::default(), Vec::new()));
+        return Ok((ReflogExpireStats::default(), Vec::new(), None));
     }
 
     let (expire, expire_unreachable) = expire_defaults_with_conn(&db)
@@ -445,7 +446,7 @@ async fn expire_reflogs_for_gc(
         ..Default::default()
     };
     if let Some(warning) = reflog_parent_traversal_warning(storage, &tips) {
-        return Ok((stats, vec![warning]));
+        return Ok((stats, vec![warning], None));
     }
 
     let options = ExpireOptions {
@@ -457,7 +458,17 @@ async fn expire_reflogs_for_gc(
         dry_run,
     };
 
+    let mut projected_roots = dry_run.then(HashSet::new);
     for ref_name in refs {
+        let entries = if dry_run {
+            Some(
+                ReflogStore::find_all(&db, &ref_name)
+                    .await
+                    .map_err(map_gc_reflog_error)?,
+            )
+        } else {
+            None
+        };
         let parent_storage = storage.clone();
         let commit_storage = storage.clone();
         let result = expire_reflog(
@@ -471,8 +482,25 @@ async fn expire_reflogs_for_gc(
         .map_err(map_gc_reflog_error)?;
         stats.pruned += result.pruned;
         stats.rewritten += result.rewritten;
+        if let (Some(entries), Some(projected_roots)) = (entries, projected_roots.as_mut()) {
+            let pruned = result
+                .pruned_entries
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<HashSet<_>>();
+            for (index, entry) in entries.iter().enumerate() {
+                if pruned.contains(&index) {
+                    continue;
+                }
+                for raw in [entry.old_oid.as_str(), entry.new_oid.as_str()] {
+                    if !is_null_oid(raw) {
+                        projected_roots.insert(parse_stored_hash(raw, "projected reflog")?);
+                    }
+                }
+            }
+        }
     }
-    Ok((stats, Vec::new()))
+    Ok((stats, Vec::new(), projected_roots))
 }
 
 /// Enumerate reflog refs for the GC pre-prune expiration pass.
@@ -1008,10 +1036,14 @@ fn should_prune(path: &Path, policy: PrunePolicy) -> CliResult<bool> {
 }
 
 /// Collect loose objects and root object IDs before graph traversal.
-async fn collect_reachability(storage: &ClientStorage) -> CliResult<Reachability> {
+async fn collect_reachability(
+    storage: &ClientStorage,
+    projected_reflog_roots: Option<&HashSet<ObjectHash>>,
+) -> CliResult<Reachability> {
     ensure_real_object_directory(storage.base_path())?;
     let loose = list_loose_objects(storage.base_path())?;
-    let (roots, protected) = collect_roots_from_database().await?;
+    let (roots, protected) =
+        collect_roots_from_database_with_reflog_roots(projected_reflog_roots).await?;
     Ok(Reachability {
         loose,
         roots,
@@ -1265,6 +1297,12 @@ fn is_hex_prefix(prefix: &str) -> bool {
 /// Load root object IDs and non-reachability prune protections.
 pub(crate) async fn collect_roots_from_database()
 -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
+    collect_roots_from_database_with_reflog_roots(None).await
+}
+
+async fn collect_roots_from_database_with_reflog_roots(
+    projected_reflog_roots: Option<&HashSet<ObjectHash>>,
+) -> CliResult<(HashSet<ObjectHash>, HashSet<ObjectHash>)> {
     ensure_regular_repository_database()?;
     let db = get_db_conn_instance().await;
     let mut roots = HashSet::new();
@@ -1280,14 +1318,18 @@ pub(crate) async fn collect_roots_from_database()
         }
     }
 
-    let reflogs = reflog::Entity::find().all(&db).await.map_err(|error| {
-        CliError::fatal(format!("failed to load reflogs: {error}"))
-            .with_stable_code(StableErrorCode::IoReadFailed)
-    })?;
-    for entry in reflogs {
-        for raw in [entry.old_oid.as_str(), entry.new_oid.as_str()] {
-            if !is_null_oid(raw) {
-                roots.insert(parse_stored_hash(raw, "reflog")?);
+    if let Some(projected_reflog_roots) = projected_reflog_roots {
+        roots.extend(projected_reflog_roots.iter().copied());
+    } else {
+        let reflogs = reflog::Entity::find().all(&db).await.map_err(|error| {
+            CliError::fatal(format!("failed to load reflogs: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+        for entry in reflogs {
+            for raw in [entry.old_oid.as_str(), entry.new_oid.as_str()] {
+                if !is_null_oid(raw) {
+                    roots.insert(parse_stored_hash(raw, "reflog")?);
+                }
             }
         }
     }
@@ -3331,10 +3373,12 @@ mod tests {
         .unwrap();
 
         let storage = ClientStorage::init(path::objects());
-        let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
+        let (stats, warnings, projected_roots) =
+            expire_reflogs_for_gc(&storage, false).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
         assert!(warnings.is_empty());
+        assert!(projected_roots.is_none());
         assert_eq!(stats.refs_scanned, 1);
         assert_eq!(stats.entries_scanned, 1);
         assert_eq!(stats.pruned, 1);
@@ -3373,10 +3417,12 @@ mod tests {
         .unwrap();
 
         let storage = ClientStorage::init(path::objects());
-        let (stats, warnings) = expire_reflogs_for_gc(&storage, true).await.unwrap();
+        let (stats, warnings, projected_roots) =
+            expire_reflogs_for_gc(&storage, true).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
         assert!(warnings.is_empty());
+        assert_eq!(projected_roots.expect("dry-run projection").len(), 0);
         assert_eq!(stats.pruned, 1);
         assert_eq!(remaining.len(), 1);
     }
@@ -3433,9 +3479,11 @@ mod tests {
         }
 
         let storage = ClientStorage::init(path::objects());
-        let (stats, warnings) = expire_reflogs_for_gc(&storage, false).await.unwrap();
+        let (stats, warnings, projected_roots) =
+            expire_reflogs_for_gc(&storage, false).await.unwrap();
         let remaining = reflog::Entity::find().all(&db).await.unwrap();
 
+        assert!(projected_roots.is_none());
         assert_eq!(stats.refs_scanned, 1);
         assert_eq!(stats.entries_scanned, 2);
         assert_eq!(stats.pruned, 0);
@@ -3497,6 +3545,66 @@ mod tests {
 
         assert_eq!(output.loose_objects.pruned, 1);
         assert!(!storage.exist(&blob.id));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    /// Covers dry-run reachability using the projected post-expiry reflog set.
+    async fn run_gc_dry_run_prunes_objects_only_reachable_from_expired_reflog() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+        let db = get_db_conn_instance().await;
+
+        let tree = Tree {
+            id: test_hash(15),
+            tree_items: Vec::new(),
+        };
+        save_test_object(&tree, &tree.id).unwrap();
+        let commit = commit_with_tree(tree.id, Vec::new());
+        save_test_object(&commit, &commit.id).unwrap();
+
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO reflog \
+             (ref_name, old_oid, new_oid, timestamp, committer_name, committer_email, action, message) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            [
+                "HEAD".into(),
+                test_hash(0).to_string().into(),
+                commit.id.to_string().into(),
+                1_i64.into(),
+                "tester".into(),
+                "tester@example.com".into(),
+                "commit".into(),
+                "expired entry".into(),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let output = run_gc(&GcArgs {
+            dry_run: true,
+            prune: "now".to_string(),
+            no_prune: false,
+            aggressive: false,
+            auto: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+
+        let action = output
+            .unreachable_objects
+            .iter()
+            .find(|entry| entry.oid == commit.id.to_string())
+            .expect("commit should be reported as prunable after projected reflog expiry");
+        assert_eq!(action.action, GcAction::WouldPrune);
+        assert_eq!(output.reflogs.pruned, 1);
+        assert!(
+            reflog::Entity::find().all(&db).await.unwrap().len() == 1,
+            "dry-run must not delete the reflog row"
+        );
     }
 
     #[tokio::test]

@@ -81,6 +81,7 @@ async fn run_legacy_bootstrap(conn: &DatabaseConnection) {
 async fn agent_capture_creates_tables_and_indexes() {
     let (_dir, url) = fresh_db_url();
     let conn = connect(&url).await;
+    run_legacy_bootstrap(&conn).await;
     let runner = registered_runner();
     let applied = runner.run_pending(&conn).await.expect("run_pending");
     assert!(applied.contains(&2026050303));
@@ -98,6 +99,7 @@ async fn agent_capture_creates_tables_and_indexes() {
 async fn agent_capture_run_pending_is_idempotent() {
     let (_dir, url) = fresh_db_url();
     let conn = connect(&url).await;
+    run_legacy_bootstrap(&conn).await;
     let runner = registered_runner();
 
     let first = runner.run_pending(&conn).await.expect("run_pending #1");
@@ -118,6 +120,7 @@ async fn agent_capture_run_pending_is_idempotent() {
 async fn agent_capture_rollback_drops_tables_and_indexes_only() {
     let (_dir, url) = fresh_db_url();
     let conn = connect(&url).await;
+    run_legacy_bootstrap(&conn).await;
     let runner = registered_runner();
     runner.run_pending(&conn).await.expect("run_pending");
 
@@ -134,8 +137,8 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
     assert_eq!(
         rolled_back,
         vec![
-            2026061401, 2026060801, 2026060401, 2026060201, 2026053101, 2026052301, 2026050801,
-            2026050601, 2026050501, 2026050303
+            2026062301, 2026061401, 2026060801, 2026060401, 2026060201, 2026053101, 2026052301,
+            2026050801, 2026050601, 2026050501, 2026050303
         ]
     );
 
@@ -161,6 +164,7 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
 async fn agent_capture_up_down_up_round_trip() {
     let (_dir, url) = fresh_db_url();
     let conn = connect(&url).await;
+    run_legacy_bootstrap(&conn).await;
     let runner = registered_runner();
 
     runner.run_pending(&conn).await.expect("up #1");
@@ -264,6 +268,7 @@ async fn agent_capture_compatible_with_legacy_bootstrap() {
 async fn agent_capture_session_state_check_constraint_rejects_invalid() {
     let (_dir, url) = fresh_db_url();
     let conn = connect(&url).await;
+    run_legacy_bootstrap(&conn).await;
     let runner = registered_runner();
     runner.run_pending(&conn).await.expect("run_pending");
 

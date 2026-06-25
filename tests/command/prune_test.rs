@@ -139,6 +139,24 @@ fn create_unreachable_commit(repo: &Path, label: &str) -> (ObjectHash, ObjectHas
     (commit.id, tree.id, blob.id)
 }
 
+/// Create a loose commit whose tree contains a gitlink/submodule entry.
+fn create_commit_with_gitlink_tree(repo: &Path) -> ObjectHash {
+    let _guard = ChangeDirGuard::new(repo);
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let gitlink = ObjectHash::from_bytes(&[0x42; 20]).expect("gitlink oid");
+    let tree = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Commit,
+        gitlink,
+        "submodule".to_string(),
+    )])
+    .expect("failed to build gitlink tree");
+    save_object(&tree, &tree.id).expect("failed to save gitlink tree");
+
+    let commit = Commit::from_tree_id(tree.id, Vec::new(), "gitlink tree");
+    save_object(&commit, &commit.id).expect("failed to save gitlink commit");
+    commit.id
+}
+
 /// Write a minimal v2 pack index file that list_idx_objects can parse.
 fn write_fake_idx_v2(repo: &Path, hashes: &[ObjectHash]) -> PathBuf {
     let pack_dir = repo
@@ -436,6 +454,25 @@ fn test_prune_skips_gitlink_index_entry() {
 
     let output = run_libra_command(&["prune"], repo.path());
     assert_cli_success(&output, "prune should ignore gitlink index entries");
+    assert!(
+        !blob_path.exists(),
+        "unreachable blob should still be pruned"
+    );
+}
+
+#[test]
+#[serial]
+/// Tests prune ignores gitlink tree entries while walking reachable objects.
+fn test_prune_skips_gitlink_tree_entry() {
+    let repo = create_committed_repo_via_cli();
+    let commit = create_commit_with_gitlink_tree(repo.path());
+    let blob = create_unreachable_blob(repo.path(), "gitlink-tree");
+    let blob_path = loose_object_path(repo.path(), &blob.to_string());
+    assert!(blob_path.exists());
+
+    let commit_arg = commit.to_string();
+    let output = run_libra_command(&["prune", &commit_arg], repo.path());
+    assert_cli_success(&output, "prune should ignore gitlink tree entries");
     assert!(
         !blob_path.exists(),
         "unreachable blob should still be pruned"
