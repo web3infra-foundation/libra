@@ -11,7 +11,7 @@ use super::{
         sanitize_discovery_error, sanitize_remote_error_reason, visible_remote_display,
         visible_remote_url,
     },
-    resolve_remote,
+    resolve_head_symref_target, resolve_remote,
 };
 use crate::{
     internal::protocol::DiscRef,
@@ -65,6 +65,34 @@ fn args_with_filters(heads: bool, tags: bool, refs: bool) -> LsRemoteArgs {
         repository: "origin".to_string(),
         patterns: vec![],
     }
+}
+
+#[test]
+fn resolve_head_symref_target_uses_exact_capability_target() {
+    let caps = vec![
+        "multi_ack".to_string(),
+        "symref=HEAD:refs/tags/v1".to_string(),
+        "agent=git/2.0".to_string(),
+    ];
+
+    assert_eq!(
+        resolve_head_symref_target(&caps).as_deref(),
+        Some("refs/tags/v1")
+    );
+}
+
+#[test]
+fn resolve_head_symref_target_does_not_infer_when_capability_is_absent() {
+    let caps = vec!["multi_ack".to_string(), "agent=git/2.0".to_string()];
+
+    assert_eq!(resolve_head_symref_target(&caps), None);
+}
+
+#[test]
+fn resolve_head_symref_target_ignores_empty_target() {
+    let caps = vec!["symref=HEAD:".to_string()];
+
+    assert_eq!(resolve_head_symref_target(&caps), None);
 }
 
 #[test]

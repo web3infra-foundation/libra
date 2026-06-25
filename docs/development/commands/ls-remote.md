@@ -45,7 +45,7 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/ls-remote.md`。
-- 公开参数/子命令包括：`--heads`、`-t, --tags`、`--refs`、`--symref`、`--get-url`、`--exit-code`、`--sort <KEY>`、`<repository>`、`[patterns]...`。`--symref` 在可发现或可由 HEAD OID 推断时打印 `ref: refs/heads/<branch>\tHEAD`，并在 JSON 的 HEAD entry 上填充 `symref_target`。`--sort` 当前支持 `refname`、`-refname`、`version:refname` / `v:refname` 和对应反向形式；未知 key 返回 `LBR-CLI-002`。`--exit-code` 在 discovery 成功但没有匹配 ref 时静默返回 2。
+- 公开参数/子命令包括：`--heads`、`-t, --tags`、`--refs`、`--symref`、`--get-url`、`--exit-code`、`--sort <KEY>`、`<repository>`、`[patterns]...`。`--symref` 仅在远端 discovery 明确广告 `symref=HEAD:<target>` 时打印 `ref: <target>\tHEAD`，并在 JSON 的 HEAD entry 上填充 `symref_target`。`--sort` 当前支持 `refname`、`-refname`、`version:refname` / `v:refname` 和对应反向形式；未知 key 返回 `LBR-CLI-002`。`--exit-code` 在 discovery 成功但没有匹配 ref 时静默返回 2。
 
 
 ## 还未实现的功能

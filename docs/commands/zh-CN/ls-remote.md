@@ -104,6 +104,6 @@ libra --json ls-remote --tags origin
 - `ls-remote` 只执行协议发现（对本地 Git 仓库等价于 `git-upload-pack --advertise-refs`）。
 - 它不会写入对象、远程跟踪引用、配置或工作树文件。
 - `--heads` 和 `--tags` 可以组合使用，以同时显示分支和标签引用，同时排除 `HEAD`。
-- `--symref` 会在可从远端广告或 HEAD 对象 id 推断时报告 `HEAD` 的符号引用目标。
+- `--symref` 仅在远端 discovery 明确广告 `symref=HEAD:<target>` 时报告 `HEAD` 的符号引用目标。
 - `--get-url` 在协议 discovery 之前退出，并打印与 remote 诊断一致的脱敏 URL。
 - `--exit-code` 是脚本信号：无匹配引用时返回状态码 2，不渲染错误。

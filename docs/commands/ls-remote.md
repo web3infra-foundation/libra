@@ -106,6 +106,6 @@ see `docs/development/commands/_general.md` item B).
 - `ls-remote` performs only protocol discovery (`git-upload-pack --advertise-refs` equivalent for local Git repositories).
 - It does not write objects, remote-tracking refs, config, or working-tree files.
 - `--heads` and `--tags` can be combined to show both branch and tag refs while excluding `HEAD`.
-- `--symref` reports `HEAD`'s symbolic target when it can be discovered from the remote advertisement or inferred from the advertised `HEAD` object id.
+- `--symref` reports `HEAD`'s symbolic target only when the remote discovery advertises `symref=HEAD:<target>`.
 - `--get-url` exits before protocol discovery and prints the same redacted URL form used by remote diagnostics.
 - `--exit-code` is a silent script signal: no matches returns status 2 without rendering an error.

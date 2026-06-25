@@ -8,7 +8,7 @@ use serde::Serialize;
 use url::Url;
 
 use crate::{
-    command::fetch::{RemoteClient, resolve_remote_default_branch},
+    command::fetch::RemoteClient,
     git_protocol::ServiceType::UploadPack,
     internal::{config::ConfigKv, protocol::ssh_client::is_ssh_spec},
     utils::{
@@ -188,7 +188,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
             source: sanitize_discovery_error(source, &remote_url),
         })?;
     let patterns = compile_patterns(&args.patterns)?;
-    let head_symref_target = resolve_head_symref_target(&discovery.refs, &discovery.capabilities);
+    let head_symref_target = resolve_head_symref_target(&discovery.capabilities);
     let mut entries: Vec<LsRemoteEntry> = discovery
         .refs
         .iter()
@@ -218,18 +218,11 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
     })
 }
 
-fn resolve_head_symref_target(
-    refs: &[crate::internal::protocol::DiscRef],
-    caps: &[String],
-) -> Option<String> {
-    let ref_heads: Vec<_> = refs
-        .iter()
-        .filter(|reference| reference._ref.starts_with("refs/heads/"))
-        .cloned()
-        .collect();
-    let remote_head = refs.iter().find(|reference| reference._ref == "HEAD");
-    resolve_remote_default_branch(caps, &ref_heads, remote_head)
-        .map(|branch| format!("refs/heads/{branch}"))
+fn resolve_head_symref_target(caps: &[String]) -> Option<String> {
+    caps.iter()
+        .find_map(|cap| cap.strip_prefix("symref=HEAD:"))
+        .filter(|target| !target.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn resolve_remote(

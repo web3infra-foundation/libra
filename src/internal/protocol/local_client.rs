@@ -330,6 +330,16 @@ impl LocalClient {
                                 .map_err(|error| GitError::CustomError(error.to_string()))?,
                         );
                     }
+                    let head = Head::current_result()
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let head_symref = match &head {
+                        Head::Branch(branch) => Some(format!(
+                            "symref=HEAD:{}",
+                            normalize_local_head_symref_target(branch)
+                        )),
+                        Head::Detached(_) => None,
+                    };
                     let head_commit = Head::current_commit_result()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
@@ -351,7 +361,7 @@ impl LocalClient {
                                 _ref: reflog::HEAD.to_string(),
                             }))
                             .collect::<Vec<_>>(),
-                        capabilities: vec![],
+                        capabilities: head_symref.into_iter().collect(),
                         hash_kind: repo_hash_kind,
                     })
                 })
@@ -604,6 +614,14 @@ impl LocalClient {
                 .await
             }
         }
+    }
+}
+
+fn normalize_local_head_symref_target(branch: &str) -> String {
+    if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{branch}")
     }
 }
 
