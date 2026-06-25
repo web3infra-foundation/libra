@@ -333,13 +333,6 @@ impl LocalClient {
                     let head = Head::current_result()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
-                    let head_symref = match &head {
-                        Head::Branch(branch) => Some(format!(
-                            "symref=HEAD:{}",
-                            normalize_local_head_symref_target(branch)
-                        )),
-                        Head::Detached(_) => None,
-                    };
                     let head_commit = Head::current_commit_result()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
@@ -350,17 +343,19 @@ impl LocalClient {
                     for tag in tags {
                         tag_references.extend(tag_refs(tag).await?);
                     }
+                    let refs = local_branches
+                        .into_iter()
+                        .chain(remote_branches)
+                        .map(Into::into)
+                        .chain(tag_references)
+                        .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
+                            _hash: hash,
+                            _ref: reflog::HEAD.to_string(),
+                        }))
+                        .collect::<Vec<_>>();
+                    let head_symref = advertised_local_head_symref(&head, &refs);
                     Ok(DiscoveryResult {
-                        refs: local_branches
-                            .into_iter()
-                            .chain(remote_branches)
-                            .map(Into::into)
-                            .chain(tag_references)
-                            .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
-                                _hash: hash,
-                                _ref: reflog::HEAD.to_string(),
-                            }))
-                            .collect::<Vec<_>>(),
+                        refs,
                         capabilities: head_symref.into_iter().collect(),
                         hash_kind: repo_hash_kind,
                     })
@@ -623,6 +618,16 @@ fn normalize_local_head_symref_target(branch: &str) -> String {
     } else {
         format!("refs/heads/{branch}")
     }
+}
+
+fn advertised_local_head_symref(head: &Head, refs: &[DiscRef]) -> Option<String> {
+    let Head::Branch(branch) = head else {
+        return None;
+    };
+    let target = normalize_local_head_symref_target(branch);
+    refs.iter()
+        .any(|reference| reference._ref == target)
+        .then(|| format!("symref=HEAD:{target}"))
 }
 
 fn tag_object_hash(object: &tag::TagObject) -> String {

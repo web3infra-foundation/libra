@@ -64,6 +64,28 @@ fn ls_remote_symref_reports_remote_head_target() {
 }
 
 #[test]
+fn ls_remote_symref_does_not_advertise_unborn_local_head() {
+    let remote = tempdir().expect("failed to create remote repository root");
+    let init = run_libra_command(&["init"], remote.path());
+    assert_cli_success(&init, "failed to initialize empty repository");
+
+    let outside = tempdir().expect("failed to create outside cwd");
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = run_libra_command(&["ls-remote", "--symref", &remote_path], outside.path());
+    assert_cli_success(&output, "ls-remote --symref should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("ref: "),
+        "unborn HEAD should not advertise a symref target, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\tHEAD"),
+        "unborn HEAD should not advertise a HEAD ref row, got: {stdout}"
+    );
+}
+
+#[test]
 fn ls_remote_symref_json_reports_remote_head_target() {
     let remote = create_committed_repo_via_cli();
     let outside = tempdir().expect("failed to create outside cwd");
