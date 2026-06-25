@@ -48,6 +48,7 @@ EXAMPLES:
     libra diff -U0                          Patch with no surrounding context (default is 3)
     libra diff -w                           Ignore whitespace-only changes
     libra diff -b                           Ignore changes in the amount of whitespace
+    libra diff --ignore-blank-lines         Ignore changes that are only blank lines
     libra diff -s --exit-code               Status-only check: no output, exit 1 if changes
     libra diff --name-only -z               NUL-terminated changed-file list for scripts
     libra diff --cached --check             Warn about whitespace errors on added lines
@@ -130,6 +131,17 @@ pub struct DiffArgs {
     /// precedence if combined.
     #[clap(long = "ignore-space-at-eol")]
     pub ignore_space_at_eol: bool,
+
+    /// Ignore changes whose lines are all blank: a change consisting only of
+    /// added/removed empty lines is not reported (an added/deleted file whose only
+    /// content is blank lines is still listed with zero counts), while a change
+    /// near a real edit is shown in full. Only truly empty lines count as blank (a
+    /// `\r`-only CRLF line is not blank). Re-diffs affected files so
+    /// `--stat`/`--name-only`/`--numstat`/JSON reflect the result; honors `-U<n>`.
+    /// Composes with a whitespace flag (`-w`/`-b`/`--ignore-space-at-eol`): a line
+    /// that is blank after whitespace-normalization then counts as blank.
+    #[clap(long = "ignore-blank-lines")]
+    pub ignore_blank_lines: bool,
 
     /// Show a condensed summary of created and deleted files
     #[clap(long)]
@@ -479,11 +491,15 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     //     each text file through the matching line normalizer, DROPS files whose
     //     only change is whitespace under that rule, and recomputes that file's
     //     +/- counts (so stat/name/numstat/JSON all reflect the result).
+    //   * `--ignore-blank-lines` re-diffs ignoring blank-only changes (drops files
+    //     whose only change is blank lines, recomputes counts).
     //   * `-U<n>` (when `n != 3`, git_internal's hard-coded default) regenerates
     //     hunk bodies at `n` context lines; +/- lines are unchanged so counts are
     //     untouched — only the surrounding context (and re-parsed `hunks`) change.
-    // The whitespace flags honor `-U<n>` for context width; `-w` > `-b` >
+    // The re-diff flags honor `-U<n>` for context width; `-w` > `-b` >
     // `--ignore-space-at-eol` if more than one is given (matching Git).
+    // `--ignore-blank-lines` COMPOSES with a whitespace flag: the diff and the
+    // blank classification both run through the normalizer (matching Git).
     let regen_context = args.unified.unwrap_or(3);
     let ws_normalize: Option<fn(&str) -> String> = if args.ignore_all_space {
         Some(normalize_ignore_all_space)
@@ -494,12 +510,13 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     } else {
         None
     };
+    let rediffs = ws_normalize.is_some() || args.ignore_blank_lines;
     // `--check` (whitespace-error scan) ignores the whitespace-ignore flags and
     // operates on git_internal's original diff — matching Git, where
     // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
     // whitespace errors. It replaces the patch output, so the post-pass (which
     // only rewrites the patch/stat/counts) is skipped entirely when `--check`.
-    if !args.check && (ws_normalize.is_some() || (args.unified.is_some() && regen_context != 3)) {
+    if !args.check && (rediffs || (args.unified.is_some() && regen_context != 3)) {
         let blob_text = |map: &HashMap<PathBuf, ObjectHash>, path: &Path| -> String {
             let Some(hash) = map.get(path) else {
                 return String::new();
@@ -514,7 +531,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default()
         };
-        if let Some(normalize) = ws_normalize {
+        if rediffs {
             files.retain_mut(|file| {
                 // Binary / no-hunk diffs have no body to re-diff: keep as-is.
                 if !file.raw_diff.contains("\n@@ ") {
@@ -523,15 +540,42 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
                 let path = PathBuf::from(&file.path);
                 let old_text = blob_text(&first_map, &path);
                 let new_text = blob_text(&second_map, &path);
-                let body = compute_unified_hunks_normalized(
-                    &old_text,
-                    &new_text,
-                    regen_context,
-                    normalize,
-                );
-                // No real (non-whitespace) change → drop the file entirely.
+                // `--ignore-blank-lines` composes with a whitespace normalizer when
+                // both are given (matching `git diff -w --ignore-blank-lines`).
+                let body = if args.ignore_blank_lines {
+                    match ws_normalize {
+                        Some(normalize) => compute_unified_hunks_ignore_blank_normalized(
+                            &old_text,
+                            &new_text,
+                            regen_context,
+                            normalize,
+                        ),
+                        None => {
+                            compute_unified_hunks_ignore_blank(&old_text, &new_text, regen_context)
+                        }
+                    }
+                } else if let Some(normalize) = ws_normalize {
+                    compute_unified_hunks_normalized(&old_text, &new_text, regen_context, normalize)
+                } else {
+                    compute_unified_hunks(&old_text, &new_text, regen_context)
+                };
+                // No change survives the rule. Git still reports an added/deleted
+                // filepair (header, zero counts, no hunk) even when its only content
+                // is blank lines — only a modification disappears entirely.
                 if body.trim().is_empty() {
-                    return false;
+                    // `file.status` is parsed only from the pre-hunk header lines
+                    // (`parse_diff_status` stops at the first `@@`), so a body line
+                    // that merely contains "new file mode" cannot misclassify a
+                    // modification as an add/delete.
+                    let is_add_or_delete = file.status == "added" || file.status == "deleted";
+                    if !is_add_or_delete {
+                        return false;
+                    }
+                    file.insertions = 0;
+                    file.deletions = 0;
+                    file.hunks = Vec::new();
+                    file.raw_diff = strip_unified_diff_body(&file.raw_diff);
+                    return true;
                 }
                 let (insertions, deletions) = count_body_changes(&body);
                 file.insertions = insertions;
@@ -1162,6 +1206,19 @@ fn splice_unified_body(raw_diff: &str, body: &str) -> String {
     format!("{}{}", &raw_diff[..=nl_before_hunk], body)
 }
 
+/// Drop the unified diff (the `--- …`/`+++ …`/`@@`/body) from a file diff, keeping
+/// only the extended header (`diff --git`, `new file mode` / `deleted file mode`,
+/// `index`). Matches Git's output for an added/deleted file whose only content is
+/// blank lines under `--ignore-blank-lines`: the file-level change is still listed
+/// (in `--name-only`/`--stat`/`--summary` and the patch header) but carries no hunk.
+fn strip_unified_diff_body(raw_diff: &str) -> String {
+    let cut = raw_diff.find("\n--- ").or_else(|| raw_diff.find("\n@@ "));
+    match cut {
+        Some(pos) => raw_diff[..pos].to_string(),
+        None => raw_diff.trim_end_matches('\n').to_string(),
+    }
+}
+
 /// Internal representation of diff lines used while assembling unified hunks.
 /// Ported from git_internal's private `compute_unified_diff` so `-U<n>` matches
 /// its (git-faithful) hunk layout for any context width.
@@ -1263,6 +1320,274 @@ fn compute_unified_hunks_normalized(
         changes.push((tag, text));
     }
     assemble_unified_hunks(&changes, context, old_text.len() + new_text.len())
+}
+
+/// A contiguous change group of a diff: `chg1` old lines starting at 0-based old
+/// index `i1` are replaced by `chg2` new lines starting at 0-based new index `i2`.
+/// `ignore` is set when every line the group touches is blank (truly empty) — the
+/// unit `--ignore-blank-lines` operates on.
+struct DiffChangeGroup {
+    i1: usize,
+    chg1: usize,
+    i2: usize,
+    chg2: usize,
+    ignore: bool,
+}
+
+/// Compute the unified-diff hunk body for `--ignore-blank-lines`, faithfully
+/// porting Git's `xdl_get_hunk` blank-aware hunk selection (xdiff/xemit.c).
+///
+/// A blank-only change group does not anchor a hunk: a leading blank-only group
+/// that is `>= ctxlen` lines before the next change is dropped, and a blank-only
+/// group `>= ctxlen` after the previous change is not pulled in — so a blank far
+/// from any real change vanishes (its own hunk would be empty of real changes and
+/// is never emitted). A blank within `< ctxlen` of a real change rides along and
+/// is shown in full, extending the hunk like any change. "Blank" means a TRULY
+/// EMPTY line — a whitespace-only line is not blank. Returns "" when no hunk
+/// survives (the caller drops the file).
+///
+/// Verified line-for-line against real Git across the merge/no-merge boundary: a
+/// far leading blank yields the content hunk only (`@@ -5,4 +6,4 @@`); an
+/// in-window blank merges (`@@ -1,4 +1,5 @@`, blank shown); two real changes that
+/// bracket a blank merge and show it; and the gap threshold is exactly `< ctxlen`.
+///
+/// `normalize` composes a whitespace-ignoring flag with `--ignore-blank-lines`
+/// (e.g. `git diff -w --ignore-blank-lines`): when `Some`, lines are diffed and
+/// classified-as-blank through the normalizer (so a whitespace-only line counts as
+/// blank under `-w`) while the ORIGINAL line text is emitted; when `None`, raw
+/// lines are used and "blank" means a byte-empty line (a `\r`-only CRLF line is NOT
+/// blank).
+///
+/// LIMITATION (pre-existing, shared by every Libra diff mode): Libra's diff models
+/// lines by content only and does not track line terminators, so it cannot emit
+/// Git's `\ No newline at end of file` marker, cannot detect a terminator-only
+/// change (`a\n` vs `a` compare equal), and does not emulate Git's
+/// terminator-dependent `xdl_blankline` `size<=1` blanking of an unterminated final
+/// line. For files whose final line lacks a trailing newline this may diverge from
+/// Git — exactly as `libra diff` / `-w` / `-U<n>` already do. The flag is faithful
+/// for all newline-terminated files (the domain Libra models).
+fn compute_unified_hunks_ignore_blank(old_text: &str, new_text: &str, context: usize) -> String {
+    compute_unified_hunks_ignore_blank_inner(old_text, new_text, context, None)
+}
+
+/// `--ignore-blank-lines` composed with a whitespace normalizer (see
+/// [`compute_unified_hunks_ignore_blank`]).
+fn compute_unified_hunks_ignore_blank_normalized(
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+    normalize: fn(&str) -> String,
+) -> String {
+    compute_unified_hunks_ignore_blank_inner(old_text, new_text, context, Some(normalize))
+}
+
+fn compute_unified_hunks_ignore_blank_inner(
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+    normalize: Option<fn(&str) -> String>,
+) -> String {
+    // Raw records: split on '\n' WITHOUT trimming '\r', so a `\r`-only CRLF blank
+    // line is non-empty (Git does not treat it as blank without a whitespace flag),
+    // and so emitted lines keep their original bytes.
+    let old_lines: Vec<&str> = if old_text.is_empty() {
+        Vec::new()
+    } else {
+        old_text.split('\n').collect()
+    };
+    let new_lines: Vec<&str> = if new_text.is_empty() {
+        Vec::new()
+    } else {
+        new_text.split('\n').collect()
+    };
+    // `split('\n')` leaves a trailing "" when the text ends in a newline; drop it so
+    // the record counts match the real line counts.
+    let nrec1 = old_lines
+        .len()
+        .saturating_sub(old_text.ends_with('\n') as usize);
+    let nrec2 = new_lines
+        .len()
+        .saturating_sub(new_text.ends_with('\n') as usize);
+    let old_recs = &old_lines[..nrec1];
+    let new_recs = &new_lines[..nrec2];
+
+    // Comparison lines: normalized when composing a whitespace flag, else a copy of
+    // the raw records. The diff and blank classification run on these; emission uses
+    // the original `old_recs`/`new_recs`. `cmp_*`/`*_ref` live to function scope so
+    // the borrowed `diff` outlives them.
+    let to_cmp = |recs: &[&str]| -> Vec<String> {
+        match normalize {
+            Some(normalize) => recs.iter().map(|l| normalize(l)).collect(),
+            None => recs.iter().map(|l| l.to_string()).collect(),
+        }
+    };
+    let cmp_old = to_cmp(old_recs);
+    let cmp_new = to_cmp(new_recs);
+    let old_ref: Vec<&str> = cmp_old.iter().map(String::as_str).collect();
+    let new_ref: Vec<&str> = cmp_new.iter().map(String::as_str).collect();
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_slices(&old_ref, &new_ref);
+
+    // Build change groups (maximal runs of insert/delete), tracking 0-based old/new
+    // positions exactly as Git records i1/i2/chg1/chg2.
+    let mut groups: Vec<DiffChangeGroup> = Vec::new();
+    let mut old_pos = 0usize;
+    let mut new_pos = 0usize;
+    let mut cur: Option<DiffChangeGroup> = None;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                if let Some(g) = cur.take() {
+                    groups.push(g);
+                }
+                old_pos += 1;
+                new_pos += 1;
+            }
+            ChangeTag::Delete => {
+                let g = cur.get_or_insert(DiffChangeGroup {
+                    i1: old_pos,
+                    chg1: 0,
+                    i2: new_pos,
+                    chg2: 0,
+                    ignore: true,
+                });
+                g.chg1 += 1;
+                old_pos += 1;
+            }
+            ChangeTag::Insert => {
+                let g = cur.get_or_insert(DiffChangeGroup {
+                    i1: old_pos,
+                    chg1: 0,
+                    i2: new_pos,
+                    chg2: 0,
+                    ignore: true,
+                });
+                g.chg2 += 1;
+                new_pos += 1;
+            }
+        }
+    }
+    if let Some(g) = cur.take() {
+        groups.push(g);
+    }
+    // Mark groups whose every touched line is blank under the comparison view: a
+    // byte-empty content line (or a normalized-empty line when composing a
+    // whitespace flag). Libra's diff models lines by content only and does not
+    // track line terminators, so Git's terminator-dependent `xdl_blankline`
+    // `size<=1` quirk for an unterminated final line is intentionally NOT emulated
+    // — see the no-trailing-newline limitation note below.
+    for g in groups.iter_mut() {
+        let old_blank = cmp_old[g.i1..g.i1 + g.chg1].iter().all(|l| l.is_empty());
+        let new_blank = cmp_new[g.i2..g.i2 + g.chg2].iter().all(|l| l.is_empty());
+        g.ignore = old_blank && new_blank;
+    }
+
+    let max_common = context.saturating_mul(2);
+    let max_ignorable = context;
+    let mut out = String::with_capacity(((old_text.len() + new_text.len()) / 16).max(256));
+
+    // Emit loop: mirrors `xdl_emit_diff`'s hunk iteration over `xdl_get_hunk`.
+    let mut start = 0usize;
+    while start < groups.len() {
+        // Prelude: "remove ignorable changes that are too far before other changes"
+        // (Git's xdl_get_hunk). Walk `p` through every consecutive leading ignorable
+        // group; whenever the next change is `>= max_ignorable` away or absent,
+        // advance `start` past it. Walking past a close ignorable group without
+        // advancing `start` lets a run of blank-only changes with no nearby real
+        // change collapse to nothing (start reaches `groups.len()` → no hunk).
+        let mut p = start;
+        while p < groups.len() && groups[p].ignore {
+            let cur = &groups[p];
+            let far_or_end = match groups.get(p + 1) {
+                None => true,
+                Some(next) => next.i1 - (cur.i1 + cur.chg1) >= max_ignorable,
+            };
+            if far_or_end {
+                start = p + 1;
+            }
+            p += 1;
+        }
+        if start >= groups.len() {
+            break;
+        }
+
+        // `xdl_get_hunk`: find `lxch` (last group in this hunk).
+        let mut lxch = start;
+        let mut ignored = 0usize;
+        let mut prev = start;
+        let mut idx = start + 1;
+        while idx < groups.len() {
+            let distance = groups[idx].i1 - (groups[prev].i1 + groups[prev].chg1);
+            if distance > max_common {
+                break;
+            }
+            if distance < max_ignorable && (!groups[idx].ignore || lxch == prev) {
+                lxch = idx;
+                ignored = 0;
+            } else if distance < max_ignorable && groups[idx].ignore {
+                ignored += groups[idx].chg2;
+            } else if lxch != prev
+                && groups[idx].i1 + ignored > groups[lxch].i1 + groups[lxch].chg1 + max_common
+            {
+                break;
+            } else if !groups[idx].ignore {
+                lxch = idx;
+                ignored = 0;
+            } else {
+                ignored += groups[idx].chg2;
+            }
+            prev = idx;
+            idx += 1;
+        }
+
+        // Context calculation (non-funccontext path of `xdl_emit_diff`).
+        let first = &groups[start];
+        let last = &groups[lxch];
+        let s1 = first.i1.saturating_sub(context);
+        let s2 = first.i2.saturating_sub(context);
+        let tail1 = nrec1 - (last.i1 + last.chg1);
+        let tail2 = nrec2 - (last.i2 + last.chg2);
+        let lctx = context.min(tail1).min(tail2);
+        let e1 = last.i1 + last.chg1 + lctx;
+        let e2 = last.i2 + last.chg2 + lctx;
+
+        // Header (Libra format: always `-s,c +s,c`, no section heading). A
+        // zero-count side anchors at its position rather than position+1.
+        let old_count = e1 - s1;
+        let new_count = e2 - s2;
+        let old_start = if old_count == 0 { s1 } else { s1 + 1 };
+        let new_start = if new_count == 0 { s2 } else { s2 + 1 };
+        let _ = writeln!(
+            out,
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+        );
+
+        // Emit body: context, then each group's deletions and insertions in order.
+        // Context lines come from the NEW (post-image) side — identical to the old
+        // side for a raw diff, and the side Git shows when composing a whitespace
+        // normalizer (where the equal-under-normalize lines may differ verbatim).
+        let mut pos2 = s2;
+        for g in &groups[start..=lxch] {
+            for line in &new_recs[pos2..g.i2] {
+                let _ = writeln!(out, " {line}");
+            }
+            for line in &old_recs[g.i1..g.i1 + g.chg1] {
+                let _ = writeln!(out, "-{line}");
+            }
+            for line in &new_recs[g.i2..g.i2 + g.chg2] {
+                let _ = writeln!(out, "+{line}");
+            }
+            pos2 = g.i2 + g.chg2;
+        }
+        for line in &new_recs[pos2..e2] {
+            let _ = writeln!(out, " {line}");
+        }
+
+        start = lxch + 1;
+    }
+
+    out
 }
 
 /// Count added (`+`) and removed (`-`) lines in a unified-diff hunk BODY (no file
@@ -1506,6 +1831,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         ignore_all_space: false,
         ignore_space_change: false,
         ignore_space_at_eol: false,
+        ignore_blank_lines: false,
         summary: false,
         shortstat: false,
         exit_code: false,
@@ -1757,6 +2083,188 @@ mod test {
             colored::control::unset_override();
         }
     }
+    /// Count the `@@` hunk headers in a unified-diff body.
+    fn hunk_count(body: &str) -> usize {
+        body.lines().filter(|l| l.starts_with("@@")).count()
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_far_blank_is_suppressed() {
+        // `a..h` -> `a,<blank>,b..g,H`. The blank (old~1) and h->H (old-8) are
+        // distance 7 apart > 2*ctx(6), so they do NOT merge: the blank-only hunk
+        // is suppressed and only the content hunk survives (Git: `@@ -5,4 +6,4 @@`).
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let new = "a\n\nb\nc\nd\ne\nf\ng\nH\n";
+        let body = compute_unified_hunks_ignore_blank(old, new, 3);
+        assert_eq!(
+            hunk_count(&body),
+            1,
+            "only the content hunk survives:\n{body}"
+        );
+        assert!(
+            body.contains("@@ -5,4 +6,4 @@"),
+            "content hunk header:\n{body}"
+        );
+        assert!(
+            body.contains("-h") && body.contains("+H"),
+            "real change shown:\n{body}"
+        );
+        assert!(
+            !body.lines().any(|l| l == "+"),
+            "the far blank line is not emitted:\n{body}"
+        );
+        assert!(
+            !body.contains(" a\n") && !body.contains("@@ -1"),
+            "the blank's region is gone entirely:\n{body}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_in_window_blank_rides_along() {
+        // `a,b,c,d` -> `A,b,<blank>,c,d` with -U2: the blank is within the a->A
+        // change's window, so they merge and the blank is shown; the merged hunk
+        // extends to d (Git: `@@ -1,4 +1,5 @@`).
+        let old = "a\nb\nc\nd\n";
+        let new = "A\nb\n\nc\nd\n";
+        let body = compute_unified_hunks_ignore_blank(old, new, 2);
+        assert_eq!(hunk_count(&body), 1, "single merged hunk:\n{body}");
+        assert!(
+            body.contains("@@ -1,4 +1,5 @@"),
+            "merged hunk header:\n{body}"
+        );
+        assert!(
+            body.contains("-a") && body.contains("+A"),
+            "real change shown:\n{body}"
+        );
+        assert!(
+            body.lines().any(|l| l == "+"),
+            "the in-window blank IS shown:\n{body}"
+        );
+        assert!(body.contains(" d"), "context extends to d:\n{body}");
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_two_changes_bracket_blank() {
+        // `a..h` -> `A,b,c,<blank>,d,e,f,g,H`: two real changes (A@1, H@8) merge
+        // (distances 2 and 5, both <= 6) into one hunk that shows the blank between
+        // them (Git: `@@ -1,8 +1,9 @@`).
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let new = "A\nb\nc\n\nd\ne\nf\ng\nH\n";
+        let body = compute_unified_hunks_ignore_blank(old, new, 3);
+        assert_eq!(
+            hunk_count(&body),
+            1,
+            "two changes merge to one hunk:\n{body}"
+        );
+        assert!(
+            body.contains("@@ -1,8 +1,9 @@"),
+            "merged hunk header:\n{body}"
+        );
+        assert!(
+            body.contains("-a") && body.contains("+A"),
+            "first change:\n{body}"
+        );
+        assert!(
+            body.contains("-h") && body.contains("+H"),
+            "second change:\n{body}"
+        );
+        assert!(
+            body.lines().any(|l| l == "+"),
+            "the bracketed blank is shown:\n{body}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_far_change_no_blank_extension() {
+        // `a..f` -> `A,b,c,d,e,<blank>,f`, -U3: the blank (new-6) is far from a->A
+        // (old-1) so it is not shown; only the a->A hunk survives, with normal -U3
+        // context (Git: `@@ -1,4 +1,4 @@`, no blank).
+        let old = "a\nb\nc\nd\ne\nf\n";
+        let new = "A\nb\nc\nd\ne\n\nf\n";
+        let body = compute_unified_hunks_ignore_blank(old, new, 3);
+        assert_eq!(hunk_count(&body), 1, "only the content hunk:\n{body}");
+        assert!(
+            body.contains("@@ -1,4 +1,4 @@"),
+            "content hunk header:\n{body}"
+        );
+        assert!(
+            !body.lines().any(|l| l == "+"),
+            "the far blank is not shown:\n{body}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_drops_blank_only_and_keeps_ws() {
+        // A change that is only an added blank line -> empty body (file drops out).
+        assert!(
+            compute_unified_hunks_ignore_blank("x\ny\n", "x\n\ny\n", 3)
+                .trim()
+                .is_empty(),
+            "blank-only change yields no hunks"
+        );
+        // A whitespace-only added line is NOT blank -> a hunk survives.
+        let ws = compute_unified_hunks_ignore_blank("a\nb\n", "a\n  \nb\n", 3);
+        assert!(
+            !ws.trim().is_empty(),
+            "whitespace-only line is not blank: {ws}"
+        );
+        assert!(
+            ws.lines().any(|l| l == "+  "),
+            "the whitespace-only line is shown verbatim: {ws}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_crlf_empty_is_not_blank() {
+        // A `\r`-only (CRLF) empty line is NOT blank to Git's xdl_blankline without
+        // a whitespace flag (size <= 1 means LF-only), so its insertion is shown.
+        let body = compute_unified_hunks_ignore_blank("a\nb\n", "a\n\r\nb\n", 3);
+        // `split('\n')` (unlike `lines()`) keeps the `\r`, so the emitted `+\r` line
+        // is visible verbatim.
+        assert!(
+            body.split('\n').any(|l| l == "+\r"),
+            "a CRLF empty line is shown, not suppressed:\n{body:?}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_composes_with_whitespace_normalizer() {
+        // `-w --ignore-blank-lines`: a whitespace-only inserted line normalizes to
+        // empty under `-w`, so it counts as blank and is suppressed (matches Git).
+        let composed = compute_unified_hunks_ignore_blank_normalized(
+            "a\nb\n",
+            "a\n  \nb\n",
+            3,
+            normalize_ignore_all_space,
+        );
+        assert!(
+            composed.trim().is_empty(),
+            "-w makes the whitespace-only line blank, so it is suppressed:\n{composed}"
+        );
+        // Without the normalizer, a whitespace-only line is NOT blank -> shown.
+        let plain = compute_unified_hunks_ignore_blank("a\nb\n", "a\n  \nb\n", 3);
+        assert!(
+            plain.lines().any(|l| l == "+  "),
+            "without -w the whitespace-only line is shown:\n{plain}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_blank_lines_multiple_close_blanks_no_real_change() {
+        // Two adjacent blank-only inserts with NO real change anywhere: Git's
+        // prelude walks past both ignorable groups (the second's next is the end),
+        // collapsing the whole run to nothing. Regression for an early-`break`
+        // prelude that stopped at the first close pair and emitted the blanks.
+        let old = "a\nc\nd\ne\ne\nf\ng\nf\ng\nc\ne\nf\n";
+        let new = "a\nc\n\nd\n\ne\ne\nf\ng\nf\ng\nc\ne\nf\n";
+        assert!(
+            compute_unified_hunks_ignore_blank(old, new, 3)
+                .trim()
+                .is_empty(),
+            "blank-only inserts (even adjacent) with no real change produce no hunks"
+        );
+    }
+
     #[test]
     /// Tests command line argument parsing for the diff command with various parameter combinations.
     /// Verifies parameter requirements, conflicts and default values are handled correctly.

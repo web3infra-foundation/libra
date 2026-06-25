@@ -1615,3 +1615,168 @@ fn test_diff_ignore_space_change_and_ignore_space_at_eol() {
         );
     }
 }
+
+#[test]
+fn test_diff_ignore_blank_lines() {
+    // End-to-end `--ignore-blank-lines`, validated against real `git` behavior:
+    // a blank far from any real change is suppressed (with the kept hunk's line
+    // numbers shifted by it), a blank near a real change rides along, a blank-only
+    // change drops the file, and a whitespace-only line is NOT treated as blank.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_f = |content: &str, msg: &str| {
+        fs::write(p.join("f.txt"), content).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+            "commit f",
+        );
+    };
+    let out =
+        |args: &[&str]| String::from_utf8_lossy(&run_libra_command(args, p).stdout).into_owned();
+
+    // Far blank (gap 6 > ctx) is suppressed; only the h->H hunk survives, with the
+    // new-side start shifted by the ignored blank (Git: `@@ -5,4 +6,4 @@`).
+    commit_f("a\nb\nc\nd\ne\nf\ng\nh\n", "base1");
+    fs::write(p.join("f.txt"), "a\n\nb\nc\nd\ne\nf\ng\nH\n").unwrap();
+    let far = out(&["diff", "--ignore-blank-lines", "f.txt"]);
+    assert!(
+        far.contains("@@ -5,4 +6,4 @@"),
+        "far blank suppressed, hunk shifted:\n{far}"
+    );
+    assert!(
+        far.contains("-h") && far.contains("+H"),
+        "real change shown:\n{far}"
+    );
+    assert!(
+        !far.lines().any(|l| l == "+"),
+        "far blank line not emitted:\n{far}"
+    );
+
+    // In-window blank (gap 1 < ctx=2) rides along with the a->A change.
+    commit_f("a\nb\nc\nd\n", "base2");
+    fs::write(p.join("f.txt"), "A\nb\n\nc\nd\n").unwrap();
+    let near = out(&["diff", "--ignore-blank-lines", "-U2", "f.txt"]);
+    assert!(
+        near.contains("@@ -1,4 +1,5 @@"),
+        "in-window blank merges:\n{near}"
+    );
+    assert!(
+        near.lines().any(|l| l == "+"),
+        "in-window blank is shown:\n{near}"
+    );
+
+    // A change that is only an added blank line -> the file drops out.
+    commit_f("x\ny\n", "base3");
+    fs::write(p.join("f.txt"), "x\n\ny\n").unwrap();
+    assert!(
+        out(&["diff", "f.txt"]).contains("@@"),
+        "plain diff shows the blank add"
+    );
+    assert!(
+        out(&["diff", "--ignore-blank-lines", "f.txt"])
+            .trim()
+            .is_empty(),
+        "blank-only change drops the file"
+    );
+    assert!(
+        out(&["diff", "--ignore-blank-lines", "--name-only", "f.txt"])
+            .trim()
+            .is_empty(),
+        "blank-only change drops from --name-only too"
+    );
+
+    // A whitespace-only added line is NOT blank -> still shown.
+    commit_f("a\nb\n", "base4");
+    fs::write(p.join("f.txt"), "a\n  \nb\n").unwrap();
+    assert!(
+        !out(&["diff", "--ignore-blank-lines", "f.txt"])
+            .trim()
+            .is_empty(),
+        "whitespace-only line is not ignored"
+    );
+}
+
+#[test]
+fn test_diff_ignore_blank_lines_keeps_added_blank_only_file() {
+    // An added file whose entire content is blank lines is still reported as a
+    // file-level change (in --name-only and --stat, with zero counts and no hunk),
+    // matching `git diff --ignore-blank-lines` — only a modification with no
+    // surviving change disappears.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("blankonly.txt"), "\n\n\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "blankonly.txt"], p),
+        "add blank file",
+    );
+
+    let name_only = String::from_utf8_lossy(
+        &run_libra_command(
+            &["diff", "--ignore-blank-lines", "--name-only", "--staged"],
+            p,
+        )
+        .stdout,
+    )
+    .into_owned();
+    assert!(
+        name_only.lines().any(|l| l == "blankonly.txt"),
+        "added blank-only file still appears in --name-only:\n{name_only}"
+    );
+
+    let stat = String::from_utf8_lossy(
+        &run_libra_command(&["diff", "--ignore-blank-lines", "--stat", "--staged"], p).stdout,
+    )
+    .into_owned();
+    assert!(
+        stat.contains("blankonly.txt") && stat.contains("1 file changed"),
+        "added blank-only file appears in --stat with zero counts:\n{stat}"
+    );
+}
+
+#[test]
+fn test_diff_ignore_blank_lines_modification_with_header_like_content_is_dropped() {
+    // A MODIFICATION whose only surviving change is blank lines must drop out, even
+    // when its content contains header-like text such as "new file mode 100644".
+    // Guards against classifying it as an add/delete via a raw substring scan.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(
+        p.join("m.txt"),
+        "new file mode 100644\n--- /dev/null\nbody\n",
+    )
+    .unwrap();
+    assert_cli_success(&run_libra_command(&["add", "m.txt"], p), "add m");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit m",
+    );
+    // Modify by inserting only blank lines.
+    std::fs::write(
+        p.join("m.txt"),
+        "new file mode 100644\n\n--- /dev/null\n\nbody\n",
+    )
+    .unwrap();
+    let plain =
+        String::from_utf8_lossy(&run_libra_command(&["diff", "m.txt"], p).stdout).into_owned();
+    assert!(
+        plain.contains("@@"),
+        "plain diff shows the blank insertions:\n{plain}"
+    );
+    let ibl = String::from_utf8_lossy(
+        &run_libra_command(&["diff", "--ignore-blank-lines", "m.txt"], p).stdout,
+    )
+    .into_owned();
+    assert!(
+        ibl.trim().is_empty(),
+        "a modification with only blank changes is dropped despite header-like content:\n{ibl}"
+    );
+    let names = String::from_utf8_lossy(
+        &run_libra_command(&["diff", "--ignore-blank-lines", "--name-only", "m.txt"], p).stdout,
+    )
+    .into_owned();
+    assert!(
+        names.trim().is_empty(),
+        "and does not appear in --name-only:\n{names}"
+    );
+}
