@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra init` 的目标是在目录中初始化 Libra 仓库，创建数据库、对象目录、默认 refs、索引和必要配置。实现需要在已存在仓库上拒绝重复初始化（`is_reinit()` 检测后返回 `InitError::AlreadyInitialized`，尚不支持 Git 式安全重初始化）、shared 模式、从 Git 布局迁移的边界、JSON 输出和错误码，并明确子模块递归初始化不在当前范围。
+`libra init` 的目标是在目录中初始化 Libra 仓库，创建数据库、对象目录、默认 refs、索引和必要配置。在已存在仓库上再次 `init` 执行 Git 式安全重初始化（`is_reinit()` 检测后走 `reinitialize_existing()`：补齐标准布局、重应用 `--shared`、保留数据库 config/HEAD/refs/objects/vault/repoid，打印 `Reinitialized existing ...`），并支持 shared 模式、从 Git 布局迁移的边界、JSON 输出和错误码，且明确子模块递归初始化不在当前范围。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。新仓库初始化已支持；对已有 Libra 仓库执行安全 re-init/top-up 尚未实现。
+- 兼容级别：`partial`。新仓库初始化已支持；对已有 Libra 仓库执行安全 re-init/top-up 已实现（保留 DB，补齐布局，`InitOutput.reinitialized=true`，banner 改为 `Reinitialized existing ...`）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -36,8 +36,9 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-01-19 `ae8c949a`（`add tests(init): handle unwritable parent dir, fix pre-commit hook generation, and clarify HEAD default behavior (#151)`）：基础实现节点：add tests(init): handle unwritable parent dir, fix pre-commit hook generation, and clarify HEAD default behavior (#151)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `d29da9bf`（`feat(init): support safe re-initialization of existing repositories`）：该提交曾尝试支持安全重新初始化（topup 布局、`InitOutput.reinitialized`、`handle_reinit()` 分支、`Reinitialized existing ...` 提示），但当前 HEAD 的 `src/command/init.rs` 中这些代码均已不存在（被回退/未最终落地）；现状仍是 `is_reinit()` 检测到已存在仓库即直接返回 `InitError::AlreadyInitialized`。详见下文“还未实现的功能”缺口表。
+- 2026-01-19 `ae8c949a`（`add tests(init): handle unwritable parent dir, fix pre-commit hook generation, and clarify HEAD default behavior (#151)`）：基础实现节点：add tests(init): handle unwritable parent dir, fix Libra-owned `.libra/hooks/pre-commit.*` template generation, and clarify HEAD default behavior (#151)；当前实现的主要轮廓可追溯到该提交。该历史节点不表示支持 Git hooks bridge；`.git/hooks` / `core.hooksPath` 仍按 D3 拒绝。
+- 2026-06-05 `d29da9bf`（`feat(init): support safe re-initialization of existing repositories`）：该提交曾尝试支持安全重新初始化，但在后续 reconcile 中丢失（[[goal_loop_work_vanished]] 模式）。
+- 2026-06-25 (#156)：重新落地安全重初始化。`run_init_internal` 中 `is_reinit()` 命中后改走 `reinitialize_existing()`：`prepare_repository_layout` 补齐缺失模板、重应用 `--shared`、用 `get_db_conn_instance_for_path` 连接现有 DB（而非 `create_database_connection`，后者会拒绝已存在文件），从 config/HEAD 读回 objectformat/initrefformat/repoid/bare/vault.signing/分支填充 `InitOutput`（新增 `reinitialized: bool`），banner 改为 `Reinitialized existing{bare} Libra repository in ...`。`--from-git-repository` 在已存在仓库上拒绝（`InvalidArgument`）；`--initial-branch`/`--object-format` 若与现有不符则忽略并 warn。删除了不再可达的 `InitError::AlreadyInitialized` 变体。回归测试 `init_bare_reinit_tops_up_and_preserves_state` / `init_worktree_reinit_tops_up_and_preserves_state`。
 - 2026-06-05 `901b433b`（`feat(init): persist core.sharedRepository and isolate vault.db from --shared chmod`）：功能演进：persist core.sharedRepository and isolate vault.db from --shared chmod；该节点扩展了当前命令可用的参数或行为。
 - 2026-06-07 `99c39206`（`fix(init): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -55,7 +56,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容差异项 | Recurse submodules | 原始对照：git init + git submodule init；相关参数/替代：不适用；当前说明：不适用 (submodules not 支持)。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 安全重新初始化（在已存在仓库上再次 `init`） | 原始对照：`git init`（在已存在仓库上打印 `Reinitialized existing ...` 并补齐缺失布局）；相关参数/替代：无；当前说明：`run_init_internal` 中 `is_reinit()` 检测到 `.libra/`（或 bare 布局）即返回 `InitError::AlreadyInitialized`，提示移除已有 Libra 状态后重试，不做 topup 重初始化。提交 `d29da9bf` 的相关实现已不在当前 HEAD。后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 安全重新初始化（在已存在仓库上再次 `init`） | `git init` 风格：打印 `Reinitialized existing{bare} Libra repository in ...`、补齐缺失标准布局（模板/目录）、重应用 `--shared`，并完整保留现有数据库（config/HEAD/refs/objects/vault/repoid）。`reinitialize_existing()` 用 `get_db_conn_instance_for_path` 连接现有 DB，从 config/HEAD 读回身份/格式填充 `InitOutput`（`reinitialized=true`）。`--from-git-repository` 在已初始化仓库上拒绝；`--initial-branch`/`--object-format` 与现有不符则忽略并 warn。带回归测试。 |
 
 ## 维护要求
 

@@ -16,6 +16,8 @@ libra init [OPTIONS] [DIRECTORY]
 
 提供 `--from-git-repository` 时，会从源 Git 仓库导入对象和 refs，并配置 `origin` 指向源分支布局。在源工作树或已 checkout 导入中发现的任何 `.gitignore` 文件都会复制为匹配的 `.libraignore` 文件。
 
+在已初始化的仓库中再次运行 `libra init` 是安全的：与 `git init` 一致，它会就地重新初始化，打印 `Reinitialized existing Libra repository in <path>`，补齐缺失的标准布局（模板、目录）并重新应用 `--shared`，同时完整保留现有数据库——配置、`HEAD`、refs、对象、vault 与仓库 id 均不受影响。当 `--initial-branch`/`--object-format` 与现有仓库不一致时会被忽略（并给出警告）；`--from-git-repository` 在已初始化的仓库上会被拒绝。
+
 ## 选项
 
 ### `[DIRECTORY]`
@@ -153,7 +155,8 @@ Initialized empty Libra repository in /path/to/repo/.libra
     "vault_signing": true,
     "converted_from": null,
     "ssh_key_detected": "/Users/alice/.ssh/id_ed25519",
-    "warnings": []
+    "warnings": [],
+    "reinitialized": false
   }
 }
 ```
@@ -211,8 +214,8 @@ jj（`jj git init`）包装 Git 后端，不创建自己的对象存储；它将
 
 | 场景 | 错误码 | 退出码 | 提示 |
 |----------|-----------|------|------|
-| 无效参数（错误分支名、错误格式） | `LBR-CLI-001` | 129 | 因参数而异 |
-| 仓库已初始化 | `LBR-REPO-003` | 128 | "remove .libra/ to reinitialize" |
+| 无效参数（错误分支名、错误格式） | `LBR-CLI-002` | 129 | 因参数而异 |
+| 在已初始化仓库上使用 `--from-git-repository` | `LBR-CLI-002` | 129 | "convert into a fresh directory instead" |
 | 找不到源 Git 仓库 | `LBR-IO-001` | 128 | -- |
 | 源不是有效 Git 仓库 | `LBR-CLI-003` | 129 | "a valid Git repository must contain HEAD, config, and objects" |
 | 找不到模板目录 | `LBR-IO-001` | 128 | -- |

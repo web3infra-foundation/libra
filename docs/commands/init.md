@@ -24,6 +24,15 @@ repository and `origin` is configured to point at the source branch layout. Any 
 files found in the source worktree or checked-out import are copied to matching
 `.libraignore` files.
 
+Running `libra init` again inside an already-initialized repository is safe: like
+`git init`, it re-initializes in place, printing `Reinitialized existing Libra
+repository in <path>` and re-creating any missing standard layout (templates,
+directories) and re-applying `--shared`, while preserving the existing database —
+configuration, `HEAD`, refs, objects, vault, and repository id are untouched.
+`--initial-branch` and `--object-format` are ignored (with a warning) when they
+differ from the existing repository, and `--from-git-repository` is rejected on an
+already-initialized repository.
+
 ## Options
 
 ### `[DIRECTORY]`
@@ -172,7 +181,8 @@ Example:
     "vault_signing": true,
     "converted_from": null,
     "ssh_key_detected": "/Users/alice/.ssh/id_ed25519",
-    "warnings": []
+    "warnings": [],
+    "reinitialized": false
   }
 }
 ```
@@ -260,8 +270,8 @@ Every `InitError` variant maps to an explicit `StableErrorCode`.
 
 | Scenario | Error Code | Exit | Hint |
 |----------|-----------|------|------|
-| Invalid argument (bad branch name, bad format) | `LBR-CLI-001` | 129 | varies by argument |
-| Repository already initialized | `LBR-REPO-003` | 128 | "remove .libra/ to reinitialize" |
+| Invalid argument (bad branch name, bad format) | `LBR-CLI-002` | 129 | varies by argument |
+| `--from-git-repository` on an already-initialized repo | `LBR-CLI-002` | 129 | "convert into a fresh directory instead" |
 | Source Git repository not found | `LBR-IO-001` | 128 | -- |
 | Source is not a valid Git repository | `LBR-CLI-003` | 129 | "a valid Git repository must contain HEAD, config, and objects" |
 | Template directory not found | `LBR-IO-001` | 128 | -- |

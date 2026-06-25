@@ -320,7 +320,7 @@ async fn init_target_repo_does_not_inherit_local_identity_from_current_repo() {
 }
 
 #[test]
-fn init_bare_reinit_returns_repo_state_invalid() {
+fn init_bare_reinit_tops_up_and_preserves_state() {
     let temp = tempdir().unwrap();
 
     let first = run_libra_command(
@@ -330,22 +330,32 @@ fn init_bare_reinit_returns_repo_state_invalid() {
     assert_cli_success(&first, "initial bare init");
 
     let bare_repo = temp.path().join("repo.git");
-    let second = run_libra_command(&["init", "--bare", "--vault", "false"], &bare_repo);
-    assert_eq!(second.status.code(), Some(128));
+    let repo_id = |dir: &std::path::Path| {
+        String::from_utf8_lossy(&run_libra_command(&["config", "get", "libra.repoid"], dir).stdout)
+            .trim()
+            .to_string()
+    };
+    let id_before = repo_id(&bare_repo);
+    assert!(!id_before.is_empty(), "bare repo id should be set");
 
-    let stderr = String::from_utf8_lossy(&second.stderr);
+    // Git-style re-initialization succeeds, prints the "Reinitialized existing"
+    // banner, and preserves the existing repository identity.
+    let second = run_libra_command(&["init", "--bare", "--vault", "false"], &bare_repo);
+    assert_cli_success(&second, "bare reinit should succeed");
+    let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
-        stderr.contains("repository already initialized"),
-        "expected reinit failure, got: {stderr}"
+        stdout.contains("Reinitialized existing") && stdout.contains("bare"),
+        "expected bare reinit banner, got: {stdout}"
     );
-    assert!(
-        stderr.contains("LBR-REPO-003"),
-        "expected stable repo-state code, got: {stderr}"
+    assert_eq!(
+        repo_id(&bare_repo),
+        id_before,
+        "bare repo id preserved across reinit"
     );
 }
 
 #[test]
-fn init_worktree_reinit_returns_repo_state_invalid() {
+fn init_worktree_reinit_tops_up_and_preserves_state() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -353,21 +363,313 @@ fn init_worktree_reinit_returns_repo_state_invalid() {
     let first = run_libra_command(&["init", "--vault", "false"], &repo);
     assert_cli_success(&first, "initial worktree init");
 
-    let second = run_libra_command(&["init", "--vault", "false"], &repo);
-    assert_eq!(second.status.code(), Some(128));
+    let config_value = |key: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["config", "get", key], &repo).stdout)
+            .trim()
+            .to_string()
+    };
+    let id_before = config_value("libra.repoid");
+    assert!(!id_before.is_empty(), "repo id should be set");
+    // A user config value must survive re-initialization.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "user.name", "Reinit Tester"], &repo),
+        "set user.name",
+    );
+    // Customize a standard template file: re-init must NOT clobber it (Git-style
+    // top-up only writes MISSING files).
+    let exclude = repo.join(".libra/info/exclude");
+    fs::write(&exclude, "# my custom excludes\ncustom-cache/\n").unwrap();
+    // Remove a different standard template file to prove re-init tops it back up.
+    let pre_commit = repo.join(".libra/hooks/pre-commit.sh");
+    if pre_commit.exists() {
+        fs::remove_file(&pre_commit).unwrap();
+    }
 
-    let stderr = String::from_utf8_lossy(&second.stderr);
+    let second = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&second, "worktree reinit should succeed");
+    let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
-        stderr.contains("repository already initialized"),
-        "expected worktree reinit failure, got: {stderr}"
+        stdout.contains("Reinitialized existing"),
+        "expected worktree reinit banner, got: {stdout}"
+    );
+
+    // Database state (repo id + user config) is preserved.
+    assert_eq!(config_value("libra.repoid"), id_before, "repo id preserved");
+    assert_eq!(
+        config_value("user.name"),
+        "Reinit Tester",
+        "user config preserved"
+    );
+    // The customized template is preserved verbatim; the missing one is re-created.
+    assert_eq!(
+        fs::read_to_string(&exclude).unwrap(),
+        "# my custom excludes\ncustom-cache/\n",
+        "reinit must not clobber a customized info/exclude"
     );
     assert!(
-        stderr.contains("remove .libra/ to reinitialize."),
-        "expected worktree reinit hint, got: {stderr}"
+        pre_commit.exists(),
+        "reinit re-created the missing pre-commit.sh template"
+    );
+}
+
+#[test]
+fn init_reinit_ignored_flag_warning_triggers_exit_code_on_warning() {
+    // Re-initializing with a differing --initial-branch emits an "ignored" warning;
+    // under --exit-code-on-warning that warning must change the exit code (the
+    // warning is recorded in every output mode).
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false", "-b", "main"], &repo),
+        "initial init",
+    );
+
+    let warned = run_libra_command(
+        &[
+            "--exit-code-on-warning",
+            "init",
+            "--vault",
+            "false",
+            "-b",
+            "different",
+        ],
+        &repo,
+    );
+    let stderr = String::from_utf8_lossy(&warned.stderr);
+    assert!(
+        stderr.contains("ignoring --initial-branch"),
+        "expected an ignored-flag warning, got: {stderr}"
+    );
+    assert_ne!(
+        warned.status.code(),
+        Some(0),
+        "--exit-code-on-warning should make the ignored-flag warning non-zero"
+    );
+}
+
+#[test]
+fn init_reinit_rejects_invalid_flag_values() {
+    // Re-init still VALIDATES supplied `--object-format`/`--initial-branch`: an
+    // invalid value is rejected (non-zero) rather than silently warned/ignored.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "initial init",
+    );
+
+    // Remove a standard template so we can prove an INVALID reinit performs no
+    // filesystem side effects before failing (validation precedes the top-up).
+    let pre_commit = repo.join(".libra/hooks/pre-commit.sh");
+    if pre_commit.exists() {
+        fs::remove_file(&pre_commit).unwrap();
+    }
+
+    let bad_format = run_libra_command(
+        &["init", "--vault", "false", "--object-format", "sha265"],
+        &repo,
+    );
+    assert_ne!(
+        bad_format.status.code(),
+        Some(0),
+        "reinit must reject an invalid --object-format"
     );
     assert!(
-        stderr.contains("LBR-REPO-003"),
-        "expected stable repo-state code, got: {stderr}"
+        !pre_commit.exists(),
+        "an invalid reinit must not top up the layout before failing"
+    );
+
+    let bad_branch = run_libra_command(&["init", "--vault", "false", "-b", "bad..branch"], &repo);
+    assert_ne!(
+        bad_branch.status.code(),
+        Some(0),
+        "reinit must reject an invalid --initial-branch"
+    );
+
+    // A subsequent VALID reinit does top up the missing template.
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "valid reinit",
+    );
+    assert!(
+        pre_commit.exists(),
+        "a valid reinit re-creates the missing template"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_reinit_refuses_symlinked_layout_dir() {
+    use std::os::unix::fs::symlink;
+
+    // A re-init must not follow a symlinked layout directory and write templates
+    // outside the repository.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "initial init",
+    );
+
+    // Replace .libra/hooks with a symlink pointing at an outside directory.
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let hooks = repo.join(".libra/hooks");
+    fs::remove_dir_all(&hooks).unwrap();
+    symlink(&outside, &hooks).unwrap();
+
+    let reinit = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_ne!(
+        reinit.status.code(),
+        Some(0),
+        "reinit must refuse a symlinked layout directory"
+    );
+    assert!(
+        !outside.join("pre-commit.sh").exists(),
+        "reinit must not write a template through the symlink into the outside directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_reinit_template_refuses_symlinked_layout_dir() {
+    use std::os::unix::fs::symlink;
+
+    // The `--template` copy path must also refuse to follow a symlinked layout
+    // directory out of the repository during re-init.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "initial init",
+    );
+
+    // A template directory with a hooks/ entry to copy.
+    let template = temp.path().join("template");
+    fs::create_dir_all(template.join("hooks")).unwrap();
+    fs::write(template.join("hooks").join("post-checkout"), "echo hi\n").unwrap();
+
+    // Symlink .libra/hooks to an outside directory.
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let hooks = repo.join(".libra/hooks");
+    fs::remove_dir_all(&hooks).unwrap();
+    symlink(&outside, &hooks).unwrap();
+
+    let reinit = run_libra_command(
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--template",
+            template.to_str().unwrap(),
+        ],
+        &repo,
+    );
+    assert_ne!(
+        reinit.status.code(),
+        Some(0),
+        "reinit --template must refuse a symlinked hooks directory"
+    );
+    assert!(
+        !outside.join("post-checkout").exists(),
+        "reinit --template must not copy a template file through the symlink"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_reinit_template_does_not_write_through_symlinked_file() {
+    use std::os::unix::fs::symlink;
+
+    // The `--template` copy must not follow a symlinked destination FILE (the case the
+    // old `exists()` check would have followed): a broken symlink pointing outside the
+    // repo must be left untouched, and its target must never be created.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], &repo),
+        "initial init",
+    );
+
+    let template = temp.path().join("template");
+    fs::create_dir_all(template.join("hooks")).unwrap();
+    fs::write(template.join("hooks").join("post-checkout"), "echo hi\n").unwrap();
+
+    // `.libra/hooks` stays a REAL directory; only the destination FILE is a (broken)
+    // symlink to an outside, not-yet-existing target.
+    let outside_target = temp.path().join("outside-target");
+    let dest_file = repo.join(".libra/hooks/post-checkout");
+    symlink(&outside_target, &dest_file).unwrap();
+
+    let reinit = run_libra_command(
+        &[
+            "init",
+            "--vault",
+            "false",
+            "--template",
+            template.to_str().unwrap(),
+        ],
+        &repo,
+    );
+    assert_cli_success(
+        &reinit,
+        "reinit --template with a symlinked destination file should succeed (file skipped)",
+    );
+    assert!(
+        !outside_target.exists(),
+        "reinit must not write through the symlinked file to create the outside target"
+    );
+    assert!(
+        fs::symlink_metadata(&dest_file)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlinked destination file is left untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_reinit_shared_preserves_vault_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `--shared` chmods the whole tree on re-init; the existing vault database must
+    // stay owner-only (0o600) so private signing material is never exposed.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    // A vaulted repo (default) so vault.db exists.
+    assert_cli_success(&run_libra_command(&["init"], &repo), "vaulted init");
+    let vault_db = repo.join(".libra/vault.db");
+    assert!(vault_db.exists(), "vaulted init should create vault.db");
+    let mode_before = fs::metadata(&vault_db).unwrap().permissions().mode() & 0o777;
+
+    let second = run_libra_command(&["init", "--shared", "all"], &repo);
+    assert_cli_success(&second, "shared reinit should succeed");
+
+    // `--shared all` must NOT widen the private vault database (it is skipped by the
+    // chmod sweep), so its mode is unchanged — in particular it does not gain the
+    // group/world WRITE+EXEC bits the sweep applies elsewhere.
+    let mode_after = fs::metadata(&vault_db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode_after, mode_before,
+        "vault.db mode must be unchanged by --shared reinit (not widened), got {mode_after:o}"
+    );
+    // ...while a non-vault file IS widened, proving the --shared sweep actually ran.
+    let exclude_mode = fs::metadata(repo.join(".libra/info/exclude"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        exclude_mode, 0o777,
+        "a non-vault file should be widened by --shared all, got {exclude_mode:o}"
     );
 }
 

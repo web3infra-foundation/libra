@@ -23,7 +23,7 @@ batch document.
 
 | Command | Tier | Notes |
 |---------|------|-------|
-| init | partial | common initialization is supported; safe re-initialization/top-up of an existing Libra repo is not implemented |
+| init | partial | common initialization plus Git-style safe re-initialization/top-up of an existing repo (prints `Reinitialized existing ...`, re-creates missing layout, re-applies `--shared`, preserves config/HEAD/refs/objects/vault/repo-id) are supported; recursive submodule init is not |
 | clone | partial | `--depth`, `--single-branch`/`--no-single-branch` (toggle; `--no-single-branch` countermands `--single-branch`, last wins, and clone fetches all branches by default so `--no-single-branch` alone is a no-op), `--tags`/`--no-tags` (clone fetches all tags by default like Git; `--no-tags` skips them and records `remote.origin.tagOpt=--no-tags`), and `--no-progress` (suppresses the fetch "Receiving objects" progress meter during the clone, like `git clone --no-progress`) supported; `--sparse` unsupported (see [docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/development/commands/_compatibility.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/development/commands/_compatibility.md#d4-clone---recurse-submodules](docs/development/commands/_compatibility.md#d4-clone---recurse-submodules)) |
 | code | intentionally-different | Libra AI extension, not a Git command |
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
