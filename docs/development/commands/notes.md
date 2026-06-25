@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra notes` 的目标是管理提交 notes，包括 add、append、copy、edit、show、list、remove 等基础操作。当前已实现并公开接入顶层 CLI；后续按需补齐 merge/prune 和交互式编辑器支持。
+`libra notes` 的目标是管理提交 notes，包括 add、append、copy、edit、show、list、remove、merge 等操作。当前已实现并公开接入顶层 CLI；`notes merge` 是对扁平 note 行的 2-way 合并（Libra notes 是 SQLite 行、非 commit-backed tree，故无 3-way base），支持 `--strategy=manual|ours|theirs|union|cat_sort_uniq`；后续按需补齐 prune、get-ref 和交互式编辑器支持。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 add/append/copy/edit/show/list/remove 已公开；merge/prune 和交互式编辑器未实现。
+- 兼容级别：`partial`。基础 add/append/copy/edit/show/list/remove 与 `merge`（2-way 扁平行合并，`--strategy=manual|ours|theirs|union|cat_sort_uniq`，manual 在冲突时中止、无 NOTES_MERGE worktree）已公开；prune、get-ref 和交互式编辑器未实现。
 
 
 ## 设计方案
@@ -41,8 +41,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `notes`，`src/internal/mod.rs` 导出 `notes`，`src/cli.rs::Commands::Notes` 负责 CLI 接入。
 - 用户文档：`docs/commands/notes.md`。
-- Synopsis：`libra notes [--ref <ref>] add [-m <message>]... [-F <file>]... [-f] [<object>]`（`-m`/`-F` 可重复并按命令行顺序任意混用）。
-- 公开参数/子命令包括：`Subcommands`、`Flag examples`。
+- Synopsis：`libra notes [--ref <ref>] add [-m <message>]... [-F <file>]... [-f] [<object>]`（`-m`/`-F` 可重复并按命令行顺序任意混用）；`libra notes [--ref <ref>] merge [-s|--strategy <manual|ours|theirs|union|cat_sort_uniq>] <other-ref>`。
+- 公开参数/子命令包括：`Subcommands`（含 `merge`）、`Flag examples`。`merge` 把 `<other-ref>` 的 note 行合并进当前 `--ref`（默认 refs/notes/commits）：仅在 `<other>` 的对象→复制、相同→跳过、不同→按 `--strategy` 解决（`manual` 默认，冲突即中止且不改任何行；`ours`/`theirs`/`union`/`cat_sort_uniq` 自动解决；未知 strategy→`LBR-CLI-002`/129）。
 
 
 ## 还未实现的功能
@@ -53,7 +53,8 @@ flowchart TD
 | ✅ 已实现 | Append | `notes append` 在现有 note 后追加（空行分隔；无 note 时新建，复用 `notes::show` 读取 + `notes::add(force)` 写入）。带集成测试（`notes_append_concatenates_to_existing_note`、`notes_append_creates_note_when_absent`）。 |
 | ✅ 已实现 | Copy | `notes copy [-f] <from> <to>` 复用 `notes::show(from)`（源无 note 报错）+ `notes::add(to, text, force)`（目标已有 note 且无 `-f` 报错）。带集成测试（`notes_copy_duplicates_note_to_another_object`、`notes_copy_fails_when_source_has_no_note`）。 |
 | ✅ 已实现 | Edit | `notes edit` 无条件设置（替换）note，不存在则新建（区别于 `add` 已存在即失败）；复用 `notes::add(force=true)`。交互式编辑器未支持，故需 `-m`/`-F`。带集成测试（`notes_edit_sets_and_replaces_note`）。 |
-| 兼容差异项 | Merge / Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现。后续若需支持，补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Merge | `notes merge <other-ref>`：2-way 扁平行合并（无 3-way base，Libra notes 是 SQLite 行）。`--strategy=manual`（默认，冲突中止、all-or-nothing、无 NOTES_MERGE worktree）/`ours`/`theirs`/`union`/`cat_sort_uniq`。带集成测试（`test_notes_merge_strategies_copy_and_manual_conflict`：manual-abort/theirs/copy/union/未知 strategy）。 |
+| 兼容差异项 | Prune | 原始对照：支持；相关参数/替代：不支持；当前说明：未实现（destructive，依赖存储层严格性，见 dev-loop 备忘的 notes-prune 非收敛记录）。 |
 | 兼容差异项 | Editor support | 原始对照：Interactive editor (default)；相关参数/替代：不支持 (-m / -F required)；当前说明：未实现。
 
 ## 维护要求

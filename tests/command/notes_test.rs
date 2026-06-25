@@ -1374,3 +1374,254 @@ fn notes_edit_sets_and_replaces_note() {
     );
     assert!(!shown.contains("first"), "old note text is gone: {shown:?}");
 }
+
+#[test]
+fn test_notes_merge_strategies_copy_and_manual_conflict() {
+    // `notes merge <other-ref>` is a 2-way merge of the flat notes rows: copy
+    // objects annotated only in <other>, skip identical notes, and resolve a
+    // differing note per --strategy (manual aborts).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // A second commit so we have two distinct annotatable objects (HEAD, HEAD~1).
+    std::fs::write(p.join("f.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+
+    // Conflicting notes on HEAD: current ref "AAA", other ref "BBB".
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "AAA", "HEAD"], p),
+        "current AAA",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/other",
+                "add",
+                "-m",
+                "BBB",
+                "HEAD",
+            ],
+            p,
+        ),
+        "other BBB",
+    );
+    // Other ref also annotates HEAD~1 (object new to the current ref → copy).
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/other",
+                "add",
+                "-m",
+                "ONLY",
+                "HEAD~1",
+            ],
+            p,
+        ),
+        "other ONLY on HEAD~1",
+    );
+
+    // Manual (default) aborts on the HEAD conflict and changes nothing.
+    let manual = run_libra_command(&["notes", "merge", "refs/notes/other"], p);
+    assert!(
+        !manual.status.success(),
+        "manual merge must abort on conflict"
+    );
+    assert!(
+        String::from_utf8_lossy(&manual.stderr).contains("conflict"),
+        "stderr should mention the conflict: {}",
+        String::from_utf8_lossy(&manual.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show", "HEAD"], p).stdout)
+            .contains("AAA"),
+        "manual abort leaves the current note unchanged"
+    );
+    // The non-conflicting copy must NOT have happened either (all-or-nothing).
+    assert!(
+        !run_libra_command(&["notes", "show", "HEAD~1"], p)
+            .status
+            .success(),
+        "manual abort applies nothing, including the copy"
+    );
+
+    // --strategy=theirs: HEAD takes the other note, HEAD~1 is copied.
+    assert_cli_success(
+        &run_libra_command(
+            &["notes", "merge", "--strategy=theirs", "refs/notes/other"],
+            p,
+        ),
+        "merge theirs",
+    );
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show", "HEAD"], p).stdout)
+            .contains("BBB"),
+        "theirs takes the other note"
+    );
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show", "HEAD~1"], p).stdout)
+            .contains("ONLY"),
+        "the non-conflicting note was copied"
+    );
+
+    // --strategy=union concatenates both note contents. Re-create a conflict on
+    // HEAD (current is now BBB), then a third ref with CCC.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/third",
+                "add",
+                "-m",
+                "CCC",
+                "HEAD",
+            ],
+            p,
+        ),
+        "third CCC",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["notes", "merge", "--strategy=union", "refs/notes/third"],
+            p,
+        ),
+        "merge union",
+    );
+    let unioned = String::from_utf8_lossy(&run_libra_command(&["notes", "show", "HEAD"], p).stdout)
+        .into_owned();
+    assert!(
+        unioned.contains("BBB") && unioned.contains("CCC"),
+        "union concatenates both notes: {unioned}"
+    );
+
+    // Unsupported strategy → usage error (exit 129).
+    let bad = run_libra_command(
+        &["notes", "merge", "--strategy=bogus", "refs/notes/other"],
+        p,
+    );
+    assert_eq!(
+        bad.status.code(),
+        Some(129),
+        "unknown strategy is a usage error"
+    );
+}
+
+#[test]
+fn test_notes_merge_ours_cat_sort_uniq_and_manual_code() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // --strategy=ours keeps the current note on conflict.
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "KEEP", "HEAD"], p),
+        "current KEEP",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/o",
+                "add",
+                "-m",
+                "DROP",
+                "HEAD",
+            ],
+            p,
+        ),
+        "other DROP",
+    );
+    assert_cli_success(
+        &run_libra_command(&["notes", "merge", "--strategy=ours", "refs/notes/o"], p),
+        "merge ours",
+    );
+    let kept = String::from_utf8_lossy(&run_libra_command(&["notes", "show", "HEAD"], p).stdout)
+        .into_owned();
+    assert!(
+        kept.contains("KEEP") && !kept.contains("DROP"),
+        "ours keeps current: {kept}"
+    );
+
+    // Manual conflict carries the stable conflict code (and a non-zero exit).
+    let manual = run_libra_command(&["notes", "merge", "refs/notes/o"], p);
+    assert!(!manual.status.success(), "manual conflict aborts");
+    let (_, report) = parse_cli_error_stderr(&manual.stderr);
+    assert_eq!(
+        report.error_code, "LBR-CONFLICT-002",
+        "manual notes conflict should carry the conflict-blocked stable code"
+    );
+
+    // --strategy=cat_sort_uniq combines, sorts, and de-duplicates the lines.
+    std::fs::write(p.join("cur.txt"), "banana\napple\n").unwrap();
+    std::fs::write(p.join("oth.txt"), "cherry\napple\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/csu_cur",
+                "add",
+                "-F",
+                "cur.txt",
+                "HEAD",
+            ],
+            p,
+        ),
+        "csu current",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/csu_oth",
+                "add",
+                "-F",
+                "oth.txt",
+                "HEAD",
+            ],
+            p,
+        ),
+        "csu other",
+    );
+    // Merge oth into cur with cat_sort_uniq.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/csu_cur",
+                "merge",
+                "--strategy=cat_sort_uniq",
+                "refs/notes/csu_oth",
+            ],
+            p,
+        ),
+        "merge cat_sort_uniq",
+    );
+    let csu = String::from_utf8_lossy(
+        &run_libra_command(&["notes", "--ref", "refs/notes/csu_cur", "show", "HEAD"], p).stdout,
+    )
+    .into_owned();
+    // Sorted unique lines: apple, banana, cherry (apple de-duplicated).
+    assert_eq!(
+        csu.matches("apple").count(),
+        1,
+        "cat_sort_uniq de-duplicates 'apple': {csu}"
+    );
+    let apple = csu.find("apple");
+    let banana = csu.find("banana");
+    let cherry = csu.find("cherry");
+    assert!(
+        apple < banana && banana < cherry,
+        "cat_sort_uniq sorts the lines (apple<banana<cherry): {csu}"
+    );
+}

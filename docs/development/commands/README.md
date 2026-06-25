@@ -58,7 +58,7 @@
 | [`maintenance`](maintenance.md) | `partial` | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; commit-graph and prefetch tasks implemented with documented Git semantic differences |
 | [`merge`](merge.md) | `partial` | fast-forward and single-head three-way merge supported; `-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`--stat`(prints post-merge diffstat)/`-n`(`--no-stat`)/`--verify-signatures`(verify merged tip's PGP sig vs the local vault key)/`--no-verify-signatures`(default; toggle)/`--no-rerere-autoupdate`(no-op) supported; octopus/custom strategies/`--rerere-autoupdate` deferred |
 | [`mv`](mv.md) | `partial` | `-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state |
-| [`notes`](notes.md) | `partial` | `add` / `append` / `copy` / `edit` / `show` / `list` / `remove` supported; `--ref` supported; merge/prune and the interactive editor not implemented |
+| [`notes`](notes.md) | `partial` | `add` / `append` / `copy` / `edit` / `show` / `list` / `remove` / `merge` (2-way flat-row merge, `--strategy=manual\|ours\|theirs\|union\|cat_sort_uniq`) supported; `--ref` supported; `prune`, `get-ref`, and the interactive editor not implemented |
 | [`op`](op.md) | `intentionally-different` | Libra command-level operation history inspection/restore extension, not a Git command |
 | [`open`](open.md) | `supported` | 见命令文档。 |
 | [`publish`](publish.md) | `intentionally-different` | Libra Cloudflare publish extension, not a Git command |

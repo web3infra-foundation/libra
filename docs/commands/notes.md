@@ -4,9 +4,10 @@ Add, append, copy, edit, show, list, or remove notes attached to commits
 without modifying the commits themselves.
 
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
-> operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`) are
-> supported. Advanced Git notes subcommands (`merge`, `prune`, `get-ref`) and
-> the interactive editor are not implemented.
+> operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`) and
+> `merge` (a 2-way merge of the flat note rows, with `--strategy`) are supported.
+> The remaining advanced subcommands (`prune`, `get-ref`) and the interactive
+> editor are not implemented.
 
 ## Synopsis
 
@@ -18,6 +19,7 @@ libra notes copy [-f] <from-object> <to-object>
 libra notes list [<object>]
 libra notes show [<object>]
 libra notes remove [<object>...]
+libra notes merge [-s|--strategy <manual|ours|theirs|union|cat_sort_uniq>] <other-ref>
 ```
 
 ## Description
@@ -54,6 +56,7 @@ Omitting a subcommand defaults to `list`.
 | `list` | List note objects and the commits they annotate (default subcommand). |
 | `show` | Show the note text for an object. |
 | `remove` | Remove notes for one or more objects. |
+| `merge` | Merge another notes ref (`<other-ref>`) into the current `--ref`. A 2-way merge of the flat note rows: copies notes new to the current ref, skips identical ones, and resolves a differing note per `-s`/`--strategy` (`manual` default, `ours`, `theirs`, `union`, `cat_sort_uniq`). |
 
 ### Flag examples
 
@@ -94,6 +97,9 @@ libra notes remove abc1234 def5678
 # Use a custom namespace
 libra notes --ref refs/notes/ci add -m "Passed all tests" HEAD
 libra notes --ref refs/notes/ci show HEAD
+
+# Merge another notes ref into refs/notes/commits (take theirs on conflict)
+libra notes merge --strategy=theirs refs/notes/ci
 
 # JSON output for agents
 libra notes show --json
@@ -198,13 +204,23 @@ invocations — editors assume an interactive user and are incompatible with
 headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
 for note creation.
 
-### Why no `merge`, `prune`, `get-ref`?
+### `merge`, and why no `prune` / `get-ref`?
 
-These Git subcommands add complexity for niche or collaborative workflows.
-The core operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`)
-cover the primary use case: attaching structured metadata to commits. The
-remaining subcommands can be added incrementally if real users or agents need
-them.
+`notes merge <other-ref>` merges another notes ref into the current one
+(`--ref`, default `refs/notes/commits`). Because Libra stores notes as flat
+SQLite rows rather than Git's commit-backed notes trees, there is no common base
+to do Git's true 3-way merge — this is a 2-way merge: objects annotated only in
+the other ref are copied, identical notes are skipped, and an object with a
+differing note on both sides is a conflict resolved by `--strategy`:
+
+- `manual` (default): abort the whole merge if any note conflicts (Libra has no
+  NOTES_MERGE worktree for hand resolution).
+- `ours` / `theirs`: keep the current note / take the other ref's note.
+- `union`: concatenate both note contents.
+- `cat_sort_uniq`: concatenate, then sort and de-duplicate the combined lines.
+
+`prune` and `get-ref` add complexity for niche workflows and can be added
+incrementally if real users or agents need them.
 
 ### Why SQLite-backed notes refs?
 
@@ -224,7 +240,8 @@ scan), and concurrency safety via SQLite WAL mode.
 | Append | `notes append` | Supported | N/A |
 | Copy | `notes copy [-f] <from> <to>` | Supported | N/A |
 | Edit | `notes edit` (`-m`/`-F`) | Supported | N/A |
-| Merge / Prune | Supported | Not supported | N/A |
+| Merge | `notes merge [-s <strategy>] <ref>` | `libra notes merge [-s <strategy>] <ref>` (2-way flat-row merge) | N/A |
+| Prune | Supported | Not supported | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
 | Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |
@@ -242,6 +259,8 @@ Note: jj does not have a notes feature.
 | Neither `-m` nor `-F` provided (add) | `LBR-CLI-002` | "provide a message with '-m <msg>' or '-F <file>'." |
 | Invalid object reference | `LBR-CLI-003` | "use 'libra log' to find valid commit references." |
 | Invalid notes ref name | `LBR-CLI-002` | "notes refs must start with 'refs/notes/'; e.g. 'refs/notes/commits'." |
+| `merge` conflict under the default `manual` strategy | `LBR-CONFLICT-002` | "re-run with --strategy=ours/theirs/union/cat_sort_uniq …" |
+| `merge` with an unknown `--strategy` value | `LBR-CLI-002` | "valid strategies: manual, ours, theirs, union, cat_sort_uniq" |
 | Not a libra repository | `LBR-REPO-001` | Initialize with `libra init` or navigate to a repo. |
 | Failed to load/store blob object | `LBR-IO-002` | Check repository integrity. |
 | Failed to read/write notes ref | `LBR-IO-002` | Check database permissions and writability. |

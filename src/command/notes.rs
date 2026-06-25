@@ -21,7 +21,8 @@ EXAMPLES:
     libra notes show                                  Show the note on HEAD
     libra notes list                                  List all notes
     libra notes remove abc1234                        Remove a note
-    libra notes add -f -m \"Updated\" HEAD            Force-overwrite a note";
+    libra notes add -f -m \"Updated\" HEAD            Force-overwrite a note
+    libra notes merge -s theirs refs/notes/other      Merge another notes ref (theirs on conflict)";
 
 #[derive(Parser, Debug)]
 #[command(about = "Add, show, list, or remove notes attached to commits")]
@@ -113,6 +114,16 @@ pub enum NotesSubcommand {
         #[clap(required = false)]
         objects: Vec<String>,
     },
+    /// Merge notes from another notes ref into the current notes ref
+    Merge {
+        /// The notes ref to merge FROM (e.g. `refs/notes/other`)
+        other_ref: String,
+
+        /// Conflict-resolution strategy: `manual` (default; aborts on a
+        /// conflicting note), `ours`, `theirs`, `union`, or `cat_sort_uniq`
+        #[clap(short = 's', long)]
+        strategy: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,6 +179,15 @@ pub enum NotesOutput {
         #[serde(rename = "ref")]
         notes_ref: String,
         removed: Vec<NotesRemovedEntry>,
+    },
+    #[serde(rename = "merge")]
+    Merge {
+        #[serde(rename = "ref")]
+        notes_ref: String,
+        other_ref: String,
+        merged: usize,
+        skipped: usize,
+        resolved_conflicts: Vec<String>,
     },
 }
 
@@ -353,6 +373,26 @@ pub async fn execute_safe(
             };
             render_output(&out, output)?;
         }
+        NotesSubcommand::Merge {
+            other_ref,
+            strategy,
+        } => {
+            let other_normalized =
+                notes::normalize_notes_ref(&other_ref).map_err(NotesCliError::from)?;
+            let strat = notes::NoteMergeStrategy::parse(strategy.as_deref())
+                .map_err(NotesCliError::from)?;
+            let result = notes::merge(notes_ref, &other_normalized, strat)
+                .await
+                .map_err(NotesCliError::from)?;
+            let out = NotesOutput::Merge {
+                notes_ref: result.notes_ref,
+                other_ref: result.other_ref,
+                merged: result.merged,
+                skipped: result.skipped,
+                resolved_conflicts: result.resolved_conflicts,
+            };
+            render_output(&out, output)?;
+        }
     }
 
     Ok(())
@@ -527,6 +567,26 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
                 );
             }
         }
+        NotesOutput::Merge {
+            notes_ref,
+            other_ref,
+            merged,
+            skipped,
+            resolved_conflicts,
+        } => {
+            println!(
+                "Merged notes from {other_ref} into {notes_ref}: {merged} merged, {skipped} unchanged",
+            );
+            if !resolved_conflicts.is_empty() {
+                println!(
+                    "Resolved {} conflict(s) by strategy:",
+                    resolved_conflicts.len()
+                );
+                for object in resolved_conflicts {
+                    println!("  {}", short_display_hash(object));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -571,6 +631,17 @@ impl From<NotesCliError> for CliError {
                 notes::NotesError::StoreBlobFailed(_) => {
                     CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
                 }
+                notes::NotesError::MergeConflict { .. } => CliError::failure(message)
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint(
+                        "re-run with --strategy=ours/theirs/union/cat_sort_uniq to resolve the conflicting notes",
+                    ),
+                notes::NotesError::UnsupportedStrategy(_) => CliError::command_usage(message)
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint("valid strategies: manual, ours, theirs, union, cat_sort_uniq"),
+                notes::NotesError::MergeRaced { .. } => CliError::failure(message)
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("another writer changed the notes during the merge; re-run it"),
             },
         }
     }
