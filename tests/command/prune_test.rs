@@ -9,13 +9,16 @@ use std::{
 
 use git_internal::{
     hash::{HashKind, ObjectHash, set_hash_kind_for_test},
-    internal::object::{
-        blob::Blob,
-        commit::Commit,
-        signature::{Signature, SignatureType},
-        tag::Tag,
-        tree::{Tree, TreeItem, TreeItemMode},
-        types::ObjectType,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            blob::Blob,
+            commit::Commit,
+            signature::{Signature, SignatureType},
+            tag::Tag,
+            tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
+        },
     },
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -80,6 +83,12 @@ fn insert_object_index_row(repo: &Path, hash: &ObjectHash, repo_id: &str, is_syn
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
         let db_conn = libra::internal::db::get_db_conn_instance().await;
+        libra::internal::model::object_index::Entity::delete_many()
+            .filter(libra::internal::model::object_index::Column::OId.eq(hash.to_string()))
+            .filter(libra::internal::model::object_index::Column::RepoId.eq(repo_id))
+            .exec(&db_conn)
+            .await
+            .expect("clear existing object_index");
         let model = libra::internal::model::object_index::ActiveModel {
             o_id: Set(hash.to_string()),
             o_type: Set("blob".to_string()),
@@ -367,6 +376,69 @@ fn test_prune_rejects_active_gc_lock() {
     assert!(
         stderr.contains("gc is already running"),
         "expected gc lock conflict, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+/// Tests direct prune refuses a symlinked object directory before traversal.
+fn test_prune_rejects_symlink_object_directory() {
+    use std::os::unix::fs::symlink;
+
+    let repo = create_committed_repo_via_cli();
+    let blob = create_unreachable_blob(repo.path(), "symlinked-object-store");
+    let blob_path = loose_object_path(repo.path(), &blob.to_string());
+    assert!(blob_path.exists());
+
+    let storage_root = repo.path().join(libra::utils::util::ROOT_DIR);
+    let objects_dir = storage_root.join("objects");
+    let external_objects = repo.path().join("external-objects");
+    fs::rename(&objects_dir, &external_objects).expect("move object directory");
+    symlink(&external_objects, &objects_dir).expect("symlink object directory");
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert!(
+        !output.status.success(),
+        "prune should fail on symlinked object dir"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink object directory"),
+        "expected symlink object directory error, got: {stderr}"
+    );
+    assert!(
+        blob_path.exists(),
+        "prune must not delete through a symlinked object dir"
+    );
+}
+
+#[test]
+#[serial]
+/// Tests prune ignores gitlink index entries before walking roots.
+fn test_prune_skips_gitlink_index_entry() {
+    let repo = create_committed_repo_via_cli();
+    let blob = create_unreachable_blob(repo.path(), "gitlink-index");
+    let blob_path = loose_object_path(repo.path(), &blob.to_string());
+    assert!(blob_path.exists());
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let gitlink = ObjectHash::from_bytes(&[0x42; 20]).expect("gitlink oid");
+    let mut entry = IndexEntry::new_from_blob("submodule".to_string(), gitlink, 0);
+    entry.mode = 0o160000;
+    let mut index = Index::new();
+    index.add(entry);
+    index
+        .to_file(libra::utils::path::index())
+        .expect("write index");
+    drop(_guard);
+
+    let output = run_libra_command(&["prune"], repo.path());
+    assert_cli_success(&output, "prune should ignore gitlink index entries");
+    assert!(
+        !blob_path.exists(),
+        "unreachable blob should still be pruned"
     );
 }
 

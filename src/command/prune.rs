@@ -44,6 +44,7 @@ use crate::{
 
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT_LEN: u64 = 256 * 4;
+const GITLINK_INDEX_MODE: u32 = 0o160000;
 const TAG_REF_PREFIX: &str = "refs/tags/";
 
 const PRUNE_LONG_ABOUT: &str =
@@ -148,6 +149,7 @@ pub async fn execute_safe(args: PruneArgs, output: &OutputConfig) -> CliResult<(
     };
 
     let objects_dir = path::objects();
+    ensure_real_object_directory(&objects_dir)?;
     let objects_dir_existed = objects_dir.exists();
     let expire_before = parse_expire_cutoff(args.expire.as_deref())?;
     if args.dry_run && !objects_dir_existed {
@@ -223,6 +225,28 @@ fn cleanup_dry_run_objects_dir(
         })?;
     }
     Ok(())
+}
+
+fn ensure_real_object_directory(objects_dir: &Path) -> CliResult<()> {
+    match fs::symlink_metadata(objects_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::fatal(format!(
+            "refusing to traverse symlink object directory '{}'",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(CliError::fatal(format!(
+            "object directory '{}' is not a directory",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to inspect object directory '{}': {error}",
+            objects_dir.display()
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
 }
 
 /// Parse the `--expire` argument into a concrete cutoff time.
@@ -454,6 +478,9 @@ async fn collect_starting_points(
         })?;
         for stage in [0, 1, 2, 3] {
             for entry in index.tracked_entries(stage) {
+                if entry.mode == GITLINK_INDEX_MODE {
+                    continue;
+                }
                 starting_points.insert(entry.hash);
             }
         }
