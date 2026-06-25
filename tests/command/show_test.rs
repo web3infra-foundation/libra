@@ -151,6 +151,49 @@ fn test_show_cli_badref_returns_cli_exit_code() {
 }
 
 #[test]
+fn test_show_patch_with_stat_emits_stat_then_patch() {
+    // `--patch-with-stat` (Git's `-p --stat`) emits the diffstat summary line AND
+    // the full patch body, with the stat appearing before the patch.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("tracked.txt"), "first\nsecond\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "stage edit");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "edit tracked", "--no-verify"], p),
+        "commit edit",
+    );
+
+    let output = run_libra_command(&["show", "--patch-with-stat", "HEAD"], p);
+    assert_cli_success(&output, "show --patch-with-stat HEAD");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let stat_pos = stdout
+        .find("file changed")
+        .expect("diffstat summary line is present");
+    let patch_pos = stdout.find("@@ ").expect("patch hunk header is present");
+    assert!(
+        stdout.contains("diff --git"),
+        "the full patch is emitted: {stdout}"
+    );
+    assert!(
+        stat_pos < patch_pos,
+        "the diffstat appears before the patch: {stdout}"
+    );
+
+    // The stat block matches `show --stat` (the flag reuses the same diffstat).
+    let stat_only = run_libra_command(&["show", "--stat", "HEAD"], p);
+    let stat_only_out = String::from_utf8_lossy(&stat_only.stdout);
+    let summary_line = stat_only_out
+        .lines()
+        .find(|l| l.contains("file changed"))
+        .expect("show --stat summary line");
+    assert!(
+        stdout.contains(summary_line),
+        "--patch-with-stat reuses the --stat summary line ({summary_line:?}): {stdout}"
+    );
+}
+
+#[test]
 fn test_show_summary_reports_created_files() {
     // The initial commit creates `tracked.txt`, so `show --summary` on the root
     // commit (diffed against the empty tree) must list it as a create-mode entry
@@ -279,6 +322,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
         name_only: false,
         name_status: false,
         stat: false,
+        patch_with_stat: false,
         summary: false,
         pathspec: vec![],
     };
@@ -336,6 +380,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         name_only: false,
         name_status: false,
         stat: false,
+        patch_with_stat: false,
         summary: false,
         pathspec: vec![],
     };
@@ -394,6 +439,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         name_only: false,
         name_status: false,
         stat: true,
+        patch_with_stat: false,
         summary: false,
         pathspec: vec![],
     };
@@ -861,6 +907,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         name_only: false,
         name_status: false,
         stat: false,
+        patch_with_stat: false,
         summary: false,
         pathspec: vec![],
     };
@@ -910,6 +957,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         name_only: false,
         name_status: false,
         stat: false,
+        patch_with_stat: false,
         summary: false,
         pathspec: vec![],
     };

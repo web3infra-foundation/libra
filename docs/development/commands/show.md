@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。object/commit display、`--name-only`、`--name-status`、`--stat`、`--summary`（仅创建/删除文件的 mode 摘要，复用 `generate_diff` 输出并解析 `new file mode`/`deleted file mode`，与 `diff --summary` 同一子集，不做 rename/copy/mode-change 检测）、`--oneline`、`--pretty=<fmt>`、`--format=<fmt>`（`--pretty` 的别名）、`--abbrev-commit`/`--no-abbrev-commit`（切换 header 哈希缩写）和 path filters 已支持；`--pretty` 复用 log 的 `CommitFormatter`（`oneline`/`format:<tmpl>`/`tformat:<tmpl>`/自定义模板），命名预设 short/full/fuller/raw 尚未单独渲染。
+- 兼容级别：`partial`。object/commit display、`--name-only`、`--name-status`、`--stat`、`--patch-with-stat`（先 diffstat 块再完整 patch，Git 对 `-p --stat` 的旧式同义词；复用 `--stat` 的 `show_diffstat` 与默认 patch 渲染）、`--summary`（仅创建/删除文件的 mode 摘要，复用 `generate_diff` 输出并解析 `new file mode`/`deleted file mode`，与 `diff --summary` 同一子集，不做 rename/copy/mode-change 检测）、`--oneline`、`--pretty=<fmt>`、`--format=<fmt>`（`--pretty` 的别名）、`--abbrev-commit`/`--no-abbrev-commit`（切换 header 哈希缩写）和 path filters 已支持；`--pretty` 复用 log 的 `CommitFormatter`（`oneline`/`format:<tmpl>`/`tformat:<tmpl>`/自定义模板），命名预设 short/full/fuller/raw 尚未单独渲染。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,7 +46,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/show.md`。
 - Synopsis：`libra show [OPTIONS] [OBJECT] [PATHS]...`。
-- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--format <FORMAT>`、`--abbrev-commit`、`--no-abbrev-commit`、`--name-only`、`--name-status`、`--stat`、`--summary`（创建/删除文件的 mode 摘要，复用 `generate_diff` 输出解析，等同 `diff --summary` 子集）、`--no-expand-tabs`/`--no-notes`/`--no-mailmap`/`--no-show-signature`（接受式 no-op：Libra 的 show 从不展开 tab、从不内联显示 notes、从不应用 mailmap、从不内联显示提交签名；四个字段解析后不被读取。Git 的反向 `--expand-tabs`/`--notes`/`--mailmap`/`--show-signature` 未实现）、`[PATHS]...`。`--pretty=<fmt>`/`--format=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）；`--abbrev-commit` 把默认 header 的 `commit <hash>` 缩写为 7 位，`--no-abbrev-commit`（经 clap `overrides_with` 与 `--abbrev-commit` 互为最后一个生效；读 `abbrev_commit` 字段，`no_abbrev_commit` 不直接读取）显示完整（未缩写）哈希，完整哈希为默认故单独为 no-op。
+- 公开参数/子命令包括：`[OBJECT]`、`-s, --no-patch`、`--oneline`、`--pretty <FORMAT>`、`--format <FORMAT>`、`--abbrev-commit`、`--no-abbrev-commit`、`--name-only`、`--name-status`、`--stat`、`--patch-with-stat`（先发 `show_diffstat` 的 diffstat 块、空行、再发默认 patch；置于输出分支链首位，受 `-s`/`--no-patch` 抑制；复用既有 `--stat` 与默认 patch 渲染，与 `show --stat` 的 diffstat 逐字一致）、`--summary`（创建/删除文件的 mode 摘要，复用 `generate_diff` 输出解析，等同 `diff --summary` 子集）、`--no-expand-tabs`/`--no-notes`/`--no-mailmap`/`--no-show-signature`（接受式 no-op：Libra 的 show 从不展开 tab、从不内联显示 notes、从不应用 mailmap、从不内联显示提交签名；四个字段解析后不被读取。Git 的反向 `--expand-tabs`/`--notes`/`--mailmap`/`--show-signature` 未实现）、`[PATHS]...`。`--pretty=<fmt>`/`--format=<fmt>` 经 `parse_pretty_format` + `CommitFormatter` 渲染 commit header（abbrev=7），随后照常输出 diff（`-s` 时仅输出 header）；`--abbrev-commit` 把默认 header 的 `commit <hash>` 缩写为 7 位，`--no-abbrev-commit`（经 clap `overrides_with` 与 `--abbrev-commit` 互为最后一个生效；读 `abbrev_commit` 字段，`no_abbrev_commit` 不直接读取）显示完整（未缩写）哈希，完整哈希为默认故单独为 no-op。
 
 
 ## 还未实现的功能
@@ -55,7 +55,8 @@ flowchart TD
 |---|---|---|
 | ✅ 已实现 | `--pretty`/`--format`（别名）、`--abbrev-commit` 已公开（复用 log 的 `CommitFormatter`/`parse_pretty_format`；`--abbrev-commit` 缩写默认 header 的 commit 哈希，`--no-abbrev-commit` 经 `overrides_with` 撤销得完整哈希）。带集成测试（`show_format_aliases_pretty_and_abbrev_commit_shortens_hash`）。 |
 | ✅ 已实现 | `--summary`（创建/删除文件的 mode 摘要）。`format_show_summary` 解析 `generate_diff` 输出里的 `new file mode`/`deleted file mode` 行，渲染 ` create mode <mode> <path>` / ` delete mode <mode> <path>`，与 `diff --summary` 同一子集（不含 rename/copy/mode-change）。带单元测试 `format_show_summary_reports_only_created_and_deleted_files` + 集成测试 `test_show_summary_reports_created_files`。 |
-| Git 参数缺口 | 命名 pretty 预设（short/full/fuller/raw）、`--raw`、`--patch-with-stat` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| ✅ 已实现 | `--patch-with-stat`（先 diffstat 块、空行、再完整 patch，Git 对 `-p --stat` 的旧式同义词）已实现，带集成测试 `test_show_patch_with_stat_emits_stat_then_patch`（断言 stat 在 patch 之前、含 `diff --git`、diffstat 块与 `show --stat` 逐字一致）。 | 复用既有 `show_diffstat` + 默认 patch，故 diffstat 的格式/计数与 `show --stat` 一致（其与 git 的既有差异不在本项范围内）。 |
+| Git 参数缺口 | 命名 pretty 预设（short/full/fuller/raw）、`--raw` 等扩展输出尚未完整公开。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
 
 ## 维护要求
 

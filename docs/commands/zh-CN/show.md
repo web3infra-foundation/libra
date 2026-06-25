@@ -27,6 +27,7 @@ libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 | `--no-abbrev-commit` | | 显示完整（未缩写）commit 对象名，撤销先前的 `--abbrev-commit`（最后出现者生效）。完整哈希是默认，故单独使用时为 no-op。 |
 | `--name-only` | | 只显示已更改文件名（没有 diff hunk）。 |
 | `--stat` | | 显示 diff 统计（每个文件的插入 / 删除）。 |
+| `--patch-with-stat` | | 先显示 diffstat 块，再显示完整 patch（Git 对 `-p --stat` 的旧式同义词）。 |
 | `--summary` | | 显示创建/删除文件的精简摘要（mode 与路径），类似 `git show --summary`。仅含创建/删除文件，不做 rename/copy 检测。 |
 | `--no-expand-tabs` | | 不在提交消息中展开 tab。接受式 no-op：Libra 的 show 逐字打印 tab。 |
 | `--no-notes` | | 不显示提交 notes。接受式 no-op：Libra 的 show 从不内联显示 notes。 |
@@ -65,6 +66,7 @@ libra show -s v2.0.0                # 只显示标签元数据
 libra show HEAD:Cargo.toml          # 打印 HEAD 中的文件
 libra show --name-only HEAD         # 列出已更改文件
 libra show --stat HEAD              # diff 统计
+libra show --patch-with-stat HEAD   # 先 diffstat 再完整 patch
 libra show --summary HEAD           # 创建/删除文件 mode 摘要
 libra --json show HEAD              # 结构化 JSON 输出
 ```

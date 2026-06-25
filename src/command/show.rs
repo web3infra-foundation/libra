@@ -43,6 +43,7 @@ EXAMPLES:
     libra show --no-patch v1.0.0            Show tag or commit metadata only
     libra show HEAD:src/main.rs             Show a file from a specific revision
     libra show --stat HEAD~1                Show only diff statistics
+    libra show --patch-with-stat HEAD       Show the diffstat followed by the full patch
     libra show --name-status HEAD           Show changed files with A/M/D status
     libra show --summary HEAD               Show created/deleted file mode summary
     libra show --format='%h %s' HEAD        Custom header format (alias for --pretty)
@@ -98,6 +99,11 @@ pub struct ShowArgs {
     /// Show diff statistics.
     #[clap(long)]
     pub stat: bool,
+
+    /// Show the diffstat block followed by the full patch (Git's legacy synonym
+    /// for `-p --stat`).
+    #[clap(long = "patch-with-stat")]
+    pub patch_with_stat: bool,
 
     /// Show a condensed summary of created and deleted files (their mode and
     /// path), like `git show --summary`. Mirrors `libra diff --summary`:
@@ -399,7 +405,19 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
     if !args.no_patch {
         let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
-        if args.stat {
+        if args.patch_with_stat {
+            // `--patch-with-stat` (Git's `-p --stat`): the diffstat block followed
+            // by the full patch.
+            let diffstat = show_diffstat(&commit, paths.clone()).await?;
+            if !diffstat.is_empty() {
+                output.push_str(&diffstat);
+            }
+            let diff_output = generate_diff(&commit, paths).await?;
+            if !diff_output.is_empty() {
+                output.push('\n');
+                output.push_str(&diff_output);
+            }
+        } else if args.stat {
             // Show the summary view.
             let diffstat = show_diffstat(&commit, paths.clone()).await?;
             if !diffstat.is_empty() {
