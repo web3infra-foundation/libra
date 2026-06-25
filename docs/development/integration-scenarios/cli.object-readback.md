@@ -143,4 +143,4 @@ libra --json for-each-ref --points-at "$LATEST_HEAD"
 - `show-ref --branches` 与 `--heads` 输出一致；`--no-branches` / `--no-tags` reset aliases 恢复默认 branch+tag 范围；`show-ref --abbrev=12` / `--hash=12` 输出 HEAD 的 12 位前缀；`--no-abbrev` 恢复完整哈希，`--no-hash` 按 Git 行为作为 hash-only alias；`show-ref --dereference` 对 annotated tag 输出 `refs/tags/<name>^{}` peeled 行，`--no-dereference` 取消 peeled 行；`--no-head`、`--no-verify`、`--no-exists` 可恢复对应默认行为；`show-ref --verify` 只接受完整 refname / `HEAD`；`show-ref --exists` 成功静默，缺失 ref 失败。
 - `for-each-ref --points-at` 对 branch、lightweight tag 和 annotated tag peeled target 的过滤可观察；`--json` 返回标准 envelope。
 - 缺失 revision/object 和非法 hash-object 类型必须失败。
-- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`、`rev-list --objects*` / `--boundary` 对象/边界遍历输出不属于当前场景正向覆盖。
+- `ls-files`、高级 `for-each-ref --contains/--merged`、高级 `rev-parse`、`rev-list --objects*` 对象枚举遍历输出不属于当前场景正向覆盖。（`rev-list --boundary` 已实现，由单元/集成测试 `test_rev_list_boundary` 覆盖。）

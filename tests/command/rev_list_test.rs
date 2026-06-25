@@ -450,3 +450,277 @@ fn test_rev_list_date_order_matches_default_ordering() {
         "--date-order matches the default ordering"
     );
 }
+
+#[test]
+fn test_rev_list_boundary() {
+    // `--boundary <range>` lists the included commits, then the excluded frontier
+    // commits (parents of an included commit that fall in the excluded set) each
+    // prefixed with `-`, after the listed commits. Matches git rev-list --boundary.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    for i in 1..=4 {
+        std::fs::write(p.join("f.txt"), format!("{i}\n")).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", &format!("c{i}"), "--no-verify"], p),
+            "commit",
+        );
+    }
+    let rev = |spec: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", spec], p).stdout)
+            .trim()
+            .to_string()
+    };
+    let head = rev("HEAD");
+    let h1 = rev("HEAD~1");
+    let boundary_commit = rev("HEAD~2"); // parent of HEAD~1, excluded by the range
+
+    let out = run_libra_command(&["rev-list", "--boundary", "HEAD~2..HEAD"], p);
+    assert_cli_success(&out, "rev-list --boundary HEAD~2..HEAD");
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+
+    // Included commits (HEAD, HEAD~1) are listed plain; the boundary is prefixed `-`.
+    assert!(lines.contains(&head), "HEAD is listed: {lines:?}");
+    assert!(lines.contains(&h1), "HEAD~1 is listed: {lines:?}");
+    assert!(
+        lines.contains(&format!("-{boundary_commit}")),
+        "the excluded parent HEAD~2 is listed as a boundary commit (prefixed -): {lines:?}"
+    );
+    // The boundary line comes after the included commits and carries no plain entry.
+    assert!(
+        !lines.contains(&boundary_commit),
+        "the boundary commit is not also listed unprefixed: {lines:?}"
+    );
+
+    // Without an exclusion there is no boundary.
+    let no_range = run_libra_command(&["rev-list", "--boundary", "HEAD"], p);
+    assert_cli_success(&no_range, "rev-list --boundary HEAD");
+    assert!(
+        !String::from_utf8_lossy(&no_range.stdout)
+            .lines()
+            .any(|l| l.starts_with('-')),
+        "no boundary commits without an exclusion"
+    );
+
+    // `--count` includes the boundary commits (matching git): 2 listed + 1 boundary.
+    let count = run_libra_command(&["rev-list", "--count", "--boundary", "HEAD~2..HEAD"], p);
+    assert_cli_success(&count, "rev-list --count --boundary");
+    assert_eq!(
+        String::from_utf8_lossy(&count.stdout).trim(),
+        "3",
+        "count includes the boundary commit (2 listed + 1 boundary)"
+    );
+    // Without --boundary the count is the interesting commits only.
+    let plain_count = run_libra_command(&["rev-list", "--count", "HEAD~2..HEAD"], p);
+    assert_eq!(String::from_utf8_lossy(&plain_count.stdout).trim(), "2");
+
+    // `--max-count` cuts the walk: the boundary is the parent of the LAST listed
+    // commit (HEAD~1), not the range start — matching git's "parents of returned
+    // commits not themselves returned" rule.
+    let limited = run_libra_command(
+        &["rev-list", "--boundary", "--max-count=1", "HEAD~2..HEAD"],
+        p,
+    );
+    assert_cli_success(&limited, "rev-list --boundary --max-count=1");
+    let limited_lines: Vec<String> = String::from_utf8_lossy(&limited.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert!(
+        limited_lines.contains(&head),
+        "HEAD listed: {limited_lines:?}"
+    );
+    assert!(
+        limited_lines.contains(&format!("-{h1}")),
+        "boundary is the cut-point parent HEAD~1, not the range start: {limited_lines:?}"
+    );
+    assert!(
+        !limited_lines
+            .iter()
+            .any(|l| l == &format!("-{boundary_commit}")),
+        "the range start HEAD~2 is not the boundary under --max-count: {limited_lines:?}"
+    );
+
+    // Boundary commits flow through the same formatter: `--timestamp` prefixes the
+    // boundary line with its committer timestamp before the `-`-marked id.
+    let ts = run_libra_command(
+        &["rev-list", "--boundary", "--timestamp", "HEAD~2..HEAD"],
+        p,
+    );
+    assert_cli_success(&ts, "rev-list --boundary --timestamp");
+    assert!(
+        String::from_utf8_lossy(&ts.stdout).lines().any(|l| l
+            .ends_with(&format!(" -{boundary_commit}"))
+            && l.starts_with(char::is_numeric)),
+        "boundary carries the committer timestamp before the -id: {}",
+        String::from_utf8_lossy(&ts.stdout)
+    );
+
+    // `--reverse` reverses the COMPLETE stream (listed ++ boundary), so the boundary
+    // row leads — matching git rev-list --reverse --boundary.
+    let reversed = run_libra_command(&["rev-list", "--reverse", "--boundary", "HEAD~2..HEAD"], p);
+    assert_cli_success(&reversed, "rev-list --reverse --boundary");
+    let reversed_lines: Vec<String> = String::from_utf8_lossy(&reversed.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        reversed_lines.first().map(String::as_str),
+        Some(format!("-{boundary_commit}").as_str()),
+        "the boundary row leads under --reverse: {reversed_lines:?}"
+    );
+    assert_eq!(
+        reversed_lines.last().map(String::as_str),
+        Some(head.as_str()),
+        "HEAD is emitted last under --reverse: {reversed_lines:?}"
+    );
+
+    // `--children`: the boundary commit carries its children (the listed commits that
+    // name it as a parent), even though it is itself excluded from the output set.
+    let children = run_libra_command(&["rev-list", "--boundary", "--children", "HEAD~2..HEAD"], p);
+    assert_cli_success(&children, "rev-list --boundary --children");
+    assert!(
+        String::from_utf8_lossy(&children.stdout)
+            .lines()
+            .any(|l| l == format!("-{boundary_commit} {h1}")),
+        "boundary row lists its child HEAD~1: {}",
+        String::from_utf8_lossy(&children.stdout)
+    );
+}
+
+#[test]
+fn test_rev_list_boundary_merge_metadata() {
+    // Boundary behavior on a merge range, matching git:
+    //  - `--first-parent --boundary --parents` rewrites away the parents of the
+    //    un-walked second-parent boundary (bare `-id`), while the first-parent-chain
+    //    boundary keeps its real parent.
+    //  - `--boundary --children` surfaces a boundary commit's children even though it
+    //    is itself excluded from the output.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let rev = |spec: &str| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", spec], p).stdout)
+            .trim()
+            .to_string()
+    };
+    let run = |args: &[&str], ctx: &str| {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, ctx);
+    };
+
+    // c1 -> c2 on main; feat branches at c1 with f1; merge feat into main => m.
+    std::fs::write(p.join("f.txt"), "1\n").unwrap();
+    run(&["add", "f.txt"], "add c1");
+    run(&["commit", "-m", "c1", "--no-verify"], "commit c1");
+    let c1 = rev("HEAD");
+    std::fs::write(p.join("f.txt"), "2\n").unwrap();
+    run(&["add", "f.txt"], "add c2");
+    run(&["commit", "-m", "c2", "--no-verify"], "commit c2");
+    let c2 = rev("HEAD");
+    run(&["branch", "feat", &c1], "branch feat");
+    run(&["switch", "feat"], "switch feat");
+    std::fs::write(p.join("g.txt"), "f\n").unwrap();
+    run(&["add", "g.txt"], "add f1");
+    run(&["commit", "-m", "f1", "--no-verify"], "commit f1");
+    let f1 = rev("HEAD");
+    // Return to the default branch and merge feat (creating a merge commit).
+    let default_branch = if run_libra_command(&["switch", "main"], p).status.success() {
+        "main"
+    } else {
+        run(&["switch", "master"], "switch master");
+        "master"
+    };
+    let _ = default_branch;
+    run(&["merge", "feat", "--no-edit"], "merge feat");
+    let m = rev("HEAD");
+    // Only proceed if a real merge commit formed (two parents).
+    let parents = run_libra_command(&["rev-list", "--parents", "--max-count=1", &m], p);
+    let parent_line = String::from_utf8_lossy(&parents.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        parent_line.contains(&c2) && parent_line.contains(&f1),
+        "merge commit should have c2 and f1 as parents: {parent_line}"
+    );
+
+    // `--first-parent --boundary --parents c2..m`: f1 is an un-walked second parent →
+    // its boundary row is bare; c2 is the first-parent-chain boundary → shows c1.
+    let fp = run_libra_command(
+        &[
+            "rev-list",
+            "--first-parent",
+            "--boundary",
+            "--parents",
+            &format!("{c2}..{m}"),
+        ],
+        p,
+    );
+    assert_cli_success(&fp, "first-parent boundary parents");
+    let fp_lines: Vec<String> = String::from_utf8_lossy(&fp.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert!(
+        fp_lines.iter().any(|l| l == &format!("-{f1}")),
+        "un-walked second-parent boundary f1 is bare (no parents): {fp_lines:?}"
+    );
+    assert!(
+        fp_lines.iter().any(|l| l == &format!("-{c2} {c1}")),
+        "first-parent-chain boundary c2 keeps its real parent c1: {fp_lines:?}"
+    );
+
+    // `--boundary --children c2..m`: the boundary c2 surfaces its child m.
+    let ch = run_libra_command(
+        &[
+            "rev-list",
+            "--boundary",
+            "--children",
+            &format!("{c2}..{m}"),
+        ],
+        p,
+    );
+    assert_cli_success(&ch, "boundary children");
+    assert!(
+        String::from_utf8_lossy(&ch.stdout)
+            .lines()
+            .any(|l| l.starts_with(&format!("-{c2}")) && l.contains(&m)),
+        "boundary c2 lists its child m: {}",
+        String::from_utf8_lossy(&ch.stdout)
+    );
+
+    // Regression: `--reverse` must NOT reorder a boundary's child list — it only
+    // reverses output ROWS. Using `c1..m`, the boundary `-c1` has two children
+    // (c2 and f1). The `-c1 …` child line must be byte-identical with and without
+    // `--reverse` (this fails if boundary children are computed after the reverse).
+    let boundary_child_line = |reverse: bool| -> String {
+        let mut argv = vec!["rev-list"];
+        if reverse {
+            argv.push("--reverse");
+        }
+        argv.extend_from_slice(&["--boundary", "--children"]);
+        let range = format!("{c1}..{m}");
+        argv.push(&range);
+        let out = run_libra_command(&argv, p);
+        assert_cli_success(&out, "boundary children child-order");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.starts_with(&format!("-{c1}")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let forward = boundary_child_line(false);
+    let reversed = boundary_child_line(true);
+    assert!(
+        forward.contains(&c2) && forward.contains(&f1),
+        "boundary c1 lists both children: {forward}"
+    );
+    assert_eq!(
+        forward, reversed,
+        "the boundary child list is identical with and without --reverse (only rows reverse)"
+    );
+}

@@ -12,6 +12,7 @@ fn test_format_rev_list_entry_matches_git_field_order() {
         parents: vec!["def456".to_string(), "789abc".to_string()],
         children: vec!["child1".to_string(), "child2".to_string()],
         timestamp: Some(123),
+        boundary: false,
     };
 
     assert_eq!(
@@ -50,9 +51,32 @@ fn test_format_rev_list_entry_matches_git_field_order() {
         parents: Vec::new(),
         children: Vec::new(),
         timestamp: None,
+        boundary: false,
     };
     assert_eq!(
         format_rev_list_entry(&right, false, false, false, true, false, true),
         ">fed321"
+    );
+
+    // Boundary commits are marked `-` and never carry side/cherry markers, but still
+    // surface `--timestamp`/`--parents`/`--children` metadata through the same path.
+    let boundary = RevListEntry {
+        commit: "b0undary".to_string(),
+        side: Some(RevListSide::Left),
+        cherry_equivalent: Some(true),
+        parents: vec!["par111".to_string()],
+        children: vec!["chi222".to_string()],
+        timestamp: Some(456),
+        boundary: true,
+    };
+    assert_eq!(
+        format_rev_list_entry(&boundary, true, false, true, true, true, false),
+        "456 -b0undary par111",
+        "boundary entry: leading `-`, no side/cherry marker, timestamp + parents preserved"
+    );
+    assert_eq!(
+        format_rev_list_entry(&boundary, false, true, false, false, false, false),
+        "-b0undary chi222",
+        "boundary entry with --children"
     );
 }

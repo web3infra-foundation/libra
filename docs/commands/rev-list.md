@@ -43,6 +43,7 @@ libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]
 | `--parents` | Print parent commit IDs after each listed commit. |
 | `--children` | Print child commit IDs after each listed commit. Conflicts with `--parents`. Child relationships are built from the traversal before output filters such as `--skip`, `--max-count`, `--grep`, and parent-count filters are applied. |
 | `--timestamp` | Prefix each listed commit with its committer timestamp, matching Git's `timestamp commit [parents...]` field order. |
+| `--boundary` | Also print the boundary commits at the frontier — the parents of a listed commit that are not themselves listed (excluded by a `^spec`/range start, or beyond a `--max-count`/`--skip` cut) — each prefixed with `-`. They normally follow the listed commits; under `--reverse` the whole stream is reversed, so they lead. Boundary commits are formatted through the same path, so `--parents`/`--children`/`--timestamp` metadata is preserved (with two merge nuances matching Git: under `--first-parent --parents` an un-walked second-parent boundary prints bare, and `--children` lists a boundary's children from the output set). `--count` includes the boundary commits in the total. |
 | `<SPEC>...` | Revisions to enumerate from. Defaults to `HEAD`; accepts multiple positive revisions, `^<rev>` exclusions, `A..B`, and `A...B`. |
 | `-- <PATH>...` | Limit commits to changes that touched one of the listed paths. |
 
@@ -63,6 +64,7 @@ libra rev-list main feature
 libra rev-list ^main feature
 libra rev-list main..feature
 libra rev-list main...feature
+libra rev-list --boundary main..feature
 libra rev-list --merges HEAD
 libra rev-list --no-merges HEAD
 libra rev-list --min-parents 1 --max-parents 1 HEAD
@@ -132,6 +134,7 @@ def5678901234567890abcdef12345678abc1234
     "parents": false,
     "children": false,
     "timestamp": false,
+    "reverse": false,
     "first_parent": false,
     "author": null,
     "committer": null,
@@ -159,6 +162,8 @@ def5678901234567890abcdef12345678abc1234
 
 When `--parents`, `--children`, `--timestamp`, `--left-right`, `--cherry-mark`, or `--cherry` is present, `commits[]` remains the plain commit-ID list for compatibility and `entries[]` carries the optional metadata used for human output.
 
+With `--boundary`, the frontier commits appear in a separate `boundary[]` array (omitted when empty) using the same entry shape as `entries[]`, each carrying `"boundary": true` plus any `--parents`/`--children`/`--timestamp` metadata; they are NOT included in `commits[]` or `total`, but `--count` adds them to the count fields. A `"reverse"` boolean reflects `--reverse`: the JSON `commits[]`/`entries[]` arrays follow `--reverse` (already reversed), while `boundary[]` is a separate array that keeps its natural committer-date-descending order. In human output, `--reverse` reverses the complete stream so boundary rows lead, but each boundary entry's own child list is unaffected.
+
 ```json
 {
   "ok": true,
@@ -185,6 +190,7 @@ When `--parents`, `--children`, `--timestamp`, `--left-right`, `--cherry-mark`, 
     "parents": true,
     "children": false,
     "timestamp": true,
+    "reverse": false,
     "first_parent": false,
     "author": null,
     "committer": null,

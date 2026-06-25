@@ -1,8 +1,12 @@
 //! Implements `rev-list` to enumerate commits reachable from revisions.
 
+use std::collections::{HashMap, HashSet};
+
 use clap::Parser;
+use git_internal::internal::object::commit::Commit;
 
 use crate::{
+    command::load_object,
     internal::{branch::Branch, config::ConfigKv, head::Head, tag},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -83,6 +87,14 @@ pub struct RevListArgs {
     /// Follow only the first parent of merge commits
     #[clap(long = "first-parent")]
     pub first_parent: bool,
+
+    /// Also print the boundary commits at the frontier — the parents of a listed
+    /// commit that are not themselves listed (excluded by a `^spec`/range start, or
+    /// beyond a `--max-count`/`--skip` cut) — each prefixed with `-`. Normally placed
+    /// after the listed commits; under `--reverse` the whole stream is reversed, so
+    /// they lead. Boundary rows carry `--parents`/`--children`/`--timestamp` metadata.
+    #[clap(long)]
+    pub boundary: bool,
 
     /// Filter commits by author name or email
     #[clap(long, value_name = "PATTERN")]
@@ -213,14 +225,33 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         .skip(args.skip)
         .take(args.max_count.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
+    // `--boundary`: the frontier — the parents of a listed commit that are NOT
+    // themselves listed (excluded by a `^spec`/range start, or beyond the
+    // `--max-count`/`--skip` cut). Computed from the limited output set so limiting
+    // yields the cut point (matching Git), honoring `--first-parent` for parent
+    // rewriting, and formatted with the same metadata flags. Computed even under
+    // `--count` because Git counts boundary commits in the total. Computed BEFORE the
+    // `--reverse` flip so boundary child lists keep the un-reversed traversal order
+    // (Git reverses only the output ROWS, not a boundary's child list).
+    let boundary = if args.boundary {
+        compute_boundary_entries(&commits, args)
+    } else {
+        Vec::new()
+    };
     // `--reverse` reverses the already-limited selection (Git applies commit
     // limiting first, then reverses for output). Order-independent `--count` is
-    // unaffected.
+    // unaffected; boundary row placement is handled in `human_lines`.
     if args.reverse {
         commits.reverse();
     }
     let count_fields = if args.count {
-        rev_list_count_fields(&commits, args)
+        let mut fields = rev_list_count_fields(&commits, args);
+        // Git's `--count --boundary` includes the boundary commits; they carry no
+        // side, so they fall into the first (total / left) field.
+        if let Some(first) = fields.first_mut() {
+            *first += boundary.len();
+        }
+        fields
     } else {
         Vec::new()
     };
@@ -263,6 +294,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
                     timestamp: args
                         .timestamp
                         .then_some(selected.commit.committer.timestamp),
+                    boundary: false,
                 })
                 .collect(),
         )
@@ -277,6 +309,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         input: selection.input,
         inputs: selection.inputs,
         commits,
+        boundary,
         entries,
         total,
         count_fields,
@@ -284,6 +317,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         parents: args.parents,
         children: args.children,
         timestamp: args.timestamp,
+        reverse: args.reverse,
         first_parent: args.first_parent,
         author: args.author.clone(),
         committer: args.committer.clone(),
@@ -306,6 +340,123 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         max_count: args.max_count,
         skip: args.skip,
     })
+}
+
+/// Compute the `--boundary` frontier from the FINAL output set: the parents of a
+/// listed commit that are not themselves listed (because they were excluded by a
+/// `^spec`/range start, or fall beyond the `--max-count`/`--skip` cut). This matches
+/// Git's "parents of returned commits that are not themselves returned" rule, so
+/// limiting yields the cut point rather than the original range start.
+///
+/// All parents (not just first) of a listed commit that are not listed count as
+/// boundary commits — verified against `git rev-list --first-parent --boundary`,
+/// which marks BOTH parents of a merge at the frontier (the un-walked second parent
+/// becomes a boundary). The `--first-parent` effect on the boundary SET is already
+/// captured by the smaller output set the walk produces, not by restricting parent
+/// selection here. Returns boundary `RevListEntry` rows in committer-date-descending
+/// order (id tiebreak), carrying `--parents`/`--children`/`--timestamp` metadata so
+/// they format identically to listed commits. Parents that fail to load are skipped.
+///
+/// Two Git-faithfulness nuances on merges (verified against git 2.x):
+/// - `--children`: a boundary's children are derived from the output set (the listed
+///   commits naming it as a parent), iterated oldest-first to match Git's order.
+/// - `--first-parent --parents`: Git prints NO parents for a boundary that was never
+///   entered by the walk (an un-walked second parent); only first-parent boundaries
+///   keep their parents.
+fn compute_boundary_entries(
+    output: &[RevListSelectedCommit],
+    args: &RevListArgs,
+) -> Vec<RevListEntry> {
+    let output_ids: HashSet<String> = output
+        .iter()
+        .map(|selected| selected.commit.id.to_string())
+        .collect();
+
+    // Children for boundary commits must be derived from the OUTPUT set: a boundary
+    // commit is by definition NOT in the selected set, so the traversal child map
+    // (which only records edges whose parent is selected) would yield none. Here a
+    // boundary commit's children are exactly the listed commits that name it as a
+    // parent — matching `git rev-list --boundary --children`. The output is iterated
+    // in REVERSE (oldest-first) so multi-child boundary lists match Git's ordering.
+    let mut boundary_children: HashMap<String, Vec<String>> = HashMap::new();
+    if args.children {
+        for selected in output.iter().rev() {
+            let child_id = selected.commit.id.to_string();
+            for parent in &selected.commit.parent_commit_ids {
+                let pid = parent.to_string();
+                if !output_ids.contains(&pid) {
+                    boundary_children
+                        .entry(pid)
+                        .or_default()
+                        .push(child_id.clone());
+                }
+            }
+        }
+    }
+
+    // `--first-parent --parents`: Git rewrites away the parents of a boundary that was
+    // never entered by the walk (an un-walked second parent of a merge), printing it
+    // bare. Only boundaries reached AS the first parent of a listed commit keep their
+    // parents. Without `--first-parent`, every boundary shows its real parents.
+    let first_parent_boundary: HashSet<String> = if args.first_parent && args.parents {
+        output
+            .iter()
+            .filter_map(|selected| selected.commit.parent_commit_ids.first())
+            .map(ToString::to_string)
+            .filter(|pid| !output_ids.contains(pid))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let mut seen = HashSet::new();
+    let mut boundary: Vec<Commit> = Vec::new();
+    for selected in output {
+        for parent in &selected.commit.parent_commit_ids {
+            let pid = parent.to_string();
+            if !output_ids.contains(&pid)
+                && seen.insert(pid.clone())
+                && let Ok(parent_commit) = load_object::<Commit>(parent)
+            {
+                boundary.push(parent_commit);
+            }
+        }
+    }
+    boundary.sort_by(|a, b| {
+        b.committer
+            .timestamp
+            .cmp(&a.committer.timestamp)
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+    boundary
+        .into_iter()
+        .map(|commit| RevListEntry {
+            commit: commit.id.to_string(),
+            side: None,
+            cherry_equivalent: None,
+            parents: if args.parents
+                && (!args.first_parent || first_parent_boundary.contains(&commit.id.to_string()))
+            {
+                commit
+                    .parent_commit_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            children: if args.children {
+                boundary_children
+                    .get(&commit.id.to_string())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            timestamp: args.timestamp.then_some(commit.committer.timestamp),
+            boundary: true,
+        })
+        .collect()
 }
 
 /// Collect a resolvable spec for every ref (local branches, remote-tracking

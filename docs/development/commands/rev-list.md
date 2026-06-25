@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp`、`--reverse`、`--all`、`--date-order` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
+`libra rev-list` 的目标是列出从一个或多个 revision 可达的提交对象。当前实现接受零个或多个 `[SPEC]`（缺省 `HEAD`），支持多 revision union、`^` 排除、`A..B` / `A...B` 范围，并按提交时间倒序打印可达提交哈希；`--count`、`-n`/`--max-count`、`--skip`、`--since`/`--after`、`--until`/`--before`、`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp`、`--reverse`、`--all`、`--date-order`、`--boundary` 已支持。更高级对象遍历/输出等 Git plumbing 行为尚未实现（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp`、`--reverse`（先做提交限制再反转输出）、`--all`（以所有 ref 和 HEAD 为起点遍历）和 `--date-order`（作为默认 committer-date 顺序的 no-op 接受；与 Git 不同，不在日期偏斜时施加 topo 约束）已支持；更广义对象遍历输出尚未公开。
+- 兼容级别：`partial`。多 revision 可达提交列表、`^` 排除、`A..B` / `A...B` 范围、`--count`、`-n`/`--max-count`、`--skip`、committer 时间过滤（`--since`/`--after`、`--until`/`--before`）、父提交数量过滤（`--merges`、`--no-merges`、`--min-parents`、`--max-parents`、`--no-min-parents`、`--no-max-parents`）、`--first-parent`、`--author`、`--committer`、`--grep`、`-- <PATH>...` path limitation、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`--parents`、`--children`、`--timestamp`、`--reverse`（先做提交限制再反转输出）、`--all`（以所有 ref 和 HEAD 为起点遍历）、`--date-order`（作为默认 committer-date 顺序的 no-op 接受；与 Git 不同，不在日期偏斜时施加 topo 约束）和 `--boundary`（在列出提交之后附加范围排除的边界提交，每个 `-` 前缀）已支持；更广义对象遍历输出尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -58,14 +58,15 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-list.md`。
 - Synopsis：`libra rev-list [OPTIONS] [SPEC]... [-- <PATH>...]`。
-- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--reverse`、`--all`、`--date-order`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`-- <PATH>...`、`--parents`、`--children`、`--timestamp`、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
+- 公开参数/子命令包括：`-n, --max-count <N>`、`--skip <N>`、`--reverse`、`--all`、`--date-order`、`--count`、`--since <DATE>` / `--after <DATE>`、`--until <DATE>` / `--before <DATE>`、`--merges`、`--no-merges`、`--min-parents <N>`、`--max-parents <N>`、`--no-min-parents`、`--no-max-parents`、`--first-parent`、`--author <PATTERN>`、`--committer <PATTERN>`、`--grep <PATTERN>`、`--left-right`、`--left-only`、`--right-only`、`--cherry-pick`、`--cherry-mark`、`--cherry`、`-- <PATH>...`、`--parents`、`--children`、`--timestamp`、`--boundary`（边界提交，`-` 前缀，置于列出提交之后；`compute_boundary_entries` 从最终输出集取「父提交不在输出集」者，按 `--parents`/`--timestamp` 元数据经同一 formatter 渲染）、`[SPEC]...`（可选定位参数，缺省为 `HEAD`；支持多 revision、`^` 排除、`A..B` 和 `A...B`）；`--json` / `--quiet` 为全局参数，不在 `RevListArgs` 内本地声明。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 对象遍历输出 | `--objects`、`--objects-edge`、`--objects-edge-aggressive`、`--boundary` 等对象枚举/边界输出尚未实现。 | 继续标记为 `partial`；后续按参数批次实现并补 runner owner scenario。 |
+| ✅ 边界输出 | `--boundary`（在列出提交之后附加边界提交——被列出提交的、未被列出的父提交，每个以 `-` 前缀）已实现，带集成测试 `test_rev_list_boundary`。`compute_boundary_entries` 从**最终输出集**（经 `--skip`/`--max-count`/过滤之后）计算：取每个列出提交的全部父提交中不在输出集者，load 后按 committer 日期降序、id tiebreak，并按 `--parents`/`--children`/`--timestamp` 填充元数据，经同一 formatter 渲染（`-` 前缀）。这与 git「返回提交的父提交但自身未被返回」规则一致：`--max-count` 给出切割点父提交而非范围起点；`--first-parent` 的效果来自更小的输出集（合并的第二父仍按 git 行为标为边界）；`--reverse` 反转**整个**输出流（列出+边界），故边界提交置于最前；`--children` 下边界提交的子提交从最终输出集派生（遍历 children map 不含被排除父，故单独计算，按输出逆序匹配 git 顺序）；`--first-parent --parents` 下未被遍历的第二父边界做 parent-rewriting（裸 `-id`，仅 first-parent 链边界保留父）；`--count` **计入**边界（落入第一/total 字段）。 | 与 git 一致（经差分验证 range/`--max-count`/`--first-parent`/`--reverse`/`--timestamp`/`--parents`/`--children`/`--count`；多子边界的排序受 libra date-order 与 git topo-order 既有差异影响）。 |
+| 对象遍历输出 | `--objects`、`--objects-edge`、`--objects-edge-aggressive` 等对象枚举输出尚未实现。 | 继续标记为 `partial`；后续按参数批次实现并补 runner owner scenario。 |
 
 ## 维护要求
 

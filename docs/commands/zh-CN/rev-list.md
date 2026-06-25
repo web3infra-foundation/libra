@@ -28,6 +28,7 @@ libra rev-list [OPTIONS] [SPEC]
 | `--max-parents <N>` | 只打印最多有 `N` 个父提交的提交。 |
 | `--parents` | 在每个提交后打印父提交 ID。 |
 | `--timestamp` | 在每个提交前打印提交者时间戳，字段顺序与 Git 的 `timestamp commit [parents...]` 一致。 |
+| `--boundary` | 额外打印处于前沿的边界提交——被列出提交的、自身未被列出的父提交（被 `^spec`/范围起点排除，或在 `--max-count`/`--skip` 切割之外），每个以 `-` 前缀。通常置于列出提交之后；在 `--reverse` 下整个输出流被反转，因此边界提交会置于最前。边界提交经同一渲染路径输出，因此 `--parents`/`--children`/`--timestamp` 元数据会保留（两个与 Git 一致的合并细节：`--first-parent --parents` 下未被遍历的第二父边界以裸 `-id` 输出；`--children` 下边界提交的子提交从输出集派生）。`--count` 会把边界提交计入总数。 |
 | `<SPEC>` | 要从中枚举的修订。默认为 `HEAD`。 |
 
 ## 常用命令
@@ -40,6 +41,7 @@ libra rev-list -n 5 HEAD
 libra rev-list --reverse HEAD
 libra rev-list --all
 libra rev-list --date-order HEAD
+libra rev-list --boundary main..feature
 libra rev-list --skip 5 --max-count 10 HEAD
 libra rev-list --merges HEAD
 libra rev-list --no-merges HEAD

@@ -27,6 +27,7 @@ EXAMPLES:
     libra rev-list main feature     Walk from multiple revisions, de-duplicated
     libra rev-list ^main feature    Exclude commits reachable from main
     libra rev-list main..feature    Walk commits reachable from feature, not main
+    libra rev-list --boundary main..feature  Also print the excluded boundary commits (- prefix)
     libra rev-list main...feature   Walk the symmetric difference between two refs
     libra rev-list --merges HEAD    Print only merge commits
     libra rev-list --max-parents 0 HEAD
@@ -69,6 +70,14 @@ pub(super) struct RevListEntry {
     pub(super) children: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) timestamp: Option<usize>,
+    /// `--boundary` frontier commit: formatted with a leading `-` and (unlike listed
+    /// commits) carries no side/cherry markers.
+    #[serde(default, skip_serializing_if = "is_not_boundary")]
+    pub(super) boundary: bool,
+}
+
+fn is_not_boundary(boundary: &bool) -> bool {
+    !*boundary
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +85,10 @@ pub(super) struct RevListOutput {
     pub(super) input: String,
     pub(super) inputs: Vec<String>,
     pub(super) commits: Vec<String>,
+    /// `--boundary`: the frontier commits (emitted prefixed with `-`, with the same
+    /// metadata fields as the listed commits when `--parents`/`--timestamp` are set).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) boundary: Vec<RevListEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) entries: Option<Vec<RevListEntry>>,
     pub(super) total: usize,
@@ -85,6 +98,11 @@ pub(super) struct RevListOutput {
     pub(super) parents: bool,
     pub(super) children: bool,
     pub(super) timestamp: bool,
+    /// `--reverse`: reverses the COMPLETE output stream (listed commits AND boundary
+    /// commits together), matching Git, so `--reverse --boundary` leads with boundary
+    /// rows. The `commits`/`entries` fields are already reversed upstream; this flag
+    /// lets `human_lines` place boundary rows on the correct end.
+    pub(super) reverse: bool,
     pub(super) first_parent: bool,
     pub(super) author: Option<String>,
     pub(super) committer: Option<String>,
@@ -109,25 +127,47 @@ pub(super) struct RevListOutput {
 }
 
 impl RevListOutput {
-    pub(super) fn human_lines(&self) -> Vec<String> {
-        if let Some(entries) = &self.entries {
-            return entries
-                .iter()
-                .map(|entry| {
-                    format_rev_list_entry(
-                        entry,
-                        self.parents,
-                        self.children,
-                        self.timestamp,
-                        self.left_right,
-                        self.cherry_mark,
-                        self.cherry,
-                    )
-                })
-                .collect();
-        }
+    /// Format one entry (or boundary entry) through the shared formatter, honoring
+    /// the output's metadata flags.
+    fn format_one(&self, entry: &RevListEntry) -> String {
+        format_rev_list_entry(
+            entry,
+            self.parents,
+            self.children,
+            self.timestamp,
+            self.left_right,
+            self.cherry_mark,
+            self.cherry,
+        )
+    }
 
-        self.commits.clone()
+    pub(super) fn human_lines(&self) -> Vec<String> {
+        let listed: Vec<String> = if let Some(entries) = &self.entries {
+            entries.iter().map(|entry| self.format_one(entry)).collect()
+        } else {
+            self.commits.clone()
+        };
+        // `--boundary` frontier commits are formatted through the same path so
+        // `--parents`/`--timestamp` metadata is preserved (the boundary flag adds the
+        // leading `-`).
+        let mut boundary: Vec<String> = self
+            .boundary
+            .iter()
+            .map(|entry| self.format_one(entry))
+            .collect();
+        if self.reverse {
+            // Git reverses the COMPLETE stream (listed ++ boundary). `listed` is
+            // already reversed upstream, so the reversed full stream is
+            // reverse(boundary) followed by the (already reversed) listed commits —
+            // i.e. boundary rows lead.
+            boundary.reverse();
+            boundary.extend(listed);
+            boundary
+        } else {
+            let mut lines = listed;
+            lines.extend(boundary);
+            lines
+        }
     }
 }
 
@@ -219,6 +259,10 @@ fn format_entry_commit(
     show_cherry_mark: bool,
     show_cherry: bool,
 ) -> String {
+    // Boundary commits are always marked `-` and never carry side/cherry markers.
+    if entry.boundary {
+        return format!("-{}", entry.commit);
+    }
     let marker = if show_cherry_mark {
         if entry.cherry_equivalent.unwrap_or(false) {
             "="
