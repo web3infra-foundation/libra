@@ -255,6 +255,8 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             ours: false,
             theirs: false,
             ignore_unmerged: false,
+            merge: false,
+            conflict: None,
             worktree: true,
             staged: true,
             source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),

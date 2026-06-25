@@ -257,6 +257,8 @@ async fn rewind(args: CheckpointRewindArgs, output: &OutputConfig) -> CliResult<
         ours: false,
         theirs: false,
         ignore_unmerged: false,
+        merge: false,
+        conflict: None,
         pathspec: vec![".".to_string()],
         source: Some(parent_commit.clone()),
         worktree: true,

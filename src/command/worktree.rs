@@ -801,6 +801,8 @@ async fn add_worktree(path: String) -> WorktreeResult<WorktreeAddOutput> {
             ours: false,
             theirs: false,
             ignore_unmerged: false,
+            merge: false,
+            conflict: None,
             pathspec: vec![util::working_dir_string()],
             source: Some("HEAD".to_string()),
             worktree: true,

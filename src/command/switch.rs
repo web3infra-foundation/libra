@@ -1173,6 +1173,8 @@ async fn restore_to_commit(
         ours: false,
         theirs: false,
         ignore_unmerged: false,
+        merge: false,
+        conflict: None,
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),

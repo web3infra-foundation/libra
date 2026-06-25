@@ -537,6 +537,8 @@ async fn add_fuse_worktree(
             ours: false,
             theirs: false,
             ignore_unmerged: false,
+            merge: false,
+            conflict: None,
             pathspec: vec![target.to_string_lossy().to_string()],
             source: Some(checkout_branch.clone()),
             worktree: true,

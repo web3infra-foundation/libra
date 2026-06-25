@@ -1067,6 +1067,8 @@ async fn apply_fast_forward_merge(
             ours: false,
             theirs: false,
             ignore_unmerged: false,
+            merge: false,
+            conflict: None,
             worktree: true,
             staged: true,
             source: None, // `restore` without source defaults to HEAD, which is now correct.
