@@ -275,7 +275,7 @@ async fn publish_upload_test_uploads_ai_artifacts_and_builds_d1_rows_idempotentl
         revision_oid: revision_oid.to_string(),
         ai_version_id: "ai-version-1".to_string(),
         generated_at,
-        ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+        ai_object_model_reference: "docs/ai/object-model-reference.md".to_string(),
         redaction_mode: RedactionMode::Default,
         redaction_rules_version: "2026.05.13-1".to_string(),
         associated_ids: AiBundleAssociatedIds {

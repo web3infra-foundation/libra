@@ -1044,7 +1044,7 @@ fn mock_publish_ai_graph(revision_oid: &str) -> PublishAiGraph {
 fn mock_publish_ai_bundle(revision_oid: &str) -> PublishAiBundle {
     PublishAiBundle {
         schema_version: PUBLISH_SCHEMA_VERSION,
-        ai_object_model_reference: "docs/agent/ai-object-model-reference.md".to_string(),
+        ai_object_model_reference: "docs/ai/object-model-reference.md".to_string(),
         site_id: "site_123".to_string(),
         revision_oid: revision_oid.to_string(),
         ai_version_id: format!("ai-{revision_oid}"),

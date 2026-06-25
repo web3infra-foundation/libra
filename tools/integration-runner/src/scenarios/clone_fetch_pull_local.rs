@@ -35,6 +35,12 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
     let clone = clone_dir.to_string_lossy().to_string();
     let ls_remote = ctx.command(&["ls-remote", &remote], ctx.run_dir.clone(), true)?;
     assert_stdout_contains(&ls_remote, "refs/heads/main")?;
+    let symref_ls_remote = ctx.command(
+        &["ls-remote", "--symref", &remote],
+        ctx.run_dir.clone(),
+        true,
+    )?;
+    assert_stdout_contains(&symref_ls_remote, "ref: refs/heads/main\tHEAD")?;
     assert_stdout_contains(
         &ctx.command(
             &["ls-remote", "--get-url", &remote],
@@ -60,7 +66,9 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         .find("refs/tags/v1.2.0")
         .context("sorted ls-remote tags omitted v1.2.0")?;
     if v1_1 >= v1_2 {
-        bail!("ls-remote --sort=version:refname returned unexpected tag order: {sorted_tags_stdout}");
+        bail!(
+            "ls-remote --sort=version:refname returned unexpected tag order: {sorted_tags_stdout}"
+        );
     }
     ctx.command(
         &["ls-remote", "--exit-code", &remote, "main"],
@@ -96,7 +104,11 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
         &remote,
     )?;
     assert_stdout_contains(
-        &ctx.command(&["ls-remote", "--get-url", "origin"], clone_dir.clone(), true)?,
+        &ctx.command(
+            &["ls-remote", "--get-url", "origin"],
+            clone_dir.clone(),
+            true,
+        )?,
         &remote,
     )?;
     assert_stdout_contains(

@@ -171,7 +171,7 @@ async function seedPublishFixture(): Promise<void> {
   const bundleKey = `${REPO_ID}/publish/sites/${SITE_ID}/revisions/${REVISION_OID}/ai/bundles/ai-version-miniflare-001.json`;
   const bundleBody = JSON.stringify({
     schemaVersion: 1,
-    aiObjectModelReference: "docs/agent/ai-object-model-reference.md",
+    aiObjectModelReference: "docs/ai/object-model-reference.md",
     siteId: SITE_ID,
     revisionOid: REVISION_OID,
     aiVersionId: "ai-version-miniflare-001",

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "aiObjectModelReference": "docs/agent/ai-object-model-reference.md",
+  "aiObjectModelReference": "docs/ai/object-model-reference.md",
   "siteId": "00000000-0000-0000-0000-0000publish01",
   "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
   "aiVersionId": "ai-version-2026-05-09-001",
