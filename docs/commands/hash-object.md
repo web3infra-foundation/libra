@@ -8,11 +8,14 @@ libra hash-object --stdin [OPTIONS]
 libra hash-object --stdin-paths [OPTIONS]
 ```
 
-This initial implementation supports blob objects. It hashes the raw bytes as a
-Git blob using the current repository object format. It does not apply clean
-filters, attributes, or LFS pointer conversion. `--path` is accepted as a Git
-compatibility path context and stdin JSON source label; it does not change the
-hashed bytes until path-based filters are implemented.
+It supports the four Git object types — `blob` (default), `commit`, `tree`, and
+`tag` — computing the object id from the `<type> <size>\0<content>` header using the
+current repository object format, byte-for-byte identical to `git hash-object -t
+<type>`. Without `--literally`, commit/tree/tag content is validated as a well-formed
+object of that type (a blob accepts any bytes). It does not apply clean filters,
+attributes, or LFS pointer conversion. `--path` is accepted as a Git compatibility
+path context and stdin JSON source label; it does not change the hashed bytes until
+path-based filters are implemented.
 
 Read-only hashing does not require a Libra repository and defaults to SHA-1
 when no repository object format is available. `-w` / `--write` requires a
@@ -25,8 +28,9 @@ repository because it stores the object in the repository object database.
 | `<PATH>...` | | File paths to hash |
 | `--stdin` | | Read bytes from standard input instead of file paths |
 | `--stdin-paths` | | Read file paths from standard input (one per line) and hash each |
-| `--write` | `-w` | Store the computed blob in the repository object database |
-| `--type <TYPE>` | `-t` | Object type to hash. Only `blob` is currently supported |
+| `--write` | `-w` | Store the computed object in the repository object database |
+| `--type <TYPE>` | `-t` | Object type to hash: `blob` (default), `commit`, `tree`, or `tag` |
+| `--literally` | | Hash the bytes as the given type without verifying the content is a well-formed object of that type |
 | `--path <PATH>` | | Path context label for compatibility with Git hash-object |
 | `--no-filters` | | Explicitly hash raw bytes without path-based filters |
 | `--json` | | Emit a structured JSON envelope |
@@ -44,6 +48,14 @@ Hash and write a file as a blob object:
 
 ```bash
 libra hash-object -w src/main.rs
+```
+
+Hash file content as a typed object (the id matches `git hash-object -t <type>`); the
+content is validated as a well-formed object of that type unless `--literally` is given:
+
+```bash
+libra hash-object -t commit commit-payload
+libra hash-object -t tag --literally arbitrary-bytes
 ```
 
 Hash bytes from standard input:
@@ -95,16 +107,17 @@ Structured output:
 | Read from stdin | `--stdin` | `--stdin` | N/A |
 | Read paths from stdin | `--stdin-paths` | `--stdin-paths` | N/A |
 | Write object | `-w` / `--write` | `-w` | N/A |
-| Select object type | Only `blob` | `-t <type>` | N/A |
+| Select object type | `-t blob/commit/tree/tag` | `-t <type>` | N/A |
 | Path context | `--path <path>` accepted, no filters applied | `--path <path>` | N/A |
 | Disable filters | `--no-filters` accepted | `--no-filters` | N/A |
 | Path filters / attributes | Not supported | filters / attributes | N/A |
-| Hash literally invalid objects | Not supported | `--literally` | N/A |
+| Hash literally invalid objects | `--literally` (known types only) | `--literally` (any type string) | N/A |
 
 ## Errors
 
 | Condition | Stable code | Exit | Hint |
 |-----------|-------------|------|------|
-| Unsupported object type | `LBR-CLI-002` | 129 | `libra hash-object currently supports only blob objects` |
+| Object type outside blob/commit/tree/tag | `LBR-CLI-002` | 129 | `hash-object supports blob, commit, tree, and tag` |
+| Content is not a well-formed object of `-t <type>` (without `--literally`) | `LBR-CLI-002` | 129 | `pass --literally to hash malformed content without validation` |
 | Input file cannot be read | `LBR-IO-001` | 128 | Verify the path exists and is readable |
 | Object cannot be written | `LBR-IO-002` | 128 | Check object storage permissions and disk space |

@@ -242,30 +242,149 @@ async fn hash_object_json_reports_source_size_and_write_mode() {
 }
 
 #[tokio::test]
-async fn hash_object_rejects_unsupported_object_type() {
+async fn hash_object_rejects_non_git_object_type() {
     let repo = tempfile::tempdir().expect("create temp repo");
     init_repo_via_cli(repo.path());
     fs::write(repo.path().join("hello.txt"), b"hello").expect("write fixture");
 
-    let output = run_libra_command(&["hash-object", "-t", "tree", "hello.txt"], repo.path());
+    // A type outside the four Git object types is rejected outright.
+    let output = run_libra_command(&["hash-object", "-t", "widget", "hello.txt"], repo.path());
     assert!(
         !output.status.success(),
-        "unsupported object type should fail"
+        "a non-Git object type should fail"
     );
 
     let (human, report) = parse_cli_error_stderr(&output.stderr);
     assert!(
-        human.contains("unsupported object type 'tree'"),
-        "human stderr should explain unsupported type: {human}"
+        human.contains("unsupported object type 'widget'"),
+        "human stderr should explain the unsupported type: {human}"
     );
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert!(
         report
             .hints
             .iter()
-            .any(|hint| hint.contains("supports only blob objects")),
-        "hint should describe supported type: {:?}",
+            .any(|hint| hint.contains("blob, commit, tree, and tag")),
+        "hint should list the supported types: {:?}",
         report.hints
+    );
+}
+
+#[tokio::test]
+async fn hash_object_validates_typed_content_and_honors_literally() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    fs::write(repo.path().join("junk.txt"), b"not a commit\n").expect("write fixture");
+
+    // `-t commit` on non-commit content fails validation (cleanly, never panicking).
+    let invalid = run_libra_command(&["hash-object", "-t", "commit", "junk.txt"], repo.path());
+    assert!(
+        !invalid.status.success(),
+        "invalid commit content should fail"
+    );
+    let (human, report) = parse_cli_error_stderr(&invalid.stderr);
+    assert!(
+        human.contains("invalid commit object"),
+        "human stderr should report invalid object: {human}"
+    );
+    assert!(
+        !human.contains("panic") && !human.contains("unwrap"),
+        "validation must not surface a panic: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+
+    // `--literally` skips validation and still produces a deterministic id.
+    let literal = run_libra_command(
+        &["hash-object", "-t", "commit", "--literally", "junk.txt"],
+        repo.path(),
+    );
+    assert_cli_success(&literal, "--literally should hash without validation");
+    let oid = String::from_utf8_lossy(&literal.stdout).trim().to_string();
+    assert_eq!(oid.len(), 40, "expected a 40-hex SHA-1 oid, got: {oid}");
+    assert!(oid.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn hash_object_commit_header_byte_handling_matches_git() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+    const T: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    // A non-UTF-8 byte in the author name is accepted (Git does too).
+    let mut non_utf8 = format!("tree {T}\nauthor A").into_bytes();
+    non_utf8.push(0xff);
+    non_utf8.extend_from_slice(b" <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nm\n");
+    fs::write(repo.path().join("non_utf8"), &non_utf8).expect("write non-utf8 fixture");
+    assert_cli_success(
+        &run_libra_command(&["hash-object", "-t", "commit", "non_utf8"], repo.path()),
+        "non-UTF-8 author byte should be accepted",
+    );
+
+    // A NUL byte in the header block is rejected (Git's nulInHeader).
+    let mut with_nul = format!("tree {T}\nauthor A").into_bytes();
+    with_nul.push(0);
+    with_nul.extend_from_slice(b"B <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nm\n");
+    fs::write(repo.path().join("with_nul"), &with_nul).expect("write NUL fixture");
+    let nul = run_libra_command(&["hash-object", "-t", "commit", "with_nul"], repo.path());
+    assert!(
+        !nul.status.success(),
+        "a NUL byte in the commit header must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn hash_object_typed_oids_match_git_and_write_persists() {
+    let repo = tempfile::tempdir().expect("create temp repo");
+    init_repo_via_cli(repo.path());
+
+    // Empty tree → Git's well-known empty-tree SHA-1.
+    let empty_tree =
+        run_libra_command_with_stdin(&["hash-object", "-t", "tree", "--stdin"], repo.path(), "");
+    assert_cli_success(&empty_tree, "empty tree hash");
+    assert_eq!(
+        String::from_utf8_lossy(&empty_tree.stdout).trim(),
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    );
+
+    // A fixed, valid commit payload → the same id as `git hash-object -t commit`.
+    let commit_payload = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+         author A U Thor <author@example.com> 0 +0000\n\
+         committer A U Thor <author@example.com> 0 +0000\n\nmsg\n";
+    fs::write(repo.path().join("commit_payload"), commit_payload).expect("write commit payload");
+    let commit = run_libra_command(
+        &["hash-object", "-t", "commit", "commit_payload"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit hash");
+    assert_eq!(
+        String::from_utf8_lossy(&commit.stdout).trim(),
+        "28ce33cd971c75ff0050d386244c35d7dfaa80ab"
+    );
+
+    // A fixed, valid tag payload → the same id as `git hash-object -t tag`.
+    let tag_payload = "object 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+         type tree\ntag v1\ntagger A U Thor <author@example.com> 0 +0000\n\nmsg\n";
+    fs::write(repo.path().join("tag_payload"), tag_payload).expect("write tag payload");
+    let tag = run_libra_command(&["hash-object", "-t", "tag", "tag_payload"], repo.path());
+    assert_cli_success(&tag, "tag hash");
+    assert_eq!(
+        String::from_utf8_lossy(&tag.stdout).trim(),
+        "df80052480428e6e44da5fa8ae6dc6be7dbb7cab"
+    );
+
+    // `-w -t commit` persists a loose commit object that cat-file reads back as a commit.
+    let written = run_libra_command(
+        &["hash-object", "-w", "-t", "commit", "commit_payload"],
+        repo.path(),
+    );
+    assert_cli_success(&written, "write typed commit object");
+    let oid = String::from_utf8_lossy(&written.stdout).trim().to_string();
+    assert_eq!(oid, "28ce33cd971c75ff0050d386244c35d7dfaa80ab");
+    let type_output = run_libra_command(&["cat-file", "-t", &oid], repo.path());
+    assert_cli_success(&type_output, "cat-file -t on written commit");
+    assert_eq!(
+        String::from_utf8_lossy(&type_output.stdout).trim(),
+        "commit"
     );
 }
 
