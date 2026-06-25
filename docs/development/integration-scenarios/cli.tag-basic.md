@@ -22,7 +22,8 @@ libra tag v1.0.0
 libra tag -l
 libra tag -m "release v1.1.0" v1.1.0
 libra tag -l -n 1
-! libra tag -F release.txt v1.2.0
+printf 'release v1.2.0\n\nfrom file\n' > release.txt
+libra tag -F release.txt v1.2.0
 libra rev-parse v1.0.0
 libra describe --tags --always
 libra tag -f v1.0.0
@@ -36,6 +37,6 @@ libra fsck --connectivity-only
 
 关键断言：
 
-- lightweight tag、`-m` annotated tag、`-l -n` 摘要、`-f` 强制更新、delete 和 JSON delete 当前可用。
-- `-F`、多 tag 创建、缺失 tag 删除必须稳定失败。
+- lightweight tag、`-m`/`-F` annotated tag、`-l -n` 摘要、`-f` 强制更新、delete 和 JSON delete 当前可用。
+- 多 tag 创建、缺失 tag 删除必须稳定失败。
 - `describe --tags --always` 能使用当前 tag/ref 状态输出可读名称。

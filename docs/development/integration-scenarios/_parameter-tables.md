@@ -116,7 +116,7 @@
 | 参数或子命令 | 场景 ID | 关键断言 |
 |---|---|---|
 | `tag <name>` / `tag -m <msg>` | `cli.tag-basic` | 轻量和 inline-message annotated tag 可创建、列出、解析 |
-| `tag -F <file>` | `cli.tag-basic` | 当前未实现，runner 负向断言稳定错误 |
+| `tag -F <file>` | `cli.tag-basic` | 从文件读取 annotated tag 消息；`-` 读取 stdin |
 | `tag -l` / `tag -l -n` | `cli.tag-basic` | 列表和注释摘要覆盖 |
 | `tag -f` / `tag -d <name>` / JSON delete | `cli.tag-basic` | 强制更新、删除、JSON 删除和缺失 tag 错误覆盖 |
 | `merge <branch>` | `cli.merge-rebase-cherry-revert-smoke` | fast-forward 与三方无冲突 merge 均可观察 |
@@ -177,8 +177,7 @@
 | `clone --depth` / `fetch --depth` | `cli.fetch-depth-local` | shallow marker 与 checkout 内容可观察，非法 depth 失败 |
 | `remote add/remove/rename/-v/show/get-url/set-url/prune` | `cli.clone-fetch-pull-local` | 当前 remote 增删改查和 prune 基础路径可观察 |
 | unsupported remote flags (`set-branches` / `set-head` / `update`) | `cli.clone-fetch-pull-local` | 当前未实现，runner 负向断言稳定错误 |
-| `ls-remote --heads --tags --refs --get-url --sort --exit-code` | `cli.clone-fetch-pull-local` | refs 过滤、URL 解析、排序和 no-match exit 2 可观察 |
-| unsupported ls-remote flags (`--symref`) | `cli.clone-fetch-pull-local` | 当前未实现，命令文档保留缺口 |
+| `ls-remote --heads --tags --refs --get-url --symref --sort --exit-code` | `cli.clone-fetch-pull-local` | refs 过滤、URL 解析、HEAD symref 元数据、排序和 no-match exit 2 可观察 |
 | `fetch [remote]` / `fetch --all` / `fetch --depth` | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 默认 remote、全部 remote 和 depth fetch 可观察 |
 | unsupported fetch flags (`--deepen` / `--unshallow` / `--prune` / `--porcelain` / tags modes) | `cli.clone-fetch-pull-local`、`cli.fetch-depth-local` | 当前未实现，runner 负向断言 |
 | `pull` / `pull --ff-only` / `pull --rebase` | `cli.clone-fetch-pull-local` | 本地 fast-forward/rebase 基础路径可观察 |

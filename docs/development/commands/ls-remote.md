@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra ls-remote` 的目标是列出远端引用，并支持 URL 或已配置 remote 名解析、`--heads`/`--tags`/`--refs` 过滤、ref 模式匹配、URL 解析、排序和脚本化 exit code 等能力。实现需要保证不需要完整 clone 也能诊断远端引用，同时把网络错误和认证错误区分清楚。
+`libra ls-remote` 的目标是列出远端引用，并支持 URL 或已配置 remote 名解析、`--heads`/`--tags`/`--refs` 过滤、`--symref` 符号引用元数据、ref 模式匹配、URL 解析、排序和脚本化 exit code 等能力。实现需要保证不需要完整 clone 也能诊断远端引用，同时把网络错误和认证错误区分清楚。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。heads/tags/refs filtering、patterns、`--get-url`、`--sort=refname` / `--sort=version:refname` 和 `--exit-code` 已支持；`--symref` 尚未公开。
+- 兼容级别：`partial`。heads/tags/refs filtering、patterns、`--get-url`、`--symref`、`--sort=refname` / `--sort=version:refname` 和 `--exit-code` 已支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -37,7 +37,7 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-05-11 `5d36ac37`（`feat(remote): add ls-remote command (#365)`）：基础实现节点：add ls-remote command (#365)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-06 `5d0754a6`（`feat(ls-remote): add --symref/--get-url/--sort/--exit-code and offline URL resolution`）：该提交记录的 `--symref/--get-url/--sort/--exit-code` 等参数当前并未出现在 `src/command/ls_remote.rs` 的 `LsRemoteArgs` 中，文档以当前源码暴露的参数为准。
+- 2026-06-06 `5d0754a6`（`feat(ls-remote): add --symref/--get-url/--sort/--exit-code and offline URL resolution`）：该提交记录了 `--symref/--get-url/--sort/--exit-code` 等参数的兼容目标；当前源码已恢复 `--symref` 并继续保留 `--get-url`、`--sort` 和 `--exit-code`。
 - 2026-06-07 `0bf8ca90`（`fix(ls-remote): close compatibility plan gaps`）：实现修正：close compatibility plan gaps；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -45,14 +45,14 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/ls-remote.md`。
-- 公开参数/子命令包括：`--heads`、`-t, --tags`、`--refs`、`--get-url`、`--exit-code`、`--sort <KEY>`、`<repository>`、`[patterns]...`。`--sort` 当前支持 `refname`、`-refname`、`version:refname` / `v:refname` 和对应反向形式；未知 key 返回 `LBR-CLI-002`。`--exit-code` 在 discovery 成功但没有匹配 ref 时静默返回 2。
+- 公开参数/子命令包括：`--heads`、`-t, --tags`、`--refs`、`--symref`、`--get-url`、`--exit-code`、`--sort <KEY>`、`<repository>`、`[patterns]...`。`--symref` 在可发现或可由 HEAD OID 推断时打印 `ref: refs/heads/<branch>\tHEAD`，并在 JSON 的 HEAD entry 上填充 `symref_target`。`--sort` 当前支持 `refname`、`-refname`、`version:refname` / `v:refname` 和对应反向形式；未知 key 返回 `LBR-CLI-002`。`--exit-code` 在 discovery 成功但没有匹配 ref 时静默返回 2。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git 参数缺口 | `--symref`（标准 Git ls-remote 参数，当前 discovery 结果尚未对所有 transport 暴露 symbolic-ref target）。 | 后续实现时需要补协议解析、local Libra remote 合成、用户文档、兼容矩阵和集成场景。 |
+| Git 参数缺口 | protocol v2 server-option / upload-pack override 等冷门 Git 参数尚未公开。 | 后续实现时需要补协议解析、用户文档、兼容矩阵和集成场景。 |
 
 ## 维护要求
 

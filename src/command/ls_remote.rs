@@ -8,7 +8,7 @@ use serde::Serialize;
 use url::Url;
 
 use crate::{
-    command::fetch::RemoteClient,
+    command::fetch::{RemoteClient, resolve_remote_default_branch},
     git_protocol::ServiceType::UploadPack,
     internal::{config::ConfigKv, protocol::ssh_client::is_ssh_spec},
     utils::{
@@ -56,6 +56,10 @@ pub struct LsRemoteArgs {
     #[clap(long)]
     pub refs: bool,
 
+    /// Show symbolic refs such as HEAD before their resolved ref entries
+    #[clap(long)]
+    pub symref: bool,
+
     /// Expand the remote URL and exit without contacting the remote
     #[clap(long)]
     pub get_url: bool,
@@ -79,6 +83,8 @@ pub struct LsRemoteArgs {
 struct LsRemoteEntry {
     hash: String,
     refname: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symref_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +94,7 @@ struct LsRemoteOutput {
     heads_only: bool,
     tags_only: bool,
     refs_only: bool,
+    symref: bool,
     get_url: bool,
     exit_code: bool,
     sort: Option<String>,
@@ -158,6 +165,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
             heads_only: args.heads,
             tags_only: args.tags,
             refs_only: args.refs,
+            symref: args.symref,
             get_url: true,
             exit_code: args.exit_code,
             sort: args.sort,
@@ -180,6 +188,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
             source: sanitize_discovery_error(source, &remote_url),
         })?;
     let patterns = compile_patterns(&args.patterns)?;
+    let head_symref_target = resolve_head_symref_target(&discovery.refs, &discovery.capabilities);
     let mut entries: Vec<LsRemoteEntry> = discovery
         .refs
         .iter()
@@ -187,6 +196,9 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         .map(|reference| LsRemoteEntry {
             hash: reference._hash.clone(),
             refname: reference._ref.clone(),
+            symref_target: (args.symref && reference._ref == "HEAD")
+                .then(|| head_symref_target.clone())
+                .flatten(),
         })
         .collect();
     sort_entries(&mut entries, args.sort.as_deref())?;
@@ -197,12 +209,27 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         heads_only: args.heads,
         tags_only: args.tags,
         refs_only: args.refs,
+        symref: args.symref,
         get_url: false,
         exit_code: args.exit_code,
         sort: args.sort,
         patterns: args.patterns,
         entries,
     })
+}
+
+fn resolve_head_symref_target(
+    refs: &[crate::internal::protocol::DiscRef],
+    caps: &[String],
+) -> Option<String> {
+    let ref_heads: Vec<_> = refs
+        .iter()
+        .filter(|reference| reference._ref.starts_with("refs/heads/"))
+        .cloned()
+        .collect();
+    let remote_head = refs.iter().find(|reference| reference._ref == "HEAD");
+    resolve_remote_default_branch(caps, &ref_heads, remote_head)
+        .map(|branch| format!("refs/heads/{branch}"))
 }
 
 async fn resolve_remote(
@@ -251,6 +278,13 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
         for entry in &data.entries {
+            if data.symref
+                && let Some(target) = &entry.symref_target
+            {
+                writeln!(writer, "ref: {target}\t{}", entry.refname).map_err(|error| {
+                    CliError::io(format!("failed to write ls-remote output: {error}"))
+                })?;
+            }
             writeln!(writer, "{}\t{}", entry.hash, entry.refname).map_err(|error| {
                 CliError::io(format!("failed to write ls-remote output: {error}"))
             })?;

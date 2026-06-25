@@ -15,6 +15,7 @@ libra ls-remote [OPTIONS] <repository> [patterns...]
 | `--heads` | Show only `refs/heads/*` branch refs | `libra ls-remote --heads origin` |
 | `-t`, `--tags` | Show only `refs/tags/*` tag refs | `libra ls-remote --tags origin` |
 | `--refs` | Omit `HEAD` and peeled tag refs ending in `^{}` | `libra ls-remote --refs origin` |
+| `--symref` | Print symbolic ref metadata such as `HEAD`'s target before the resolved ref row | `libra ls-remote --symref origin` |
 | `--get-url` | Resolve and print the configured URL without contacting the remote | `libra ls-remote --get-url origin` |
 | `--exit-code` | Exit with status 2 when discovery succeeds but no refs match | `libra ls-remote --exit-code origin main` |
 | `--sort <KEY>` | Sort refs by `refname`, `-refname`, `version:refname`, or `-version:refname` | `libra ls-remote --sort=version:refname --tags origin` |
@@ -26,6 +27,13 @@ Each matching ref is printed as:
 
 ```text
 <object-id>	<refname>
+```
+
+With `--symref`, symbolic refs are printed before their resolved ref row:
+
+```text
+ref: refs/heads/main	HEAD
+<object-id>	HEAD
 ```
 
 Example:
@@ -49,6 +57,7 @@ With `--json`, output uses the standard command envelope:
     "heads_only": false,
     "tags_only": false,
     "refs_only": false,
+    "symref": false,
     "get_url": false,
     "exit_code": false,
     "sort": null,
@@ -78,6 +87,9 @@ libra ls-remote --heads origin main
 # Resolve a configured remote URL without discovery
 libra ls-remote --get-url origin
 
+# Show the symbolic target for remote HEAD
+libra ls-remote --symref origin
+
 # Sort tags with version-aware refname ordering
 libra ls-remote --sort=version:refname --tags origin
 
@@ -94,5 +106,6 @@ see `docs/development/commands/_general.md` item B).
 - `ls-remote` performs only protocol discovery (`git-upload-pack --advertise-refs` equivalent for local Git repositories).
 - It does not write objects, remote-tracking refs, config, or working-tree files.
 - `--heads` and `--tags` can be combined to show both branch and tag refs while excluding `HEAD`.
+- `--symref` reports `HEAD`'s symbolic target when it can be discovered from the remote advertisement or inferred from the advertised `HEAD` object id.
 - `--get-url` exits before protocol discovery and prints the same redacted URL form used by remote diagnostics.
 - `--exit-code` is a silent script signal: no matches returns status 2 without rendering an error.

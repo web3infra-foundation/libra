@@ -58,6 +58,7 @@ fn args_with_filters(heads: bool, tags: bool, refs: bool) -> LsRemoteArgs {
         heads,
         tags,
         refs,
+        symref: false,
         get_url: false,
         exit_code: false,
         sort: None,

@@ -27,6 +27,7 @@ libra ls-remote --heads origin
 libra ls-remote --tags origin
 libra ls-remote --refs origin
 libra ls-remote --get-url origin
+libra ls-remote --symref origin
 libra ls-remote --sort=version:refname --tags origin
 libra ls-remote --exit-code origin main
 ! libra ls-remote --exit-code origin no-match  # exit 2, silent
@@ -53,6 +54,6 @@ libra fsck --connectivity-only
 关键断言：
 
 - 本地 Git fixture 可被 Libra clone，工作区内容、remote config 和 refs 可观察。
-- 当前 `remote`、`ls-remote`、`fetch`、`pull` 支持面覆盖基础正向路径，其中 `ls-remote --get-url` 不做 discovery，`--sort=version:refname` 按 refname 版本顺序排序，`--exit-code` 在无匹配时返回 2。
+- 当前 `remote`、`ls-remote`、`fetch`、`pull` 支持面覆盖基础正向路径，其中 `ls-remote --get-url` 不做 discovery，`--symref` 输出 HEAD 符号引用目标，`--sort=version:refname` 按 refname 版本顺序排序，`--exit-code` 在无匹配时返回 2。
 - `remote set-branches/set-head/update`、`fetch --deepen/--unshallow/--prune` 当前作为负向路径验证；`pull --squash`/`--commit`/`--autostash` 已实现并作为正向路径验证。
 - 失败路径不得破坏 clone 仓库，结尾 `fsck --connectivity-only` 必须通过。
