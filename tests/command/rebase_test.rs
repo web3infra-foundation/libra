@@ -1412,6 +1412,7 @@ async fn test_basic_rebase() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1617,6 +1618,7 @@ async fn test_rebase_preserves_untracked_files() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1731,6 +1733,7 @@ async fn test_rebase_already_up_to_date() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1898,6 +1901,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1922,6 +1926,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2105,6 +2110,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2156,6 +2162,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2232,6 +2239,7 @@ async fn test_rebase_continue_no_rebase() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2290,6 +2298,7 @@ async fn test_rebase_skip_no_rebase() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2460,6 +2469,7 @@ async fn test_rebase_with_conflict_and_abort() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2491,6 +2501,7 @@ async fn test_rebase_with_conflict_and_abort() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2685,6 +2696,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2719,6 +2731,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2931,6 +2944,7 @@ async fn test_rebase_with_conflict_and_skip() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2954,6 +2968,7 @@ async fn test_rebase_with_conflict_and_skip() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3134,6 +3149,7 @@ async fn test_rebase_with_conflict_and_continue() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3181,6 +3197,7 @@ async fn test_rebase_with_conflict_and_continue() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3441,6 +3458,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3465,6 +3483,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3657,6 +3676,7 @@ async fn test_rebase_state_persistence() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3698,6 +3718,7 @@ async fn test_rebase_state_persistence() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3845,6 +3866,7 @@ async fn test_rebase_fast_forward_branch_behind() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3995,6 +4017,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4145,6 +4168,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4326,6 +4350,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4512,6 +4537,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4541,6 +4567,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4726,6 +4753,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4752,6 +4780,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4916,6 +4945,7 @@ async fn test_rebase_continue_requires_resolution() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4941,6 +4971,7 @@ async fn test_rebase_continue_requires_resolution() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4966,6 +4997,7 @@ async fn test_rebase_continue_requires_resolution() {
     execute(RebaseArgs {
         no_rerere_autoupdate: false,
         keep_empty: false,
+        no_keep_empty: false,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -5342,5 +5374,136 @@ fn test_rebase_keep_empty_is_accepted_noop_and_preserves_empty_commit() {
     assert!(
         log.contains("real-dev") && log.contains("main-advance"),
         "rebase should have replayed dev onto the advanced main:\n{log}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_rebase_no_keep_empty_drops_start_empty_commits() {
+    // `--no-keep-empty` drops commits that are already empty in the source history
+    // (no change vs their parent), while a real commit is still replayed. The
+    // default (and `--keep-empty`) keeps the empty commit.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // dev: an empty commit followed by a real one.
+    assert_cli_success(&run_libra_command(&["branch", "dev"], p), "branch dev");
+    assert_cli_success(&run_libra_command(&["checkout", "dev"], p), "checkout dev");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "empty-commit",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "empty commit",
+    );
+    std::fs::write(p.join("dev.txt"), "dev\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "dev.txt"], p), "add dev.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "real-dev", "--no-verify"], p),
+        "real dev commit",
+    );
+
+    // Advance main so the rebase actually replays.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    std::fs::write(p.join("main.txt"), "main\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "main.txt"], p), "add main.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main-advance", "--no-verify"], p),
+        "main advance",
+    );
+
+    // rebase --no-keep-empty: the empty commit is dropped, the real one replayed.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "dev"], p),
+        "checkout dev again",
+    );
+    assert_cli_success(
+        &run_libra_command(&["rebase", "--no-keep-empty", "main"], p),
+        "rebase --no-keep-empty",
+    );
+    let log =
+        String::from_utf8_lossy(&run_libra_command(&["log", "--pretty=%s"], p).stdout).into_owned();
+    assert!(
+        !log.contains("empty-commit"),
+        "--no-keep-empty must drop the start-empty commit:\n{log}"
+    );
+    assert!(
+        log.contains("real-dev") && log.contains("main-advance"),
+        "the real commit is still replayed onto the advanced main:\n{log}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_rebase_no_keep_empty_all_empty_range_moves_branch_to_base() {
+    // When `--no-keep-empty` drops EVERY commit in the range (all start-empty),
+    // the branch must still be rebased onto the advanced upstream — not left at
+    // its old tip with the empty commits silently retained.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // dev: only empty commits.
+    assert_cli_success(&run_libra_command(&["branch", "dev"], p), "branch dev");
+    assert_cli_success(&run_libra_command(&["checkout", "dev"], p), "checkout dev");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "empty-1", "--no-verify"],
+            p,
+        ),
+        "empty-1",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--allow-empty", "-m", "empty-2", "--no-verify"],
+            p,
+        ),
+        "empty-2",
+    );
+
+    // Advance main.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], p),
+        "checkout main",
+    );
+    std::fs::write(p.join("main.txt"), "main\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "main.txt"], p), "add main.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main-advance", "--no-verify"], p),
+        "main advance",
+    );
+    let main_tip = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "main"], p).stdout)
+        .trim()
+        .to_string();
+
+    // rebase --no-keep-empty: all commits dropped, dev moves to main's tip.
+    assert_cli_success(
+        &run_libra_command(&["checkout", "dev"], p),
+        "checkout dev again",
+    );
+    assert_cli_success(
+        &run_libra_command(&["rebase", "--no-keep-empty", "main"], p),
+        "rebase --no-keep-empty (all empty)",
+    );
+    let dev_tip = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        dev_tip, main_tip,
+        "dev with only empty commits must rebase onto main's tip, not stay put"
+    );
+    let log =
+        String::from_utf8_lossy(&run_libra_command(&["log", "--pretty=%s"], p).stdout).into_owned();
+    assert!(
+        !log.contains("empty-1") && !log.contains("empty-2"),
+        "all start-empty commits must be dropped:\n{log}"
     );
 }

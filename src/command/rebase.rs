@@ -631,6 +631,7 @@ EXAMPLES:
     libra rebase --reapply-cherry-picks main
     libra rebase --onto main dev  Replay dev..HEAD onto main, keeping the upstream range
     libra rebase --keep-empty main Keep empty commits while replaying (Libra's default)
+    libra rebase --no-keep-empty main  Drop commits that are already empty in the source
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
     libra rebase --abort          Restore the original branch and clear rebase state
@@ -690,12 +691,19 @@ pub struct RebaseArgs {
     /// Keep commits that begin empty (already empty before replay) rather than
     /// dropping them. Accepted for Git parity and is a no-op: Libra's rebase
     /// already keeps empty commits by default, so this matches existing behavior.
-    /// (The reverse `--no-keep-empty` — drop commits that start empty — is not
-    /// implemented; nor is `--empty=drop`, the distinct flag that drops commits
-    /// which *become* empty after replay. Both need empty-commit detection in the
-    /// replay engine.)
-    #[clap(long = "keep-empty")]
+    /// Toggle pair with `--no-keep-empty`; the last one wins. (Git's `--empty=drop`,
+    /// which drops commits that *become* empty after replay, is a distinct concept
+    /// and is not implemented.)
+    #[clap(long = "keep-empty", overrides_with = "no_keep_empty")]
     pub keep_empty: bool,
+
+    /// Drop commits that begin empty (their tree equals their parent's — they
+    /// introduce no change) instead of replaying them. Toggle pair with
+    /// `--keep-empty`; the last one wins. (Only commits that are ALREADY empty are
+    /// dropped; Git's `--empty=drop`, for commits that *become* empty after replay,
+    /// is not implemented.)
+    #[clap(long = "no-keep-empty", overrides_with = "keep_empty")]
+    pub no_keep_empty: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -991,6 +999,7 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
             args.onto.as_deref(),
             args.autosquash,
             args.reapply_cherry_picks,
+            args.no_keep_empty,
         )
         .await
         .map_err(CliError::from)?;
@@ -1422,6 +1431,7 @@ async fn run_rebase_start(
     onto: Option<&str>,
     autosquash: bool,
     _reapply_cherry_picks: bool,
+    no_keep_empty: bool,
 ) -> Result<RebaseOutput, RebaseError> {
     let db = get_db_conn_instance().await;
 
@@ -1572,13 +1582,38 @@ async fn run_rebase_start(
             commit: head_to_rebase_id.to_string(),
             detail,
         })?;
+    // `--no-keep-empty`: drop commits that are ALREADY empty in the original
+    // history (their tree equals their first parent's tree — i.e. they introduce
+    // no change). Filtering the replay list up front means the persisted todo is
+    // already pruned, so `--continue` honors it without extra state. (Commits that
+    // only BECOME empty after replay are a separate concept — `--empty=drop` — and
+    // are not handled here.)
+    //
+    // `had_commits_before_filter` distinguishes "nothing to rebase" (collect
+    // returned empty — head is already on/behind the base) from "everything was an
+    // empty commit we just dropped". In the latter case the branch must still be
+    // moved to the new base, so the early no-commits return below is skipped.
+    let had_commits_before_filter = !commits_to_replay.is_empty();
+    if no_keep_empty {
+        let mut kept = Vec::with_capacity(commits_to_replay.len());
+        for commit_id in commits_to_replay {
+            if !commit_starts_empty(&commit_id).await {
+                kept.push(commit_id);
+            }
+        }
+        commits_to_replay = kept;
+    }
     let mut todo_actions = VecDeque::from(vec![RebaseTodoAction::Pick; commits_to_replay.len()]);
     if autosquash {
         let planned_todo = autosquash_commits(commits_to_replay)?;
         commits_to_replay = planned_todo.iter().map(|item| item.commit).collect();
         todo_actions = planned_todo.iter().map(|item| item.action).collect();
     }
-    if commits_to_replay.is_empty() {
+    // Only genuinely-nothing-to-rebase (collect returned empty) returns early and
+    // leaves the branch put. If `--no-keep-empty` emptied a non-empty range, fall
+    // through to the normal setup so the branch is still rebased onto newbase
+    // (replaying zero commits) — otherwise the dropped empties would silently stay.
+    if commits_to_replay.is_empty() && !had_commits_before_filter {
         return Ok(RebaseOutput {
             action: "start".to_string(),
             status: "no-commits".to_string(),
@@ -1704,7 +1739,7 @@ pub(crate) struct PullRebaseSummary {
 /// with structured hints — pull just wraps it in its own error
 /// variant so the `phase=rebase` detail can be attached.
 pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
-    let output = run_rebase_start(upstream, None, false, false).await?;
+    let output = run_rebase_start(upstream, None, false, false, false).await?;
     let old_commit = output
         .previous_commit
         .clone()
@@ -3628,6 +3663,27 @@ async fn find_merge_base(
 ///
 /// This function walks backwards from the head commit to the base commit,
 /// collecting all commits in between. These are the commits that will be
+/// Whether `commit_id` is empty in the original history — i.e. it introduces no
+/// change relative to its first parent (its tree equals the parent's tree). A
+/// root commit (no parent) is empty iff its tree has no entries. Used by
+/// `rebase --no-keep-empty` to drop such commits before replay. A load failure
+/// conservatively reports `false` (keep the commit) so a transient error never
+/// silently discards work.
+async fn commit_starts_empty(commit_id: &ObjectHash) -> bool {
+    let Ok(commit) = load_object::<Commit>(commit_id) else {
+        return false;
+    };
+    match commit.parent_commit_ids.first() {
+        Some(parent_id) => match load_object::<Commit>(parent_id) {
+            Ok(parent) => commit.tree_id == parent.tree_id,
+            Err(_) => false,
+        },
+        None => load_object::<Tree>(&commit.tree_id)
+            .map(|tree| tree.tree_items.is_empty())
+            .unwrap_or(false),
+    }
+}
+
 /// replayed onto the new upstream base.
 ///
 /// The commits are returned in chronological order (oldest first) so they

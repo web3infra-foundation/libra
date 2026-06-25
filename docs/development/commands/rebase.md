@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互。已支持 `--onto <newbase> [<upstream>] [<branch>]`（重放 `<upstream>..HEAD` 区间到 `<newbase>`，第三 positional 先切换分支）；`--autosquash`（fixup!/squash!/amend! 折叠）与 `--reapply-cherry-picks` 已支持，`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere）、`--keep-empty`（接受式 no-op：Libra 默认就保留 start-empty 提交）已公开；interactive、exec、`--autostash`（正向 auto-stash）、`--rerere-autoupdate`、rebase-merges、`--no-keep-empty`（丢弃 start-empty 提交）/`--empty=drop`（丢弃 replay 后变空的提交）等能力仍列为未完成。
+`libra rebase` 的目标是把提交重放到新的 base 上，并支持 continue/abort/skip 等冲突恢复流程。实现需要保持作者/提交者语义、文件模式、错误分类和 pull --rebase 交互。已支持 `--onto <newbase> [<upstream>] [<branch>]`（重放 `<upstream>..HEAD` 区间到 `<newbase>`，第三 positional 先切换分支）；`--autosquash`（fixup!/squash!/amend! 折叠）与 `--reapply-cherry-picks` 已支持，`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere）、`--keep-empty`（接受式 no-op：Libra 默认就保留 start-empty 提交）、`--no-keep-empty`（丢弃 start-empty 提交）已公开；interactive、exec、`--autostash`（正向 auto-stash）、`--rerere-autoupdate`、rebase-merges、`--empty=drop`（丢弃 replay 后变空的提交）等能力仍列为未完成。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--onto <newbase> [<upstream>] [<branch>]`、`--autosquash`、`--reapply-cherry-picks` 、`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash，要求干净工作树；字段 `no_autostash` 解析后不被读取。Git 的反向 `--autostash` 未实现）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere；字段 `no_rerere_autoupdate` 解析后不被读取。Git 的反向 `--rerere-autoupdate` 未公开）与 `--keep-empty`（接受式 no-op：Libra 的 rebase 默认就保留 start-empty 提交；字段 `keep_empty` 解析后不被读取。反向 `--no-keep-empty`（丢弃 start-empty 提交）未实现；另一个独立的 `--empty=drop`（丢弃 replay 后才变空的提交）亦未实现——都需在重放引擎里做空提交检测）已支持；interactive/exec/`--rebase-merges`/`--rerere-autoupdate`/`--no-keep-empty` 未支持
+- 兼容级别：`partial`。`--onto <newbase> [<upstream>] [<branch>]`、`--autosquash`、`--reapply-cherry-picks` 、`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash，要求干净工作树；字段 `no_autostash` 解析后不被读取。Git 的反向 `--autostash` 未实现）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere；字段 `no_rerere_autoupdate` 解析后不被读取。Git 的反向 `--rerere-autoupdate` 未公开）、`--keep-empty`（接受式 no-op：Libra 的 rebase 默认就保留 start-empty 提交；字段 `keep_empty` 解析后不被读取）与 `--no-keep-empty`（丢弃 start-empty 提交：在 `run_rebase_start` 收集 `commits_to_replay` 后、autosquash 前，用 `commit_starts_empty`（tree==首父 tree，root 比空 tree）过滤掉这些提交；过滤后的 todo 被持久化故 `--continue` 自然遵循。`--keep-empty`/`--no-keep-empty` 组成 `overrides_with` toggle）已支持；interactive/exec/`--rebase-merges`/`--rerere-autoupdate`/`--empty=drop`（丢弃 replay 后才变空的提交，需引擎内重放后检测）未支持
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -48,22 +48,22 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rebase.md`。
-- Synopsis：`libra rebase [--onto <newbase>] [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty] <upstream> [<branch>] | --continue | --abort | --skip`。
-- 公开参数/子命令包括：`<upstream>`、`[<branch>]`（第三个位置参数，rebase 前先检出）、`--onto <newbase>`、`--autosquash`（fixup!/squash!/amend! 折叠）、`--reapply-cherry-picks`、`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash，要求干净工作树；字段 `no_autostash` 不被读取。Git 的反向 `--autostash` 未实现）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere；字段 `no_rerere_autoupdate` 不被读取。Git 的反向 `--rerere-autoupdate` 未公开）、`--keep-empty`（接受式 no-op：Libra 默认保留 start-empty 提交；字段 `keep_empty` 不被读取。反向 `--no-keep-empty`（丢弃 start-empty 提交）与独立的 `--empty=drop`（丢弃 replay 后变空的提交）均未实现）、`--continue`、`--abort`、`--skip`。
+- Synopsis：`libra rebase [--onto <newbase>] [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty | --no-keep-empty] <upstream> [<branch>] | --continue | --abort | --skip`。
+- 公开参数/子命令包括：`<upstream>`、`[<branch>]`（第三个位置参数，rebase 前先检出）、`--onto <newbase>`、`--autosquash`（fixup!/squash!/amend! 折叠）、`--reapply-cherry-picks`、`--no-autostash`（接受式 no-op：Libra 的 rebase 从不 autostash，要求干净工作树；字段 `no_autostash` 不被读取。Git 的反向 `--autostash` 未实现）、`--no-rerere-autoupdate`（接受式 no-op：Libra 无 rerere；字段 `no_rerere_autoupdate` 不被读取。Git 的反向 `--rerere-autoupdate` 未公开）、`--keep-empty`（接受式 no-op：Libra 默认保留 start-empty 提交；字段 `keep_empty` 不被读取）、`--no-keep-empty`（丢弃 start-empty 提交：`commit_starts_empty` 在收集后过滤 `commits_to_replay`，与 `--keep-empty` 组成 toggle；独立的 `--empty=drop` 丢弃 replay 后变空的提交仍未实现）、`--continue`、`--abort`、`--skip`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `--onto`/`--autosquash`/`--reapply-cherry-picks`/`--no-autostash`(no-op)/`--no-rerere-autoupdate`(no-op)/`--keep-empty`(no-op) 已支持；interactive/`--rebase-merges`/`--autostash`/`--rerere-autoupdate`/`--no-keep-empty` 未支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | `--onto`/`--autosquash`/`--reapply-cherry-picks`/`--no-autostash`(no-op)/`--no-rerere-autoupdate`(no-op)/`--keep-empty`(no-op)/`--no-keep-empty`(丢弃 start-empty) 已支持；interactive/`--rebase-merges`/`--autostash`/`--rerere-autoupdate`/`--empty=drop` 未支持 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Interactive | 原始对照：不支持；相关参数/替代：-i / --interactive；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Exec | 原始对照：不支持；相关参数/替代：--exec <cmd>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | Autosquash | `--autosquash` 已支持（fixup!/squash!/amend! 移动并折叠到目标提交）。 |
 | 部分实现 | Autostash | `--no-autostash` 作为接受式 no-op 已公开（Libra 的 rebase 从不 autostash，要求干净工作树）；`--autostash`（正向 auto-stash）仍未实现。 |
 | 部分实现 | Rerere autoupdate | `--no-rerere-autoupdate` 作为接受式 no-op 已公开（Libra 无 rerere）；`--rerere-autoupdate` 仍未公开。 |
 | 兼容差异项 | Rebase merges | 原始对照：不支持；相关参数/替代：--rebase-merges；当前说明：默认行为。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 部分实现 | Keep empty | `--keep-empty` 作为接受式 no-op 已公开（Libra 的 rebase 默认就保留 start-empty 提交，带集成测试 `test_rebase_keep_empty_is_accepted_noop_and_preserves_empty_commit`）；反向 `--no-keep-empty`（丢弃 start-empty 提交）与独立的 `--empty=drop`（丢弃 replay 后变空的提交）仍未实现，需在重放引擎里做空提交检测。 |
+| ✅ 已实现 | Keep empty | `--keep-empty`（no-op，默认保留）与 `--no-keep-empty`（丢弃 start-empty 提交：`commit_starts_empty` 在 `run_rebase_start` 收集后过滤 `commits_to_replay`；过滤后的 todo 持久化故 `--continue` 遵循）组成 toggle，均已公开。带集成测试（`test_rebase_keep_empty_is_accepted_noop_and_preserves_empty_commit`、`test_rebase_no_keep_empty_drops_start_empty_commits`）。仅独立的 `--empty=drop`（丢弃 replay 后才变空的提交）仍未实现——需在重放引擎里 replay 后检测。 |
 
 ## 维护要求
 

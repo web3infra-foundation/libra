@@ -8,7 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
-libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty] <upstream>
+libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty | --no-keep-empty] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --continue
 libra rebase --abort
@@ -38,7 +38,8 @@ Rebase state (the list of remaining and completed commits, the original HEAD, an
 | | `--reapply-cherry-picks` | Explicitly replay clean cherry-pick commits. This matches Libra's default linear replay behavior. |
 | | `--no-autostash` | Do not stash and re-apply a dirty working tree around the rebase. Accepted no-op for Git parity: Libra's rebase never autostashes (it requires a clean tree). (Git's `--autostash` is not implemented.) |
 | | `--no-rerere-autoupdate` | Do not update the rerere index. Accepted no-op for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
-| | `--keep-empty` | Keep commits that begin empty (already empty before replay) rather than dropping them. Accepted no-op for Git parity: Libra's rebase already keeps empty commits by default. (The reverse `--no-keep-empty`, which drops commits that start empty, is not implemented; nor is the distinct `--empty=drop`, which drops commits that *become* empty after replay.) |
+| | `--keep-empty` | Keep commits that begin empty (already empty before replay) rather than dropping them. Accepted no-op for Git parity: Libra's rebase already keeps empty commits by default. Toggle pair with `--no-keep-empty`; the last one wins. |
+| | `--no-keep-empty` | Drop commits that begin empty (their tree equals their parent's — they introduce no change) instead of replaying them. Toggle pair with `--keep-empty`. (Only commits that are *already* empty are dropped; the distinct `--empty=drop`, for commits that *become* empty after replay, is not implemented.) |
 
 ### Option Details
 
@@ -360,7 +361,7 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere); `--rerere-autoupdate` not supported | `--rerere-autoupdate` / `--no-rerere-autoupdate` | N/A |
 | Reapply cherry-picks | Supported; Libra replays by default | `--reapply-cherry-picks` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
-| Keep empty | `--keep-empty` (no-op; already keeps empty); `--no-keep-empty` not supported | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
+| Keep empty | `--keep-empty` (no-op; already keeps empty) / `--no-keep-empty` (drop start-empty commits) | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
 | Force rebase | Not supported | `--force-rebase` | N/A |
 | Branch | `<branch>` (third positional) | `<branch>` (third positional) | `-s` / `--source` |
 | Revision set | Not supported | N/A | `-r` / `--revisions` |
