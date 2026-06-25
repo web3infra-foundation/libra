@@ -7,9 +7,9 @@
 ## 对比 Git 与兼容性
 
 - 兼容级别：`partial`。
-- 已支持：默认 cached listing、`--cached`、`--deleted`、`--modified`、`--stage` / `-s`、`--abbrev[=<n>]`（在 `-s`/`--stage` 输出里把对象名截断为 n 位 hex，bare 即 7；取值用 `=` 形式 `require_equals`，故 bare 不会吞掉 pathspec；定长截断而非最短唯一前缀）、`--others`、`--others --exclude-standard`、`<pathspec>...`、`--error-unmatch`、`-z`、`-t`（状态标签 H/R/C/?/M）、`-u` / `--unmerged`（仅冲突条目）、`--full-name`（接受为 no-op；Libra 始终输出仓库根相对路径）、`--json` 和 `--machine`。
+- 已支持：默认 cached listing、`--cached` / `-c`、`--deleted`、`--modified`、`--stage` / `-s`、`--abbrev[=<n>]`（在 `-s`/`--stage` 输出里把对象名截断为 n 位 hex，bare 即 7；取值用 `=` 形式 `require_equals`，故 bare 不会吞掉 pathspec；定长截断而非最短唯一前缀）、`--others` / `-o`、`--others --exclude-standard`、`-i` / `--ignored`（只列出被忽略的集合：`-i -o` 列出被忽略的未跟踪文件——`-o` 的反集，复用 `IgnorePolicy::OnlyIgnored`；`-i -c` 列出匹配 exclude 模式的已跟踪文件——复用 `ignore::path_matches_ignore_pattern`；要求配 `-o`/`-c` 且需 `--exclude-standard`，否则退出码 128，与 git 一致）、`<pathspec>...`、`--error-unmatch`、`-z`、`-t`（状态标签 H/R/C/?/M）、`-u` / `--unmerged`（仅冲突条目）、`--full-name`（接受为 no-op；Libra 始终输出仓库根相对路径）、`--json` 和 `--machine`。
 - 语义说明：pathspec 从调用者当前工作目录解析；精确文件和目录前缀都可匹配；解析到仓库外的 pathspec 会被拒绝。
-- 暂未公开：ignored-only / explicit exclude-source modes、`--eol`、resolve-undo、killed/debug output、sparse-checkout integration。
+- 暂未公开：`--eol`、resolve-undo、killed/debug output、sparse-checkout integration。
 
 ## 设计方案
 
@@ -37,7 +37,7 @@
 | ✅ 已实现 | 状态标签 `-t` | 在每行路径前加状态标签（`H`=cached、`R`=removed/deleted、`C`=modified/changed、`?`=other/untracked、`M`=unmerged），由 `status_tag(&FileEntry.status)` 映射，格式与 `git ls-files -t` 一致。Libra 不建模 skip-worktree/killed，故不产出 `S`/`K`。带集成测试（`ls_files_t_prefixes_status_tags`）。 |
 | ✅ 已实现 | `-u` / `--unmerged` | 仅列出冲突（stage 1/2/3）条目，输出 stage 样式（`<mode> <hash> <stage>\t<path>`），与 `git ls-files -u` 一致；冲突条目 `status` 现统一为 `unmerged`（stage>0），`-t` 下标为 `M`。带集成测试（`ls_files_u_shows_unmerged_conflict_entries`，经真实 merge 冲突构造）。 |
 | ✅ 已实现（intentionally-different） | `--full-name` | 接受 Git 的 `--full-name` 标志为 no-op：Libra 的 ls-files 始终输出仓库根相对路径（即 Git `--full-name` 的形式），不按 cwd 子目录裁剪，因此该标志不改变行为，仅为脚本兼容而接受。带集成测试（`ls_files_full_name_accepted_as_noop`）。 |
-| Ignore / exclude modes | Git 的 ignored-only、explicit exclude-source modes 未公开。 | 保持不暴露；后续实现必须同步用户文档和兼容矩阵。 |
+| ✅ Ignored listing | `-i`/`--ignored`（`-i -o` 被忽略未跟踪、`-i -c` 匹配 exclude 的已跟踪；要求 `-o`/`-c` + `--exclude-standard`）已实现，带集成测试 `test_ls_files_ignored`。 | 与 git 一致；其余 explicit exclude-source（`-x`/`--exclude-from`）仍未公开。 |
 | EOL / resolve metadata | `--eol`、resolve-undo、killed/debug output 未公开。 | 继续列为兼容缺口。 |
 | Sparse checkout | 未接入 Git sparse-checkout 语义。 | Libra 当前不维护对应状态；需要单独设计后再公开。 |
 

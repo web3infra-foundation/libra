@@ -667,3 +667,104 @@ fn test_ls_files_abbrev_shortens_object_name() {
         "bare --abbrev = 7: {ab_out:?}"
     );
 }
+
+#[test]
+fn test_ls_files_ignored() {
+    // `-i`/`--ignored` lists the ignored set: `-i -o` shows ignored UNTRACKED files
+    // (inverse of `-o`), `-i -c` shows tracked files matching an exclude pattern.
+    // `-i` requires `-o`/`-c` plus `--exclude-standard`, matching git.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join(".libraignore"), "build/\n*.log\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", ".libraignore"], p),
+        "add ignore",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ignore", "--no-verify"], p),
+        "commit ignore",
+    );
+    std::fs::create_dir_all(p.join("build")).unwrap();
+    std::fs::write(p.join("build/out.o"), "x\n").unwrap();
+    std::fs::write(p.join("debug.log"), "log\n").unwrap();
+    std::fs::write(p.join("keep.txt"), "normal\n").unwrap();
+
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "ls-files -i");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+
+    // -i -o: ignored untracked files (NOT the non-ignored keep.txt).
+    let ignored = lines(&["ls-files", "-i", "-o", "--exclude-standard"]);
+    assert!(
+        ignored.iter().any(|l| l == "build/out.o") && ignored.iter().any(|l| l == "debug.log"),
+        "-i -o lists ignored untracked files: {ignored:?}"
+    );
+    assert!(
+        !ignored.iter().any(|l| l == "keep.txt"),
+        "-i -o excludes the non-ignored file: {ignored:?}"
+    );
+    // Plain -o (no -i) is the inverse: shows keep.txt, not the ignored files.
+    let others = lines(&["ls-files", "-o", "--exclude-standard"]);
+    assert!(
+        others.iter().any(|l| l == "keep.txt") && !others.iter().any(|l| l == "debug.log"),
+        "-o (without -i) lists only non-ignored untracked files: {others:?}"
+    );
+
+    // -i -c: a tracked file matching an exclude pattern (force-added) is listed.
+    std::fs::write(p.join("tracked.log"), "data\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "-f", "tracked.log"], p),
+        "force-add ignored file",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "track ignored", "--no-verify"], p),
+        "commit tracked.log",
+    );
+    let cached_ignored = lines(&["ls-files", "-i", "-c", "--exclude-standard"]);
+    assert!(
+        cached_ignored.iter().any(|l| l == "tracked.log"),
+        "-i -c lists tracked files matching an exclude pattern: {cached_ignored:?}"
+    );
+
+    // `-i -o` stays others-only even with a stage-style display flag (`-s`): the
+    // force-added ignored TRACKED file must NOT leak in (the cached block only runs
+    // under an explicit `-c` in ignored mode).
+    let io_stage = lines(&["ls-files", "-i", "-o", "-s", "--exclude-standard"]);
+    assert!(
+        !io_stage.iter().any(|l| l.contains("tracked.log")),
+        "-i -o -s must not list the tracked ignored file: {io_stage:?}"
+    );
+
+    // -i requires -o/-c (exit 128) and an exclude source (exit 128), with Git's
+    // exact fatal messages.
+    let no_mode = run_libra_command(&["ls-files", "-i", "--exclude-standard"], p);
+    assert_eq!(
+        no_mode.status.code(),
+        Some(128),
+        "-i without -o/-c exits 128"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_mode.stderr)
+            .contains("ls-files -i must be used with either -o or -c"),
+        "expected the -o/-c requirement message: {}",
+        String::from_utf8_lossy(&no_mode.stderr)
+    );
+    let no_exclude = run_libra_command(&["ls-files", "-i", "-o"], p);
+    assert_eq!(
+        no_exclude.status.code(),
+        Some(128),
+        "-i without exclude source exits 128"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_exclude.stderr)
+            .contains("ls-files --ignored needs some exclude pattern"),
+        "expected the exclude-source requirement message: {}",
+        String::from_utf8_lossy(&no_exclude.stderr)
+    );
+}

@@ -17,16 +17,18 @@ remain listed even when the working tree copy is modified or deleted.
 
 This public compatibility slice supports cached listing, modified/deleted
 filters, stage-style output, untracked listing, `.libraignore`-aware filtering
-via `--others --exclude-standard`, repository-local pathspec filtering,
-`--error-unmatch`, NUL-delimited text output via `-z`, status tags via
-`-t`, and unmerged-only listing via `-u` / `--unmerged`. `--full-name` is
-accepted as a no-op (Libra always prints repo-root-relative paths).
+via `--others --exclude-standard`, ignored-only listing via `-i`/`--ignored`
+(`-i -o` for ignored untracked files, `-i -c` for tracked files matching an
+exclude pattern), repository-local pathspec filtering, `--error-unmatch`,
+NUL-delimited text output via `-z`, status tags via `-t`, and unmerged-only
+listing via `-u` / `--unmerged`. `--full-name` is accepted as a no-op (Libra
+always prints repo-root-relative paths).
 
 Pathspecs are resolved from the caller's current working directory, not forced
 to the repository root. Exact-file and directory-prefix filtering are both
-supported; pathspecs that resolve outside the repository are rejected.
-Ignored-only / explicit exclude-source modes, resolve-undo, and sparse-checkout
-integration remain deferred.
+supported; pathspecs that resolve outside the repository are rejected. The
+explicit exclude-source flags (`-x` / `--exclude-from`), resolve-undo, and
+sparse-checkout integration remain deferred.
 
 ## Options
 
@@ -41,7 +43,9 @@ integration remain deferred.
 | `-t` | Prefix each path with a status tag: `H` (cached), `R` (removed/deleted), `C` (modified/changed), `?` (other/untracked), `M` (unmerged). |
 | `-u`, `--unmerged` | Show only unmerged (conflict) entries — index stages 1/2/3 — in stage-style output. |
 | `--full-name` | Accepted for Git compatibility. Libra always prints repo-root-relative paths (the `git --full-name` form), so this is a no-op. |
-| `--others` | Show untracked working-tree files. |
+| `--others`, `-o` | Show untracked working-tree files. |
+| `--cached`, `-c` | Show files staged in the index. |
+| `-i`, `--ignored` | Show only the ignored set: `-i -o` lists ignored untracked files (the inverse of `-o`), `-i -c` lists tracked files matching an exclude pattern. Must be combined with `-o`/`-c` and requires `--exclude-standard` (exit 128 otherwise), matching Git. |
 | `--exclude-standard` | With `--others`, honor `.libraignore` rules. |
 | `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
 | `-z` | Emit NUL-delimited text records instead of newline-delimited output. Text mode only; rejects `--json` / `--machine`. |
@@ -57,6 +61,7 @@ libra ls-files --modified
 libra ls-files --deleted
 libra ls-files --others
 libra ls-files --others --exclude-standard
+libra ls-files -i -o --exclude-standard   # only the ignored untracked files
 libra ls-files tracked-dir
 libra ls-files --others --exclude-standard others-dir
 libra ls-files --error-unmatch src/lib.rs
@@ -130,6 +135,7 @@ entries use `null` for fields that do not apply:
 | Abbreviate object name | `--abbrev[=<n>]` (fixed-length) | `--abbrev[=<n>]` (shortest unique) | N/A |
 | Untracked files | `--others` | `--others` | Use status/file commands |
 | Ignore-aware untracked | `--others --exclude-standard` | Same | Different model |
+| Ignored files only | `-i -o --exclude-standard` | Same (`-i -c` for tracked) | Different model |
 | Pathspec filters | `<pathspec>...` | Supported | Different model |
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
 | NUL output | `-z` (text mode only) | `-z` | Different model |

@@ -272,6 +272,14 @@ fn path_is_tracked_or_unknown_encoding(path: &Path, index: &Index) -> bool {
     }
 }
 
+/// Whether `path` matches an active ignore pattern, regardless of whether it is
+/// tracked. Unlike `IgnorePolicy::OnlyIgnored` (which treats every tracked entry as
+/// "ignored"), this reports the raw pattern match — used by `ls-files -i` so a
+/// tracked file that matches an exclude pattern (`-i -c`) is surfaced correctly.
+pub fn path_matches_ignore_pattern(path: &Path, workdir: &Path) -> bool {
+    is_path_ignored(path, &workdir.to_path_buf())
+}
+
 fn is_path_ignored(path: &Path, workdir: &PathBuf) -> bool {
     let absolute = if path.is_absolute() {
         path.to_path_buf()

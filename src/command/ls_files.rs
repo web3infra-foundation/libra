@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::utils::{
     error::{CliError, CliResult, StableErrorCode},
+    ignore::{self, IgnorePolicy},
     output::{OutputConfig, emit_json_data},
     path, util,
 };
@@ -27,6 +28,7 @@ EXAMPLES:
     libra ls-files --stage              Include stage information (for conflicts)
     libra ls-files --others             Show untracked files
     libra ls-files --exclude-standard   Exclude files matching .libraignore
+    libra ls-files -i -o --exclude-standard  List only the ignored untracked files
     libra ls-files tracked-dir          Limit output to a pathspec
     libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
     libra ls-files -z --others          Emit NUL-delimited records for scripts
@@ -39,7 +41,7 @@ EXAMPLES:
 #[command(after_help = LS_FILES_EXAMPLES)]
 pub struct LsFilesArgs {
     /// Show only staged (cached) files in the index
-    #[clap(long)]
+    #[clap(long, short = 'c')]
     pub cached: bool,
 
     /// Show only deleted files
@@ -55,8 +57,14 @@ pub struct LsFilesArgs {
     pub stage: bool,
 
     /// Show untracked files (not in index)
-    #[clap(long)]
+    #[clap(long, short = 'o')]
     pub others: bool,
+
+    /// Show only ignored files (the inverse of the usual listing). Must be combined
+    /// with `--others` (ignored untracked files) and/or `--cached` (tracked files
+    /// that match an exclude pattern), and requires `--exclude-standard`.
+    #[clap(long = "ignored", short = 'i')]
+    pub ignored: bool,
 
     /// Exclude files matching .libraignore patterns
     #[clap(long)]
@@ -139,16 +147,43 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
+    // `-i`/`--ignored` flips the listing to the ignored set. Like Git, it must be
+    // paired with `-o`/`-c` and needs an exclude source (`--exclude-standard`).
+    if _args.ignored {
+        if !_args.others && !_args.cached {
+            return Err(CliError::fatal(
+                "ls-files -i must be used with either -o or -c".to_string(),
+            )
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+        if !_args.exclude_standard {
+            return Err(CliError::fatal(
+                "ls-files --ignored needs some exclude pattern".to_string(),
+            )
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::CliInvalidArguments));
+        }
+    }
+
     let mut entries = Vec::new();
     let include_cached = _args.cached || (!_args.deleted && !_args.modified && !_args.others);
 
-    if include_cached
-        || _args.deleted
-        || _args.modified
-        || _args.stage
-        || _args.short
-        || _args.unmerged
-    {
+    // In `-i`/`--ignored` mode the cached (tracked-matching-exclude) listing is
+    // requested ONLY by an explicit `-c`/`--cached`; `-i -o` (even with display
+    // flags like `-s`/`-t`/`-u`) must stay others-only, matching Git.
+    let run_cached_block = if _args.ignored {
+        _args.cached
+    } else {
+        include_cached
+            || _args.deleted
+            || _args.modified
+            || _args.stage
+            || _args.short
+            || _args.unmerged
+    };
+
+    if run_cached_block {
         // `-u`/`--unmerged` restricts the listing to conflict stages 1/2/3.
         let stages: &[u8] = if _args.unmerged {
             &[1, 2, 3]
@@ -160,6 +195,11 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
         for stage in stages {
             for entry in index.tracked_entries(*stage) {
                 let worktree_path = workdir.join(&entry.name);
+                // `-i`: among cached entries, list only those matching an exclude
+                // pattern (a tracked file that would otherwise be ignored).
+                if _args.ignored && !ignore::path_matches_ignore_pattern(&worktree_path, &workdir) {
+                    continue;
+                }
                 let exists = worktree_path.exists();
                 let is_deleted = !exists;
                 let is_modified =
@@ -199,15 +239,22 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             .into_iter()
             .map(|entry| entry.name.clone())
             .collect();
-        let files = if _args.exclude_standard {
-            util::list_workdir_files()
-        } else {
+        let all_files = if _args.ignored || !_args.exclude_standard {
             util::list_workdir_files_unfiltered()
+        } else {
+            util::list_workdir_files()
         }
         .map_err(|source| {
             CliError::fatal(format!("failed to list working tree files: {source}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
+        // `-i -o`: keep only the IGNORED untracked files (`OnlyIgnored` also drops
+        // tracked entries, so the tracked-skip below becomes a no-op for them).
+        let files = if _args.ignored {
+            ignore::filter_workdir_paths(all_files, IgnorePolicy::OnlyIgnored, &index)
+        } else {
+            all_files
+        };
 
         for file in files {
             let display = file.to_string_lossy().replace('\\', "/");
