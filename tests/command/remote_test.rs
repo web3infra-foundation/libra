@@ -35,6 +35,10 @@ async fn test_remote_add_creates_entry() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -56,6 +60,10 @@ async fn test_remote_add_duplicate_name_returns_error() {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
             fetch: false,
+            track: vec![],
+            master: None,
+            tags: false,
+            no_tags: false,
         },
         &OutputConfig::default(),
     )
@@ -67,6 +75,10 @@ async fn test_remote_add_duplicate_name_returns_error() {
             name: "origin".into(),
             url: "https://example.com/another.git".into(),
             fetch: false,
+            track: vec![],
+            master: None,
+            tags: false,
+            no_tags: false,
         },
         &OutputConfig::default(),
     )
@@ -84,6 +96,159 @@ async fn test_remote_add_duplicate_name_returns_error() {
 
 #[tokio::test]
 #[serial]
+async fn test_remote_add_cold_config_flags() {
+    use libra::internal::{db::get_db_conn_instance, model::reference};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let p = repo_dir.path();
+
+    // -t (repeatable), --tags, and -m together.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "-t",
+                "main",
+                "-t",
+                "dev",
+                "--tags",
+                "-m",
+                "main",
+                "origin",
+                "https://example.com/r.git",
+            ],
+            p,
+        ),
+        "remote add with cold-config flags",
+    );
+
+    // -t writes one specific fetch refspec per branch (instead of a wildcard).
+    let fetch = ConfigKv::get_all("remote.origin.fetch")
+        .await
+        .expect("read fetch")
+        .into_iter()
+        .map(|e| e.value)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fetch,
+        vec![
+            "+refs/heads/main:refs/remotes/origin/main".to_string(),
+            "+refs/heads/dev:refs/remotes/origin/dev".to_string(),
+        ],
+        "-t writes a specific refspec per branch: {fetch:?}"
+    );
+
+    // --tags records the tag-fetch preference under the exact key `libra fetch`
+    // reads (`remote.<name>.tagOpt`, camelCase — config keys are case-sensitive).
+    let tagopt = ConfigKv::get("remote.origin.tagOpt")
+        .await
+        .expect("read tagOpt")
+        .map(|e| e.value);
+    assert_eq!(tagopt.as_deref(), Some("--tags"));
+
+    // -m writes the remote HEAD (a Head row keyed by the remote name), even
+    // though the tracking ref does not exist yet.
+    let db = get_db_conn_instance().await;
+    let head_row = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+        .filter(reference::Column::Remote.eq("origin".to_string()))
+        .one(&db)
+        .await
+        .expect("query remote HEAD");
+    assert!(head_row.is_some(), "-m writes refs/remotes/origin/HEAD");
+
+    // --no-tags records the opposite preference; with no -t, no fetch refspec
+    // is written (the default wildcard remains implicit, as for a plain add).
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "--no-tags",
+                "up",
+                "https://example.com/u.git",
+            ],
+            p,
+        ),
+        "remote add --no-tags",
+    );
+    let up_tagopt = ConfigKv::get("remote.up.tagOpt")
+        .await
+        .expect("read up tagOpt")
+        .map(|e| e.value);
+    assert_eq!(up_tagopt.as_deref(), Some("--no-tags"));
+    assert!(
+        ConfigKv::get_all("remote.up.fetch")
+            .await
+            .expect("read up fetch")
+            .is_empty(),
+        "plain add (no -t) writes no fetch refspec"
+    );
+
+    // --tags and --no-tags are mutually exclusive (clap usage error, exit 129).
+    let conflict = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "--tags",
+            "--no-tags",
+            "x",
+            "https://e.com/x.git",
+        ],
+        p,
+    );
+    assert_eq!(conflict.status.code(), Some(129));
+
+    // An invalid -t branch name is rejected (usage error, exit 129) and the
+    // remote is NOT persisted (validation runs before any config write).
+    let bad_track = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "-t",
+            "bad name",
+            "bt",
+            "https://e.com/bt.git",
+        ],
+        p,
+    );
+    assert_eq!(bad_track.status.code(), Some(129));
+    assert!(
+        ConfigKv::get("remote.bt.url")
+            .await
+            .expect("read bt url")
+            .is_none(),
+        "remote with an invalid -t branch must not be persisted"
+    );
+
+    // Likewise an invalid -m branch name.
+    let bad_master = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "-m",
+            "refs/heads/x",
+            "bm",
+            "https://e.com/bm.git",
+        ],
+        p,
+    );
+    assert_eq!(bad_master.status.code(), Some(129));
+    assert!(
+        ConfigKv::get("remote.bm.url")
+            .await
+            .expect("read bm url")
+            .is_none(),
+        "remote with an invalid -m branch must not be persisted"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_remote_remove_deletes_entry() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -93,6 +258,10 @@ async fn test_remote_remove_deletes_entry() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -117,6 +286,10 @@ async fn test_remote_remove_deletes_vault_ssh_keys() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -162,6 +335,10 @@ async fn test_remote_rename_updates_branch_tracking() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -220,6 +397,10 @@ async fn test_remote_rename_cascades_vault_ssh_keys() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -282,6 +463,10 @@ async fn test_remote_rename_refuses_existing_target_vault_ssh_namespace() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -424,12 +609,20 @@ async fn test_remote_rename_conflict_returns_error() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     remote::execute(RemoteCmds::Add {
         name: "upstream".into(),
         url: "https://example.com/upstream.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -450,6 +643,10 @@ async fn test_remote_set_url_add_appends_fetch_url() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -486,6 +683,10 @@ async fn test_remote_set_url_delete_removes_matching_url() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -530,6 +731,10 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 
@@ -578,6 +783,10 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
         name: "origin".into(),
         url: "https://one.example/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -1280,6 +1489,10 @@ async fn test_remote_set_url_delete_no_match_returns_error() {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
             fetch: false,
+            track: vec![],
+            master: None,
+            tags: false,
+            no_tags: false,
         },
         &OutputConfig::default(),
     )
@@ -1403,6 +1616,10 @@ async fn test_remote_remove_works_after_deleting_last_url() {
             name: "origin".into(),
             url: "https://example.com/repo.git".into(),
             fetch: false,
+            track: vec![],
+            master: None,
+            tags: false,
+            no_tags: false,
         },
         &OutputConfig::default(),
     )
@@ -1710,6 +1927,10 @@ async fn add_origin() {
         name: "origin".into(),
         url: "https://example.com/repo.git".into(),
         fetch: false,
+        track: vec![],
+        master: None,
+        tags: false,
+        no_tags: false,
     })
     .await;
 }

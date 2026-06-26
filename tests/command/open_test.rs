@@ -31,6 +31,10 @@ async fn test_open_remote_origin() {
             name: "origin".into(),
             url: "git@github.com:web3infra-foundation/libra.git".into(),
             fetch: false,
+            track: vec![],
+            master: None,
+            tags: false,
+            no_tags: false,
         },
         &output,
     )

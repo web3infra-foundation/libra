@@ -79,6 +79,8 @@ EXAMPLES:
                                                    Register a new remote
     libra remote add -f origin git@example.com:org/repo.git
                                                    Register a remote and fetch from it
+    libra remote add -t main --tags origin git@example.com:org/repo.git
+                                                   Track only main and fetch all tags
     libra remote rename origin upstream            Rename an existing remote
     libra remote remove upstream                   Drop a remote and its tracking refs
     libra remote get-url --all origin              Print every URL configured for origin
@@ -105,6 +107,20 @@ pub enum RemoteCmds {
         /// Immediately fetch from the new remote after adding it.
         #[clap(short = 'f', long = "fetch")]
         fetch: bool,
+        /// Track only the given branch(es): write a specific
+        /// `remote.<name>.fetch` refspec per branch instead of the default
+        /// wildcard. Repeatable.
+        #[clap(short = 't', long = "track", value_name = "BRANCH")]
+        track: Vec<String>,
+        /// Point the remote's HEAD at <BRANCH> (`refs/remotes/<name>/HEAD`).
+        #[clap(short = 'm', long = "master", value_name = "BRANCH")]
+        master: Option<String>,
+        /// Configure `remote.<name>.tagOpt = --tags` (fetch all tags).
+        #[clap(long = "tags", conflicts_with = "no_tags")]
+        tags: bool,
+        /// Configure `remote.<name>.tagOpt = --no-tags` (fetch no tags).
+        #[clap(long = "no-tags")]
+        no_tags: bool,
     },
     /// Remove a remote
     Remove {
@@ -488,6 +504,17 @@ fn validate_remote_usage(command: &RemoteCmds) -> CliResult<()> {
         } => {
             validate_tracking_branch_name(branch)?;
         }
+        // `remote add -t <branch>` / `-m <branch>` interpolate the branch name
+        // into a fetch refspec / the remote-HEAD ref, so they are validated with
+        // the same rules as set-branches/set-head before anything is persisted.
+        RemoteCmds::Add { track, master, .. } => {
+            for branch in track {
+                validate_tracking_branch_name(branch)?;
+            }
+            if let Some(branch) = master {
+                validate_tracking_branch_name(branch)?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -518,7 +545,29 @@ async fn run_remote(
     output: &OutputConfig,
 ) -> Result<RemoteOutput, RemoteError> {
     match command {
-        RemoteCmds::Add { name, url, fetch } => run_add_remote(name, url, fetch, output).await,
+        RemoteCmds::Add {
+            name,
+            url,
+            fetch,
+            track,
+            master,
+            tags,
+            no_tags,
+        } => {
+            run_add_remote(
+                AddRemoteArgs {
+                    name,
+                    url,
+                    fetch,
+                    track,
+                    master,
+                    tags,
+                    no_tags,
+                },
+                output,
+            )
+            .await
+        }
         RemoteCmds::Remove { name } => run_remove_remote(name).await,
         RemoteCmds::Rename { old, new } => run_rename_remote(old, new).await,
         RemoteCmds::List => run_list_remotes(true).await,
@@ -555,21 +604,82 @@ async fn run_remote(
     }
 }
 
-async fn run_add_remote(
+/// Arguments for `remote add`, including its cold-configuration flags.
+struct AddRemoteArgs {
     name: String,
     url: String,
     fetch: bool,
+    track: Vec<String>,
+    master: Option<String>,
+    tags: bool,
+    no_tags: bool,
+}
+
+async fn run_add_remote(
+    args: AddRemoteArgs,
     output: &OutputConfig,
 ) -> Result<RemoteOutput, RemoteError> {
+    let AddRemoteArgs {
+        name,
+        url,
+        fetch,
+        track,
+        master,
+        tags,
+        no_tags,
+    } = args;
+
     if remote_exists(&name).await? {
         return Err(RemoteError::AlreadyExists { name });
     }
 
+    let write_err = |error: anyhow::Error| RemoteError::ConfigWrite {
+        detail: error.to_string(),
+    };
+
     ConfigKv::set(&format!("remote.{name}.url"), &url, false)
         .await
-        .map_err(|error| RemoteError::ConfigWrite {
-            detail: error.to_string(),
+        .map_err(write_err)?;
+
+    // `-t <branch>`: track only the named branch(es) by writing a specific fetch
+    // refspec per branch instead of the default wildcard (same format as
+    // `remote set-branches`).
+    for branch in &track {
+        let spec = format!("+refs/heads/{branch}:refs/remotes/{name}/{branch}");
+        ConfigKv::add(&format!("remote.{name}.fetch"), &spec, false)
+            .await
+            .map_err(write_err)?;
+    }
+
+    // `--tags`/`--no-tags`: record the tag-fetch preference as `remote.<name>.tagOpt`
+    // — the exact key `libra fetch`/`clone` read (config keys are case-sensitive).
+    if tags || no_tags {
+        let tagopt = if tags { "--tags" } else { "--no-tags" };
+        ConfigKv::set(&format!("remote.{name}.tagOpt"), tagopt, false)
+            .await
+            .map_err(write_err)?;
+    }
+
+    // `-m <branch>`: point the remote's HEAD at the given branch. Unlike
+    // `remote set-head`, this is written unconditionally at add time (the
+    // tracking ref does not exist yet, matching Git's `remote add -m`).
+    if let Some(branch) = &master {
+        let db = get_db_conn_instance().await;
+        let txn_name = name.clone();
+        let txn_branch = branch.clone();
+        db.transaction::<_, (), DbErr>(move |txn| {
+            Box::pin(async move {
+                Head::update_result_with_conn(txn, Head::Branch(txn_branch), Some(&txn_name))
+                    .await
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| RemoteError::ConfigWrite {
+            detail: e.to_string(),
         })?;
+    }
 
     // `-f`/`--fetch`: pull from the new remote right after registering it. The
     // remote stays registered even if the fetch fails.

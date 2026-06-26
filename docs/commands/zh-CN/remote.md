@@ -8,7 +8,7 @@
 libra remote <subcommand> [OPTIONS] [ARGS]
 libra remote show
 libra remote -v
-libra remote add [-f | --fetch] <name> <url>
+libra remote add [-f | --fetch] [-t | --track <branch>]... [-m | --master <branch>] [--tags | --no-tags] <name> <url>
 libra remote remove <name>
 libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
@@ -49,6 +49,10 @@ libra remote update [-p | --prune] [<group> | <remote>...]
 |----------|-------------|---------|
 | `<name>` | 远程的逻辑名称 | `origin` |
 | `<url>` | 远程的 fetch URL | `https://example.com/repo.git` |
+| `-f`, `--fetch` | 添加后立即从新远程 fetch | |
+| `-t`, `--track <branch>` | 只跟踪指定分支——写入特定的 `remote.<name>.fetch` refspec 取代默认通配。可重复。 | `-t main -t dev` |
+| `-m`, `--master <branch>` | 将远程 HEAD（`refs/remotes/<name>/HEAD`）指向 `<branch>`（即使跟踪 ref 尚不存在也会写入，与 Git 一致） | `-m main` |
+| `--tags` / `--no-tags` | 设置 `remote.<name>.tagOpt` 为 fetch 全部/不 fetch 标签（互斥） | |
 
 ### 子命令：`remove`
 
