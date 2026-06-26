@@ -1795,3 +1795,49 @@ async fn test_for_each_ref_deref_size_errors_on_broken_tag_chain() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn test_for_each_ref_sort_by_deref_objecttype_and_objectsize() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Only the annotated tag has a dereferenced object; the branch and the
+    // lightweight tag have an empty *objecttype/*objectsize.
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated", "atag"], p),
+        "annotated tag",
+    );
+    assert_cli_success(&run_libra_command(&["tag", "lw"], p), "lightweight tag");
+
+    let order = |key: &str| -> Vec<String> {
+        let out = run_libra_command(
+            &[
+                "for-each-ref",
+                &format!("--sort={key}"),
+                "--format=%(refname:short)",
+            ],
+            p,
+        );
+        assert_cli_success(&out, "deref sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // Refs with an empty dereference sort first (ascending), so the annotated
+    // tag (the only non-empty one) comes last; the `-` prefix reverses.
+    for key in ["*objecttype", "*objectsize"] {
+        assert_eq!(
+            order(key).last().map(String::as_str),
+            Some("atag"),
+            "ascending {key}: annotated tag sorts last"
+        );
+        assert_eq!(
+            order(&format!("-{key}")).first().map(String::as_str),
+            Some("atag"),
+            "descending {key}: annotated tag sorts first"
+        );
+    }
+}

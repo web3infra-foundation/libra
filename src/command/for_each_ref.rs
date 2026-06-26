@@ -38,6 +38,7 @@ EXAMPLES:
     libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
     libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
     libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
+    libra for-each-ref --tags --sort=*objectsize  Sort tags by their dereferenced target's size
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -69,9 +70,10 @@ pub struct ForEachRefArgs {
     pub format: Option<String>,
 
     /// Sort output by key: `refname`, `objectname`, `version:refname`
-    /// (alias `v:refname`), `objectsize`, `*objectname` (an annotated tag's
-    /// dereferenced object), or the date keys `committerdate` / `authordate` /
-    /// `creatordate`; prefix with `-` to reverse.
+    /// (alias `v:refname`), `objectsize`, the dereference keys `*objectname` /
+    /// `*objecttype` / `*objectsize` (an annotated tag's target), or the date
+    /// keys `committerdate` / `authordate` / `creatordate`; prefix with `-` to
+    /// reverse.
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -353,6 +355,10 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         sort_entries_by_objectsize(&mut entries, reverse)?;
     } else if let Some(reverse) = sort.and_then(parse_deref_objectname_sort_key) {
         sort_entries_by_deref_objectname(&mut entries, reverse)?;
+    } else if let Some(reverse) = sort.and_then(parse_deref_objecttype_sort_key) {
+        sort_entries_by_deref_objecttype(&mut entries, reverse)?;
+    } else if let Some(reverse) = sort.and_then(parse_deref_objectsize_sort_key) {
+        sort_entries_by_deref_objectsize(&mut entries, reverse)?;
     } else {
         sort_entries(&mut entries, sort)?;
     }
@@ -664,6 +670,65 @@ fn parse_deref_objectname_sort_key(sort: &str) -> Option<bool> {
         _ if sort == "*objectname" => Some(false),
         _ => None,
     }
+}
+
+/// Recognise the `*objecttype` (dereferenced object type) sort key.
+fn parse_deref_objecttype_sort_key(sort: &str) -> Option<bool> {
+    match sort.strip_prefix('-') {
+        Some("*objecttype") => Some(true),
+        _ if sort == "*objecttype" => Some(false),
+        _ => None,
+    }
+}
+
+/// Recognise the `*objectsize` (dereferenced object size) sort key.
+fn parse_deref_objectsize_sort_key(sort: &str) -> Option<bool> {
+    match sort.strip_prefix('-') {
+        Some("*objectsize") => Some(true),
+        _ if sort == "*objectsize" => Some(false),
+        _ => None,
+    }
+}
+
+/// Sort entries by `*objecttype` (the type of the object an annotated tag
+/// dereferences to, empty for non-tag refs); ties break by refname ascending.
+/// Empty values sort together (lexicographically first), matching Git.
+fn sort_entries_by_deref_objecttype(entries: &mut [RefEntry], reverse: bool) -> CliResult<()> {
+    let mut types: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        types.push(ref_deref_objecttype(entry)?);
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let primary = types[a].cmp(&types[b]);
+        let primary = if reverse { primary.reverse() } else { primary };
+        primary.then_with(|| entries[a].refname.cmp(&entries[b].refname))
+    });
+    let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
+    entries.clone_from_slice(&reordered);
+    Ok(())
+}
+
+/// Sort entries by `*objectsize` (the byte size of the object an annotated tag
+/// dereferences to); non-tag refs have no dereferenced size and sort first
+/// ascending (matching Git's empty-first ordering), so they map to [`i64::MIN`].
+/// Ties break by refname ascending.
+fn sort_entries_by_deref_objectsize(entries: &mut [RefEntry], reverse: bool) -> CliResult<()> {
+    let mut sizes: Vec<i64> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        // `None` (a non-tag ref with no dereferenced object) sorts as the
+        // smallest value so it groups ahead of real sizes ascending.
+        sizes.push(ref_deref_objectsize(entry)?.unwrap_or(i64::MIN));
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let primary = sizes[a].cmp(&sizes[b]);
+        let primary = if reverse { primary.reverse() } else { primary };
+        primary.then_with(|| entries[a].refname.cmp(&entries[b].refname))
+    });
+    let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
+    entries.clone_from_slice(&reordered);
+    Ok(())
 }
 
 /// Sort entries by `*objectname` (the object an annotated tag dereferences to,
