@@ -49,6 +49,9 @@ Examples:
   # All output to stdout (suitable for piping to `git am`)
   libra format-patch --stdout origin/main..
 
+  # Add recipient headers (To: and Cc:, repeatable)
+  libra format-patch --to reviewer@example.com --cc list@example.com origin/main..
+
   # Custom filename suffix (0001-subject.txt instead of .patch)
   libra format-patch --suffix=.txt HEAD~2..HEAD
 
@@ -112,6 +115,24 @@ pub struct FormatPatchArgs {
     /// Make the first mail appear as a reply to the given Message-ID.
     #[arg(long = "in-reply-to", value_name = "MESSAGE_ID")]
     pub in_reply_to: Option<String>,
+
+    /// Add a `To:` header with the given address (repeatable).
+    #[arg(long = "to", value_name = "ADDRESS")]
+    pub to: Vec<String>,
+
+    /// Add a `Cc:` header with the given address (repeatable).
+    #[arg(long = "cc", value_name = "ADDRESS")]
+    pub cc: Vec<String>,
+
+    /// Suppress all `To:` headers. Libra has no `format.to` config, so this
+    /// simply omits the `To:` header (there is no config list to reset).
+    #[arg(long = "no-to")]
+    pub no_to: bool,
+
+    /// Suppress all `Cc:` headers. Libra has no `format.cc` config, so this
+    /// simply omits the `Cc:` header (there is no config list to reset).
+    #[arg(long = "no-cc")]
+    pub no_cc: bool,
 
     /// Mark the patch series as version N (changes "[PATCH]" to "[PATCH vN]").
     #[arg(short = 'v', long = "reroll-count", value_name = "N")]
@@ -531,6 +552,10 @@ async fn format_patch_body(
     out.push_str("Content-Type: text/plain; charset=UTF-8\n");
     out.push_str("Content-Transfer-Encoding: 8bit\n");
 
+    // ---- To: / Cc: (after the MIME block, matching Git's header order) ----
+    let (to, cc) = resolve_recipients(args);
+    push_recipient_headers(&mut out, &to, &cc);
+
     // ---- Blank line: headers -> body ----
     out.push('\n');
 
@@ -667,6 +692,8 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
     out.push_str("MIME-Version: 1.0\n");
     out.push_str("Content-Type: text/plain; charset=UTF-8\n");
     out.push_str("Content-Transfer-Encoding: 8bit\n");
+    let (to, cc) = resolve_recipients(args);
+    push_recipient_headers(&mut out, &to, &cc);
     out.push('\n');
 
     out.push_str("*** SUBJECT HERE ***\n\n");
@@ -921,6 +948,46 @@ fn write_patch_file(
 /// Convert a commit's committer timestamp to a `DateTime<Utc>`.
 fn timestamp_from_commit(commit: &Commit) -> DateTime<Utc> {
     DateTime::from_timestamp(commit.committer.timestamp as i64, 0).unwrap_or(DateTime::UNIX_EPOCH)
+}
+
+/// The recipient lists to emit, after applying `--no-to`/`--no-cc` (which, with
+/// no `format.to`/`format.cc` config to reset, simply suppress the header).
+fn resolve_recipients(args: &FormatPatchArgs) -> (Vec<String>, Vec<String>) {
+    let to = if args.no_to {
+        Vec::new()
+    } else {
+        args.to.clone()
+    };
+    let cc = if args.no_cc {
+        Vec::new()
+    } else {
+        args.cc.clone()
+    };
+    (to, cc)
+}
+
+/// Fold one or more addresses into a single header value, matching `git
+/// format-patch`: addresses are joined with `,` and a 4-space-indented
+/// continuation line. Each value is sanitized (control characters stripped, to
+/// prevent header injection) but NOT RFC2047-encoded — Git passes recipient
+/// addresses through verbatim even under `--encode-email-headers`.
+fn fold_addresses(addresses: &[String]) -> String {
+    addresses
+        .iter()
+        .map(|addr| sanitize_header_value(addr.trim()))
+        .collect::<Vec<_>>()
+        .join(",\n    ")
+}
+
+/// Append `To:`/`Cc:` headers (when non-empty). Git emits them after the MIME
+/// header block, so callers add them last among the headers.
+fn push_recipient_headers(out: &mut String, to: &[String], cc: &[String]) {
+    if !to.is_empty() {
+        out.push_str(&format!("To: {}\n", fold_addresses(to)));
+    }
+    if !cc.is_empty() {
+        out.push_str(&format!("Cc: {}\n", fold_addresses(cc)));
+    }
 }
 
 /// Normalize untrusted text before interpolating it into single-line mail

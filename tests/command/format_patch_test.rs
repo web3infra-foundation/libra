@@ -965,3 +965,105 @@ fn encode_email_headers_splits_long_words_under_75_chars() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Recipient headers (--to / --cc / --no-to / --no-cc)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn recipient_headers_to_and_cc() {
+    let repo = repo_with_commits(1);
+
+    // --to adds a To: header; repeated --cc folds with a 4-space continuation.
+    let output = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--to",
+            "rev@example.com",
+            "--cc",
+            "cc1@example.com",
+            "--cc",
+            "cc2@example.com",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "format-patch --to/--cc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("To: rev@example.com\n"),
+        "To: header present: {stdout}"
+    );
+    // Cc folds onto a continuation line, matching git.
+    assert!(
+        stdout.contains("Cc: cc1@example.com,\n    cc2@example.com\n"),
+        "Cc: folds multiple addresses: {stdout}"
+    );
+    // The recipient headers sit after the MIME header block, matching git.
+    let mime_pos = stdout
+        .find("Content-Transfer-Encoding:")
+        .expect("mime block");
+    let to_pos = stdout.find("To: rev@example.com").expect("to");
+    assert!(mime_pos < to_pos, "To: follows the MIME headers: {stdout}");
+
+    // Recipients are passed through verbatim even with --encode-email-headers
+    // (git does not RFC2047-encode addresses).
+    let nonascii = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--encode-email-headers",
+            "--to",
+            "Jöhn <john@example.com>",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&nonascii, "format-patch --encode-email-headers --to");
+    assert!(
+        String::from_utf8_lossy(&nonascii.stdout).contains("To: Jöhn <john@example.com>\n"),
+        "recipient is not RFC2047-encoded"
+    );
+
+    // --no-to / --no-cc suppress the headers even when addresses are given.
+    let suppressed = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--to",
+            "rev@example.com",
+            "--no-to",
+            "--cc",
+            "cc@example.com",
+            "--no-cc",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&suppressed, "format-patch --no-to/--no-cc");
+    let suppressed_out = String::from_utf8_lossy(&suppressed.stdout);
+    assert!(
+        !suppressed_out.contains("\nTo: ") && !suppressed_out.contains("\nCc: "),
+        "--no-to/--no-cc suppress the headers: {suppressed_out}"
+    );
+
+    // The cover letter also carries the recipient headers.
+    let cover = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--cover-letter",
+            "--to",
+            "rev@example.com",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&cover, "format-patch --cover-letter --to");
+    assert!(
+        String::from_utf8_lossy(&cover.stdout).contains("To: rev@example.com\n"),
+        "cover letter carries To:"
+    );
+}

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`；`--signature-file <file>`；`--encode-email-headers`/`--no-encode-email-headers`），merge 提交默认跳过。未实现的 Git 选项包括 `--attach`、`--inline`、`--from`、`--to`、`--cc`、`--base`、`--interdiff`、`--range-diff`、`--notes` 和 `--force`。
+- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`；`--signature-file <file>`；`--encode-email-headers`/`--no-encode-email-headers`），merge 提交默认跳过。收件人头 `--to`/`--cc`（可重复，按 git 折叠续行，置于 MIME 头之后，cover letter 同样输出）与 `--no-to`/`--no-cc`（抑制——Libra 无 `format.to`/`format.cc` 配置可重置）已实现。未实现的 Git 选项包括 `--attach`、`--inline`、`--from`、`--base`、`--interdiff`、`--range-diff`、`--notes`（`--force` 非 Git format-patch 标志）。
 
 ## 设计方案
 
@@ -60,12 +60,13 @@ flowchart TD
 | ✅ 已实现 | `--suffix <sfx>`（文件名后缀，默认 `.patch`） | 已公开：通过 `patch_filename` 的 `suffix` 参数与 cover-letter 列表统一使用；默认 `.patch` 保持原行为。带集成测试（`suffix_changes_patch_filename_extension`）。 |
 | ✅ 已实现 | `--signature <sig>` / `--no-signature`（自定义/省略签名） | 已公开：`push_signature` 统一两处页脚（补丁正文 + cover letter）——`--no-signature` 完全省略 `-- ` 页脚；`--signature <s>` 设置文本；默认仍为 libra 版本号。带集成测试（`signature_controls_patch_footer`）。 |
 | ✅ 已实现 | `--signature-file <file>`（从文件读取签名） | 已公开：`execute_safe` 早期读文件内容（trim 尾换行）填入 `signature` 槽，与 `--signature` 互斥，`--no-signature` 仍优先；读失败报 `LBR-IO-001`。带集成测试（`signature_file_sets_the_footer`）。 |
-| Git flag | `--from` / `--to` / `--cc` / `--no-to` / `--no-cc`（邮件收件人/抄送头） | 未公开；当前不生成这些头。命令层。 |
+| ✅ 已实现 | `--to` / `--cc` / `--no-to` / `--no-cc`（邮件收件人/抄送头） | 已公开：`--to`/`--cc` 可重复，`resolve_recipients` 应用 `--no-to`/`--no-cc`（Libra 无 `format.to`/`format.cc` 配置，故直接抑制对应头），`fold_addresses` 按 git 以 `,`+4 空格续行折叠多地址，`push_recipient_headers` 在 MIME 头之后注入 `To:`/`Cc:`（每个补丁与 cover letter 都注入，与 git 头序一致）。值仅经 `sanitize_header_value`（剥离控制符防头注入），**不做 RFC2047 编码**——git 即便在 `--encode-email-headers` 下也原样输出收件人地址，已字节级差分验证。带集成测试（`recipient_headers_to_and_cc`，含头序、折叠、抑制、cover letter 与非 ASCII 原样用例）。 |
+| Git flag | `--from [<ident>]`（覆盖 `From:` 头，作者移入 in-body `From:`） | 未公开；需 From-改写 + in-body From 逻辑。命令层。 |
 | Git flag | `--base <tree-ish>`（记录基础提交，供 `git am --base` 使用） | 未公开；需生 `base-commit` 头。命令层。 |
 | Git flag | `--interdiff <prev>` / `--range-diff <prev>`（补丁间差异/范围差异） | 未公开；依赖 interdiff/range-diff 引擎。命令层。 |
 | Git flag | `--notes[=<ref>]` / `--no-notes`（在补丁中附加 notes） | 未公开；需集成 notes 子系统。命令层。 |
 | ✅ 已实现 | `--encode-email-headers` / `--no-encode-email-headers`（QP 编码非 ASCII 邮件头） | 已公开：`encode_email_header` 对含非 ASCII 的 `From` 名称与 `Subject` 做 RFC 2047 Q 编码（拆分为 ≤75 字符的多个 encoded-word，不跨多字节字符），纯 ASCII 或未开启时原样。默认关闭（Libra 无 `format.encodeEmailHeaders` 配置；git 由该配置决定，未设置时亦关闭）。带集成测试（`encode_email_headers_q_encodes_nonascii_subject`）。 |
-| Git flag | `--force`（强制覆盖已有文件） | 未公开；当前遇到同名文件直接覆盖。命令层。 |
+| 非 Git flag | `--force`（强制覆盖已有文件） | `--force` 并非 Git format-patch 标志（git 默认即静默覆盖），故不实现；保留此行仅作澄清。 |
 | ✅ 已实现 | `--zero-commit`（每个补丁的 `From <hash>` 信封行输出全零 hash） | 已公开：`format_patch_body` 按 `commit.id` 的十六进制长度生成全零串，仅替换信封行（其余补丁内容不变），与 `git format-patch` 一致。带集成测试（`zero_commit_zeroes_the_envelope_hash`）。 |
 | ✅ 已实现 | `--numbered-files`（纯序号文件名，不含 slug/后缀） | 已公开：`patch_filename` 在该模式下直接返回 `patch_num.to_string()`（cover letter 为 `0`），忽略 `--suffix`，与 `git format-patch` 一致。带集成测试（`numbered_files_uses_bare_sequence_numbers`）。 |
 | 行为差异 | 合并提交默认跳过，无可选 `--diff-merges` 参数 | 当前实现直接在范围解析时过滤掉所有多父提交。 |
