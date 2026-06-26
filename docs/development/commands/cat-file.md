@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ `--batch-all-objects`（配合 --batch/--batch-check，遍历 loose+packed，按 id 排序）/ batch 格式串（`=<format>`）已支持；`-e --json`/`--machine` 输出 `{ exists: bool }` 信封（保留退出码：存在 0 / 缺失 1 / 非法名 129）已支持（`flush`/`--buffer`、`--follow-symlinks` 未公开）。
+- 兼容级别：`partial`。`-t` / `-s` / `-p` / `-e` / `--batch-check` / `--batch`（带内容输出）/ `--batch-command`（info/contents）/ `--batch-all-objects`（配合 --batch/--batch-check，遍历 loose+packed，按 id 排序）/ batch 格式串（`=<format>`）/ `--buffer`（缓冲 batch 输出，使 `--batch-command` 的 `flush` 命令生效；需配合 batch 模式）已支持；`-e --json`/`--machine` 输出 `{ exists: bool }` 信封（保留退出码：存在 0 / 缺失 1 / 非法名 129）已支持（`--follow-symlinks` 未公开）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -38,7 +38,7 @@ flowchart TD
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-06-04 `e832538e`（`feat(cat-file): implement basic batch-check engine and stdin stream parser (v0.17.1299)`）：当前 `CatFileArgs` 已公开 `--batch-check`（含可选 `=<format>` 原子展开）与 `--batch` stdin 模式；当前事实以源码为准。
 - 2026-06-04 `2946746e`（`feat(cat-file): support batch-all-objects scanning and follow-symlinks resolution (v0.17.1301)`）：当前 `CatFileArgs` 已公开 `--batch-all-objects`（配合 --batch/--batch-check 遍历 loose+packed，`collect_all_object_ids` 走 objects/AB/CDEF + 解析 objects/pack/*.idx，去重并按 id 排序）；`--follow-symlinks` 仍未公开；当前事实以源码为准。
-- 2026-06-04 `dac8f161`（`feat(cat-file): support full batch content output and buffering control (v0.17.1300)`）：当前 `CatFileArgs` 已公开 `--batch` 完整内容输出与 `--batch-command`（info/contents）；但 `--buffer` 缓冲控制仍未公开（故 `flush` 命令报错）；当前事实以源码为准。
+- 2026-06-04 `dac8f161`（`feat(cat-file): support full batch content output and buffering control (v0.17.1300)`）：当前 `CatFileArgs` 已公开 `--batch` 完整内容输出与 `--batch-command`（info/contents）；该提交未公开 `--buffer`（故当时 `flush` 报错）；`--buffer` 于后续提交公开（使 `flush` 生效），当前事实以源码为准。
 - 2026-05-24 `8a1c5784`（`fix(cat-file): tighten error code mapping for remaining legacy paths`）：实现修正：tighten error code mapping for remaining legacy paths；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-06-07 `a3d7a262`（`test(cat-file): isolate batch helper processes`）：测试契约：isolate batch helper processes；相关行为已有回归守卫，后续变更需要继续满足。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cat-file.md`。
 - Synopsis：`libra cat-file [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--batch`、`--batch-command`、`--batch-all-objects`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。`--batch-check` 与 `--batch` 共享 `build_batch_object`：前者仅 header，后者 header + raw 内容 + 换行；每个对象单次缓冲写出以统一处理 BrokenPipe。`--batch-command` 从 stdin 逐行解析命令 `info <object>`（同 --batch-check）/ `contents <object>`（同 --batch），复用 `build_batch_object`；`flush` 因 Libra 不公开 `--buffer` 而报 `LBR-CLI-002`，未知命令同样报错。`--batch-all-objects`（配合 `--batch`/`--batch-check`）以 `collect_all_object_ids`（loose objects/AB/CDEF + 解析 objects/pack/*.idx，去重并按 id 排序）替代 stdin 列表；缺 mode 时报 `LBR-CLI-002`。
+- 公开参数/子命令包括：`-t`、`-s`、`-p`、`-e`、`--batch-check`、`--batch`、`--batch-command`、`--batch-all-objects`、`--ai <ID>`、`--ai-type <ID>`、`--ai-list <TYPE>`、`--ai-list-types`、`[OBJECT]`。`--batch-check` 与 `--batch` 共享 `build_batch_object`：前者仅 header，后者 header + raw 内容 + 换行；每个对象单次缓冲写出以统一处理 BrokenPipe。`--batch-command` 从 stdin 逐行解析命令 `info <object>`（同 --batch-check）/ `contents <object>`（同 --batch），复用 `build_batch_object`；`flush` 在无 `--buffer` 时报 `LBR-CLI-002`，加 `--buffer` 则有效（缓冲输出，遇 `flush` 写出并清空 pending，EOF 时写出剩余）；未知命令报错。`--buffer` 不配合任何 batch 模式时报 `LBR-CLI-002`。`--batch-all-objects`（配合 `--batch`/`--batch-check`）以 `collect_all_object_ids`（loose objects/AB/CDEF + 解析 objects/pack/*.idx，去重并按 id 排序）替代 stdin 列表；缺 mode 时报 `LBR-CLI-002`。
 
 
 ## 还未实现的功能
@@ -59,9 +59,9 @@ flowchart TD
 | ✅ 已实现 | `cat-file -e --json`/`--machine` 输出 `{ exists: bool }` 信封（`mode: "exists"`），同时保留 `-e` 的退出码语义：对象存在 exit 0、格式正确但缺失 exit 1（JSON 仍写到 stdout）、非法对象名 exit 129（`LBR-CLI-003`，`resolve_object_safe`，与非 JSON `-e` 路径一致，是 Libra 标准 invalid-target 码，与 Git 的 128 有意不同）。带集成测试 `test_cat_file_exist_check_json`。 | — |
 | ✅ 已实现（部分） | Batch mode `--batch-check` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>`，无法解析时输出 `<input> missing`；支持可选 `=<format>` 原子展开（`%(objectname)`/`%(objecttype)`/`%(objectsize)`）。带 stdin 集成测试。 |
 | ✅ 已实现（部分） | Batch mode `--batch` | 从 stdin 逐行读对象名，输出 `<sha> <type> <size>` + raw 对象内容 + 换行（二进制安全，单次缓冲写出），无法解析时输出 `<input> missing`；与 `--batch-check` 共享 `build_batch_object` 及同一 `=<format>` 原子展开。带 stdin 集成测试。 |
-| ✅ 已实现（部分） | Batch mode `--batch-command` | 从 stdin 逐行读命令：`info <object>`（header，同 --batch-check）/ `contents <object>`（header + 内容，同 --batch），复用 `build_batch_object`（含同一 `=<format>`）；`flush` 需 `--buffer`（未公开）→报错，未知命令报错。带 stdin 集成测试。 |
+| ✅ 已实现（部分） | Batch mode `--batch-command` + `--buffer` | 从 stdin 逐行读命令：`info <object>`（header，同 --batch-check）/ `contents <object>`（header + 内容，同 --batch），复用 `build_batch_object`（含同一 `=<format>`）。无 `--buffer` 时 `flush` 报错且每命令即时写出；加 `--buffer` 时缓冲输出、`flush` 有效（写出+清空 pending）、EOF 写出剩余（输出字节与非缓冲一致）。`--buffer` 需 batch 模式否则报错。未知命令报错。带 stdin 集成测试（含 `--buffer`/`flush` 与无 batch 模式两例）。 |
 | ✅ 已实现（部分） | Batch mode `--batch-all-objects` | 配合 `--batch`/`--batch-check`，用 `collect_all_object_ids`（loose objects/AB/CDEF + 解析 objects/pack/*.idx 的 `parse_index`，去重并按 id 排序）替代 stdin 对象列表；缺 `--batch`/`--batch-check` 时报 `LBR-CLI-002`。带集成测试。 |
-| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--buffer`、`--follow-symlinks`；当前说明：延后。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| 兼容差异项 | Batch mode（其余） | 原始对照：未实现；相关参数/替代：`--follow-symlinks`；当前说明：延后（`--buffer` 已实现）。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 不支持 argument combination | 当前状态：LBR-CLI-002；Git/相关参数：129。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求

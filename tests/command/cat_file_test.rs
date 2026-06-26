@@ -1092,13 +1092,105 @@ fn test_cat_file_batch_command_dispatches_info_and_contents() {
     );
     assert!(s.contains("not-a-real-ref missing"), "missing line: {s}");
 
-    // `flush` is rejected without --buffer (Libra does not expose --buffer).
+    // `flush` is rejected without --buffer.
     let flush = run_bc("flush\n".to_string());
     assert!(!flush.status.success(), "flush must error without --buffer");
 
     // An unknown command is a usage error.
     let unknown = run_bc("bogus deadbeef\n".to_string());
     assert!(!unknown.status.success(), "unknown command must error");
+}
+
+#[test]
+fn test_cat_file_buffer_enables_flush_and_requires_batch_mode() {
+    use std::process::Stdio;
+
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let head = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("Failed to resolve HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let run = |args: &[&str], stdin_body: String| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_libra"))
+            .current_dir(temp_path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cat-file");
+        child
+            .stdin
+            .take()
+            .expect("child stdin")
+            .write_all(stdin_body.as_bytes())
+            .expect("Failed to write input");
+        child
+            .wait_with_output()
+            .expect("Failed to wait on cat-file")
+    };
+
+    // Under --buffer the `flush` command is valid and both `info` outputs are
+    // produced (one before flush, one after).
+    let buffered = run(
+        &["cat-file", "--batch-command", "--buffer"],
+        format!("info {head_hash}\nflush\ninfo {head_hash}\n"),
+    );
+    assert!(
+        buffered.status.success(),
+        "flush is valid under --buffer: {}",
+        String::from_utf8_lossy(&buffered.stderr)
+    );
+    let buffered_out = String::from_utf8_lossy(&buffered.stdout);
+    assert_eq!(
+        buffered_out
+            .matches(&format!("{head_hash} commit "))
+            .count(),
+        2,
+        "both info outputs are present: {buffered_out}"
+    );
+
+    // Buffering does not change the output bytes vs the unbuffered run of the
+    // same info commands.
+    let unbuffered = run(
+        &["cat-file", "--batch-command"],
+        format!("info {head_hash}\ninfo {head_hash}\n"),
+    );
+    assert_eq!(
+        buffered.stdout, unbuffered.stdout,
+        "buffering must not change the emitted bytes"
+    );
+
+    // A `flush` with a stray argument is a usage error even under --buffer.
+    let bad_flush = run(
+        &["cat-file", "--batch-command", "--buffer"],
+        "flush extra\n".to_string(),
+    );
+    assert!(
+        !bad_flush.status.success(),
+        "flush takes no argument: {}",
+        String::from_utf8_lossy(&bad_flush.stdout)
+    );
+
+    // --buffer without a batch mode is a usage error (exit 129).
+    let bad = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "--buffer", &head_hash])
+        .output()
+        .expect("Failed to run cat-file --buffer");
+    assert_eq!(
+        bad.status.code(),
+        Some(129),
+        "--buffer requires a batch mode: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
 }
 
 #[test]

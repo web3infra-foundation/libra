@@ -65,6 +65,7 @@ const CAT_FILE_AFTER_HELP: &str = "EXAMPLES:
     libra cat-file -t 40d352ee7190f9…                       Print the object type (blob/tree/commit/tag)
     libra cat-file -e HEAD --json                           Check existence as JSON ({ exists: bool }; exit 0/1 preserved)
     libra cat-file --batch-command                          Read info/contents commands from stdin (one per line)
+    libra cat-file --batch-command --buffer                 Buffer batch output; the 'flush' command writes it out
     libra cat-file --batch-check --batch-all-objects         List every object in the store (loose + packed), id-ordered
     libra cat-file --ai-list intent                         List all AI objects of a built-in type
     libra cat-file --ai-list-types                          List every AI object type in the history branch
@@ -110,10 +111,17 @@ pub struct CatFileArgs {
 
     /// Read commands from stdin (one per line): `info <object>` prints the
     /// `<sha> <type> <size>` header and `contents <object>` adds the object
-    /// contents. Accepts an optional format string for the header. (`flush`
-    /// requires Git's `--buffer`, which Libra does not expose.)
+    /// contents. Accepts an optional format string for the header. The `flush`
+    /// command is accepted only under `--buffer`.
     #[clap(long = "batch-command", group = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub batch_command: Option<String>,
+
+    /// Buffer batch output and write it only on an explicit `flush` command (or
+    /// at end of input), matching `git cat-file --buffer`. Requires a batch mode
+    /// (`--batch` / `--batch-check` / `--batch-command`); it is what makes the
+    /// `--batch-command` `flush` command valid.
+    #[clap(long = "buffer")]
+    pub buffer: bool,
 
     /// With `--batch` or `--batch-check`, operate on every object in the
     /// repository (loose and packed) instead of reading names from stdin.
@@ -362,6 +370,19 @@ pub async fn execute(args: CatFileArgs) {
 pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    // `--buffer` only makes sense with a batch mode (it governs batch output
+    // flushing), matching Git which rejects `--buffer` on its own.
+    if args.buffer
+        && args.batch.is_none()
+        && args.batch_check.is_none()
+        && args.batch_command.is_none()
+    {
+        return Err(CliError::command_usage(
+            "--buffer requires --batch, --batch-check, or --batch-command",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
+
     if args.batch_all_objects {
         // `--batch-all-objects` is a modifier for `--batch` / `--batch-check`;
         // it replaces the stdin object list with every object in the store.
@@ -387,7 +408,7 @@ pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult
     }
 
     if let Some(fmt) = &args.batch_command {
-        return run_batch_command(fmt).await;
+        return run_batch_command(fmt, args.buffer).await;
     }
 
     if args.check_exist && !output.is_json() {
@@ -731,9 +752,11 @@ fn collect_all_object_ids(storage: &ClientStorage) -> CliResult<Vec<ObjectHash>>
 
 /// `cat-file --batch-command`: read one command per line from stdin and dispatch
 /// `info <object>` (header only, like `--batch-check`) or `contents <object>`
-/// (header + contents, like `--batch`). Libra does not expose `--buffer`, so the
-/// `flush` command is rejected exactly as Git does without buffered mode.
-async fn run_batch_command(format: &str) -> CliResult<()> {
+/// (header + contents, like `--batch`). Without `--buffer` each command's
+/// output is written immediately and the `flush` command is rejected (exactly
+/// as Git does outside buffered mode). With `--buffer`, output is accumulated
+/// and written only on an explicit `flush` command (or at end of input).
+async fn run_batch_command(format: &str, buffer: bool) -> CliResult<()> {
     use std::io::{Read, Write};
 
     let storage = ClientStorage::init(path::objects());
@@ -747,6 +770,22 @@ async fn run_batch_command(format: &str) -> CliResult<()> {
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    // Under `--buffer`, command output collects here until a `flush`; otherwise
+    // each command writes through immediately.
+    let mut pending: Vec<u8> = Vec::new();
+
+    // Write `bytes` to stdout, treating a closed pipe as a clean early stop.
+    fn emit(out: &mut impl Write, bytes: &[u8]) -> CliResult<bool> {
+        match out.write_all(bytes) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+            Err(e) => Err(CliError::fatal(format!(
+                "failed to write cat-file --batch-command output: {e}"
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)),
+        }
+    }
+
     for raw in input.lines() {
         let line = raw.trim();
         if line.is_empty() {
@@ -760,8 +799,29 @@ async fn run_batch_command(format: &str) -> CliResult<()> {
             "contents" => true,
             "info" => false,
             "flush" => {
-                return Err(CliError::command_usage("flush is only for --buffer mode")
-                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+                if !buffer {
+                    return Err(CliError::command_usage("flush is only for --buffer mode")
+                        .with_stable_code(StableErrorCode::CliInvalidArguments));
+                }
+                if !arg.is_empty() {
+                    return Err(CliError::command_usage("flush takes no argument")
+                        .with_stable_code(StableErrorCode::CliInvalidArguments));
+                }
+                if !emit(&mut out, &pending)? {
+                    return Ok(());
+                }
+                pending.clear();
+                match out.flush() {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                    Err(e) => {
+                        return Err(CliError::fatal(format!(
+                            "failed to flush cat-file --batch-command output: {e}"
+                        ))
+                        .with_stable_code(StableErrorCode::IoWriteFailed));
+                    }
+                }
+                continue;
             }
             other => {
                 return Err(CliError::command_usage(format!(
@@ -778,16 +838,15 @@ async fn run_batch_command(format: &str) -> CliResult<()> {
             .with_stable_code(StableErrorCode::CliInvalidArguments));
         }
         let buf = build_batch_object(arg, include_content, format, &storage).await;
-        match out.write_all(&buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
-            Err(e) => {
-                return Err(CliError::fatal(format!(
-                    "failed to write cat-file --batch-command output: {e}"
-                ))
-                .with_stable_code(StableErrorCode::IoWriteFailed));
-            }
+        if buffer {
+            pending.extend_from_slice(&buf);
+        } else if !emit(&mut out, &buf)? {
+            return Ok(());
         }
+    }
+    // Flush any output buffered after the last explicit `flush`.
+    if buffer && !pending.is_empty() {
+        emit(&mut out, &pending)?;
     }
     Ok(())
 }

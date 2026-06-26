@@ -35,7 +35,8 @@ branch.
 | `-e` | | Check if the object exists. Without `--json`, exit status only (0 = exists, 1 = absent), no stdout. With `--json`/`--machine`, emits `{ "exists": bool }` while keeping the same exit codes. |
 | `--batch-check[=<fmt>]` | | Read object names from stdin (one per line); print `<sha> <type> <size>` (or `<input> missing`). Optional format atoms `%(objectname)`/`%(objecttype)`/`%(objectsize)`. |
 | `--batch[=<fmt>]` | | Like `--batch-check` plus the raw object contents and a trailing newline. |
-| `--batch-command[=<fmt>]` | | Read commands from stdin: `info <object>` (header only) or `contents <object>` (header + contents). `flush` requires `--buffer`, which is not exposed. |
+| `--batch-command[=<fmt>]` | | Read commands from stdin: `info <object>` (header only) or `contents <object>` (header + contents). The `flush` command is accepted only under `--buffer`. |
+| `--buffer` | | Buffer batch output and write it only on an explicit `flush` (or at end of input); this is what makes `--batch-command`'s `flush` valid. Requires a batch mode. |
 | `--batch-all-objects` | | With `--batch`/`--batch-check`, operate on every object in the store (loose + packed) in id order instead of reading stdin. |
 | `--ai <ID>` | | Pretty-print an AI object by ID. Accepts `TYPE:ID` to disambiguate. |
 | `--ai-type <ID>` | | Print the AI object type for the given ID. |
@@ -197,8 +198,10 @@ formatter with optional `=<format>` atom expansion. `--batch-all-objects` (with
 `--batch`/`--batch-check`) enumerates every object in the store — loose plus
 packed — in id order, instead of reading stdin. For agents, `--json` remains
 the recommended interface — it returns typed fields in one call. Streaming
-`--buffer`/`flush` and `--follow-symlinks` are not exposed; without `--buffer`,
-the `flush` command is rejected exactly as Git does.
+`--buffer` is supported (buffer batch output and flush only on an explicit `flush`
+command or end of input — it is what makes `--batch-command`'s `flush` valid; without
+`--buffer` the `flush` command is rejected exactly as Git does, and `--buffer` requires
+a batch mode). `--follow-symlinks` is not exposed.
 
 ### How does `-e` behave with `--json`?
 
@@ -221,7 +224,7 @@ hard error (`LBR-CLI-003`, exit 129) that emits no envelope.
 | Print object size | `-s` | `-s` | N/A |
 | Pretty-print content | `-p` | `-p` | N/A (`jj file show` for blobs) |
 | Check existence | `-e` | `-e` | N/A |
-| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]`, `--batch-command[=<format>]` (info/contents), `--batch-all-objects` (`%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms; `--buffer`/`flush` not exposed) | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects` | N/A |
+| Batch mode | `--batch[=<format>]`, `--batch-check[=<format>]`, `--batch-command[=<format>]` (info/contents), `--batch-all-objects` (`%(objectname)`/`%(objecttype)`/`%(objectsize)` atoms), `--buffer` (enables `--batch-command`'s `flush`) | `--batch`, `--batch-check`, `--batch-command`, `--batch-all-objects`, `--buffer` | N/A |
 | AI object inspection | `--ai`, `--ai-type` | N/A | N/A |
 | AI object listing | `--ai-list`, `--ai-list-types` | N/A | N/A |
 | JSON output | `--json` | No | No |
