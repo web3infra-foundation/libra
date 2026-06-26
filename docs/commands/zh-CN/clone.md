@@ -113,6 +113,14 @@ libra clone --no-progress git@github.com:user/repo.git
 libra clone --no-checkout git@github.com:user/repo.git
 ```
 
+### `-o`, `--origin <NAME>`
+
+用 `<NAME>` 命名远端（及其 `refs/remotes/<NAME>/*` 跟踪引用），取代默认的 `origin`，对齐 `git clone -o`。分支跟踪配置（`branch.<branch>.remote`）与 `remote.<NAME>.url` 都使用所选名称。该选项适用于标准克隆；`libra+cloud` 克隆始终使用 `origin`。
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
+```
+
 ## 常用命令
 
 ```bash
@@ -188,6 +196,7 @@ warning: You appear to have cloned an empty repository.
     "path": "/Users/eli/projects/my-repo",
     "bare": false,
     "remote_url": "git@github.com:user/repo.git",
+    "remote_name": "origin",
     "branch": "main",
     "object_format": "sha1",
     "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -209,6 +218,7 @@ warning: You appear to have cloned an empty repository.
     "path": "/Users/eli/projects/empty-repo",
     "bare": false,
     "remote_url": "git@github.com:user/empty-repo.git",
+    "remote_name": "origin",
     "branch": null,
     "object_format": "sha1",
     "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -224,6 +234,7 @@ warning: You appear to have cloned an empty repository.
 
 ### Schema 说明
 
+- `remote_name` 是配置的远端名称（默认 `origin`，标准克隆下为 `-o`/`--origin` 的值）
 - `branch` 是实际检出的分支；远程没有 refs 时为 `null`
 - 使用 `--depth` 时，`shallow` 为 `true`
 - 普通 Git/本地克隆会省略 `source_kind` 和 `cloud_site`；`libra+cloud://` 克隆会加入它们，包含 clone domain、site id、slug、repo id、选中 ref 和恢复的 revision

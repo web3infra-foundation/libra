@@ -182,6 +182,7 @@ async fn test_clone_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -218,6 +219,7 @@ async fn test_clone_bare_repository() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -269,6 +271,7 @@ async fn test_clone_branch_single_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -304,6 +307,7 @@ async fn test_clone_default_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -339,6 +343,7 @@ async fn test_clone_default_branch_single_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -376,6 +381,7 @@ async fn test_clone_to_existing_empty_dir() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -416,6 +422,7 @@ async fn test_clone_to_existing_dir() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -452,6 +459,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -487,6 +495,7 @@ async fn test_clone_with_depth() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -522,6 +531,7 @@ async fn test_clone_with_depth_and_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        origin: None,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -630,4 +640,105 @@ fn no_checkout_skips_working_tree() {
         dst2.join("tracked.txt").exists(),
         "a normal clone checks out the tracked file"
     );
+}
+
+#[test]
+#[serial]
+fn origin_flag_names_the_remote() {
+    use crate::command::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let src = create_committed_repo_via_cli();
+    let work = tempdir().unwrap();
+    let dst = work.path().join("dst");
+
+    // `clone -o upstream` names the remote `upstream` instead of `origin`.
+    let out = run_libra_command(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            src.path().to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ],
+        work.path(),
+    );
+    assert_cli_success(&out, "clone -o upstream");
+
+    // The remote, branch tracking config, and remote-tracking ref all use the
+    // chosen name; nothing is created under `origin`.
+    let upstream_url = run_libra_command(&["config", "get", "remote.upstream.url"], &dst);
+    assert_cli_success(&upstream_url, "remote.upstream.url is set");
+    let origin_url = run_libra_command(&["config", "get", "remote.origin.url"], &dst);
+    assert!(
+        !origin_url.status.success(),
+        "no remote.origin.url is created under -o upstream"
+    );
+    let branch_remote = run_libra_command(&["config", "get", "branch.main.remote"], &dst);
+    assert_eq!(
+        String::from_utf8_lossy(&branch_remote.stdout).trim(),
+        "upstream",
+        "branch.main.remote tracks the named remote"
+    );
+    let refs = run_libra_command(
+        &["for-each-ref", "refs/remotes/", "--format=%(refname)"],
+        &dst,
+    );
+    assert!(
+        String::from_utf8_lossy(&refs.stdout).contains("refs/remotes/upstream/main"),
+        "tracking ref uses the named remote"
+    );
+
+    // `-o <name> --no-tags` records the tag preference under the named remote,
+    // not under `origin`.
+    let dst2 = work.path().join("dst2");
+    let out2 = run_libra_command(
+        &[
+            "clone",
+            "-o",
+            "upstream",
+            "--no-tags",
+            src.path().to_str().unwrap(),
+            dst2.to_str().unwrap(),
+        ],
+        work.path(),
+    );
+    assert_cli_success(&out2, "clone -o upstream --no-tags");
+    let tagopt = run_libra_command(&["config", "get", "remote.upstream.tagOpt"], &dst2);
+    assert_eq!(
+        String::from_utf8_lossy(&tagopt.stdout).trim(),
+        "--no-tags",
+        "tagOpt is recorded under the named remote"
+    );
+    let origin_tagopt = run_libra_command(&["config", "get", "remote.origin.tagOpt"], &dst2);
+    assert!(
+        !origin_tagopt.status.success(),
+        "no remote.origin.tagOpt is created under -o upstream"
+    );
+
+    // Invalid remote names are usage errors (exit 129) and create no destination
+    // (validation runs before touching the filesystem). Covers a name with a
+    // space and a ref-format-invalid name (a `.lock` suffix) that has no
+    // whitespace/control characters.
+    for (idx, bad_name) in ["bad name", "feat.lock", "bad~name"].iter().enumerate() {
+        let bad_dst = work.path().join(format!("bad{idx}"));
+        let bad = run_libra_command(
+            &[
+                "clone",
+                "-o",
+                bad_name,
+                src.path().to_str().unwrap(),
+                bad_dst.to_str().unwrap(),
+            ],
+            work.path(),
+        );
+        assert_eq!(
+            bad.status.code(),
+            Some(129),
+            "invalid -o name {bad_name:?} is rejected"
+        );
+        assert!(
+            !bad_dst.exists(),
+            "no destination is created for invalid -o name {bad_name:?}"
+        );
+    }
 }

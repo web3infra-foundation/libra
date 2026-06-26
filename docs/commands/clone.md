@@ -137,7 +137,8 @@ libra clone --depth 50 git@github.com:user/repo.git
 ### `--tags` / `--no-tags`
 
 `libra clone` fetches **all** tags by default (matching Git). `--no-tags` clones
-without any tags and records `remote.origin.tagOpt=--no-tags`, so subsequent
+without any tags and records `remote.<name>.tagOpt=--no-tags` (the remote name is
+`origin` by default, or the `-o`/`--origin` value), so subsequent
 `libra fetch` calls also skip tags. `--tags` is accepted for compatibility and to
 override an earlier `--no-tags` (last flag wins).
 
@@ -163,6 +164,17 @@ checked-out files.
 
 ```bash
 libra clone --no-checkout git@github.com:user/repo.git
+```
+
+### `-o`, `--origin <NAME>`
+
+Use `<NAME>` for the remote (and its `refs/remotes/<NAME>/*` tracking refs)
+instead of the default `origin`, matching `git clone -o`. The branch tracking
+config (`branch.<branch>.remote`) and `remote.<NAME>.url` use the chosen name.
+This applies to standard clones; `libra+cloud` clones always use `origin`.
+
+```bash
+libra clone -o upstream git@github.com:user/repo.git
 ```
 
 ## Common Commands
@@ -241,6 +253,7 @@ Example:
     "path": "/Users/eli/projects/my-repo",
     "bare": false,
     "remote_url": "git@github.com:user/repo.git",
+    "remote_name": "origin",
     "branch": "main",
     "object_format": "sha1",
     "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -262,6 +275,7 @@ Empty remote returns `"branch": null` and a warning:
     "path": "/Users/eli/projects/empty-repo",
     "bare": false,
     "remote_url": "git@github.com:user/empty-repo.git",
+    "remote_name": "origin",
     "branch": null,
     "object_format": "sha1",
     "repo_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -277,6 +291,7 @@ Empty remote returns `"branch": null` and a warning:
 
 ### Schema Notes
 
+- `remote_name` is the configured remote's name (`origin` by default, or the `-o`/`--origin` value for standard clones)
 - `branch` is the actual checked-out branch; `null` when the remote has no refs
 - `shallow` is `true` when `--depth` was used
 - `source_kind` and `cloud_site` are omitted for ordinary Git/local clones; `libra+cloud://` clones add them with clone domain, site id, slug, repo id, selected ref, and restored revision

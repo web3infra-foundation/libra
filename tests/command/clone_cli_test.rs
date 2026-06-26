@@ -1500,6 +1500,7 @@ fn json_clone_success_schema() {
     assert!(data["path"].is_string());
     assert_eq!(data["bare"], false);
     assert!(data["remote_url"].is_string());
+    assert_eq!(data["remote_name"], "origin");
     assert_eq!(data["branch"], "main");
     assert!(data["object_format"].is_string());
     assert!(data["repo_id"].is_string());

@@ -89,6 +89,7 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone -b develop git@github.com:user/repo.git   Clone specific branch\n    \
     libra clone --single-branch -b main <url>             Clone only one branch\n    \
     libra clone --no-checkout <url>                       Set up the repo without checking out files\n    \
+    libra clone -o upstream <url>                         Name the remote 'upstream' instead of 'origin'\n    \
     libra clone --depth 1 <url>                           Shallow clone (latest commit only)")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
@@ -125,7 +126,8 @@ pub struct CloneArgs {
     #[clap(long, overrides_with = "no_tags")]
     pub tags: bool,
 
-    /// Do not clone any tags, and set `remote.origin.tagOpt=--no-tags` so future
+    /// Do not clone any tags, and set `remote.<name>.tagOpt=--no-tags` (the
+    /// remote name is `origin` by default, or the `-o`/`--origin` value) so future
     /// fetches also skip tags (matches `git clone --no-tags`).
     #[clap(long = "no-tags", overrides_with = "tags")]
     pub no_tags: bool,
@@ -139,6 +141,12 @@ pub struct CloneArgs {
     /// and HEAD are still set up), matching `git clone --no-checkout`.
     #[clap(long = "no-checkout")]
     pub no_checkout: bool,
+
+    /// Use NAME for the remote (and its `refs/remotes/<NAME>/*` tracking refs)
+    /// instead of the default `origin`, matching `git clone -o`. Applies to
+    /// standard clones; libra+cloud clones always use `origin`.
+    #[clap(short = 'o', long = "origin", value_name = "NAME")]
+    pub origin: Option<String>,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -157,6 +165,9 @@ pub struct CloneOutput {
     pub bare: bool,
     /// Normalized remote URL.
     pub remote_url: String,
+    /// Name of the configured remote (`origin` by default, or the `-o`/`--origin`
+    /// value for standard clones).
+    pub remote_name: String,
     /// Actual checked-out branch; `None` for empty remotes.
     pub branch: Option<String>,
     /// `sha1` or `sha256` (from `InitOutput.object_format`).
@@ -215,8 +226,8 @@ pub enum CloneError {
     RestoreDirectory { path: PathBuf, source: io::Error },
     #[error("failed to initialize repository")]
     InitializeRepository { source: InitError },
-    #[error("remote branch {branch} not found in upstream origin")]
-    RemoteBranchNotFound { branch: String },
+    #[error("remote branch {branch} not found in upstream {remote}")]
+    RemoteBranchNotFound { branch: String, remote: String },
     #[error("failed to inspect local branch state after fetch: {source}")]
     LocalBranchState { source: branch::BranchStoreError },
     #[error("fetch failed: {source}")]
@@ -432,8 +443,11 @@ impl From<CloneError> for CliError {
                 // Transparently reuse init's complete error mapping.
                 source.into()
             }
-            CloneError::RemoteBranchNotFound { ref branch } => CliError::fatal(format!(
-                "remote branch '{branch}' not found in upstream origin"
+            CloneError::RemoteBranchNotFound {
+                ref branch,
+                ref remote,
+            } => CliError::fatal(format!(
+                "remote branch '{branch}' not found in upstream {remote}"
             ))
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint(
@@ -975,6 +989,51 @@ fn display_home_relative(path: &str) -> String {
 
 /// Attempt to clean up a failed clone. Returns a warning string if cleanup
 /// itself fails, so the caller can surface it via `CliError.hints`.
+/// Validate a `-o`/`--origin` remote name before it is interpolated into config
+/// keys and `refs/remotes/<name>/*` refs. The name must satisfy Git's
+/// check-ref-format rules for the `refs/remotes/<name>/HEAD` ref it will form;
+/// otherwise a usage error (exit 129) is returned.
+fn validate_remote_name(name: &str) -> CliResult<()> {
+    if name.is_empty() || name.len() > 255 || !is_valid_remote_ref_format(name) {
+        return Err(
+            CliError::command_usage(format!("invalid remote name '{name}'"))
+                .with_hint("use a plain remote name such as 'origin' or 'upstream'"),
+        );
+    }
+    Ok(())
+}
+
+/// Apply Git's `check-ref-format` rules to the ref a remote name would create
+/// (`refs/remotes/<name>/HEAD`): reject empty components, leading-dot or
+/// `.lock`-suffixed components, `..`/`//`/`@{`, trailing `/` or `.`, and the
+/// disallowed bytes (control/whitespace and ``: \ ~ ^ ? * [``).
+fn is_valid_remote_ref_format(name: &str) -> bool {
+    let candidate = format!("refs/remotes/{name}/HEAD");
+    let Some(short) = candidate.strip_prefix("refs/") else {
+        return false;
+    };
+    if short.starts_with('/')
+        || short.ends_with('/')
+        || short.ends_with('.')
+        || short.ends_with(".lock")
+        || short.contains("//")
+        || short.contains("..")
+        || short.contains("@{")
+    {
+        return false;
+    }
+    if short.split('/').any(|component| {
+        component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+    }) {
+        return false;
+    }
+    !short.chars().any(|c| {
+        c.is_ascii_control()
+            || c.is_whitespace()
+            || matches!(c, ':' | '\\' | '~' | '^' | '?' | '*' | '[')
+    })
+}
+
 fn cleanup_failed_clone(local_path: &Path, created_by_clone: bool) -> Option<String> {
     let cleanup_result = if created_by_clone {
         fs::remove_dir_all(local_path)
@@ -1036,6 +1095,13 @@ pub async fn execute(args: CloneArgs) {
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
 pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
+    // `-o`/`--origin` becomes a config key and a `refs/remotes/<name>/*` ref
+    // component, so reject invalid names up front (before touching the
+    // filesystem) rather than writing a malformed key/ref.
+    if let Some(name) = &args.origin {
+        validate_remote_name(name)?;
+    }
+
     let original_dir = util::cur_dir();
     let (result, cleanup_warning) = execute_clone(&args, &original_dir, output).await;
 
@@ -1083,7 +1149,7 @@ fn render_clone_result(result: &CloneOutput, output: &OutputConfig) -> CliResult
             .unwrap_or(&result.path);
         println!("Cloned into '{display_path}'");
     }
-    println!("  remote: origin → {}", result.remote_url);
+    println!("  remote: {} → {}", result.remote_name, result.remote_url);
     if let Some(branch) = &result.branch {
         println!("  branch: {branch}");
     }
@@ -1254,6 +1320,7 @@ async fn execute_clone_inner(
         return Err((
             CloneError::RemoteBranchNotFound {
                 branch: branch.clone(),
+                remote: args.origin.clone().unwrap_or_else(|| "origin".to_string()),
             },
             cleanup_warning,
         ));
@@ -1486,6 +1553,8 @@ async fn clone_cloud_publish_into_destination(
         path: local_path.to_string_lossy().into_owned(),
         bare: false,
         remote_url: args.remote_repo.clone(),
+        // libra+cloud clones always use the fixed `origin` cloud-config schema.
+        remote_name: "origin".to_string(),
         branch: cloud_checkout_branch_name(&restore_plan.checkout),
         object_format,
         repo_id: init_output.repo_id,
@@ -2867,14 +2936,18 @@ async fn clone_into_destination(
     let child_output = output.child_output_config();
     let child_output =
         fetch::apply_no_progress(&child_output, args.no_progress).unwrap_or(child_output);
+    // `-o`/`--origin` names the remote (and its tracking refs); defaults to
+    // `origin`. `setup_repository` threads `remote_config.name` through the
+    // `refs/remotes/<name>/*` refs, `branch.<b>.remote`, and `remote.<name>.url`.
+    let remote_name = args.origin.clone().unwrap_or_else(|| "origin".to_string());
     let remote_config = RemoteConfig {
-        name: "origin".to_string(),
+        name: remote_name.clone(),
         url: remote_url.to_string(),
     };
     // `git clone` fetches ALL tags by default; `--no-tags` skips them and records
-    // `remote.origin.tagOpt=--no-tags` so later fetches also skip tags.
+    // `remote.<name>.tagOpt=--no-tags` so later fetches also skip tags.
     let clone_tag_mode = if args.no_tags {
-        let _ = ConfigKv::set("remote.origin.tagOpt", "--no-tags", false).await;
+        let _ = ConfigKv::set(&format!("remote.{remote_name}.tagOpt"), "--no-tags", false).await;
         fetch::TagFetchMode::NoTags
     } else {
         fetch::TagFetchMode::All
@@ -2934,6 +3007,7 @@ async fn clone_into_destination(
         path: local_path.to_string_lossy().into_owned(),
         bare: args.bare,
         remote_url: remote_url.to_string(),
+        remote_name: remote_name.clone(),
         branch: setup_result.branch_name,
         object_format,
         repo_id: init_output.repo_id,
@@ -2989,6 +3063,7 @@ pub(crate) async fn setup_repository(
         .map_err(|source| CloneError::LocalBranchState { source })?
         .ok_or_else(|| CloneError::RemoteBranchNotFound {
             branch: branch_name.clone(),
+            remote: remote_config.name.clone(),
         })?;
 
         let action = ReflogAction::Clone {
@@ -3432,6 +3507,7 @@ mod tests {
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3644,6 +3720,7 @@ mod tests {
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3734,6 +3811,7 @@ mod tests {
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3812,6 +3890,7 @@ mod tests {
         };
         let args = CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -3880,6 +3959,7 @@ mod tests {
         let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
         let args = CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3945,6 +4025,7 @@ mod tests {
             .expect("metadata should overwrite in-memory remote");
         let args = CloneArgs {
             no_single_branch: false,
+            origin: None,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4215,9 +4296,10 @@ mod tests {
         assert_eq!(
             CloneError::RemoteBranchNotFound {
                 branch: "feat/x".to_string(),
+                remote: "upstream".to_string(),
             }
             .to_string(),
-            "remote branch feat/x not found in upstream origin",
+            "remote branch feat/x not found in upstream upstream",
         );
         assert_eq!(
             CloneError::SetupFailed {
@@ -4461,6 +4543,7 @@ mod tests {
             path: "/tmp/repo".to_string(),
             bare: false,
             remote_url: "git@github.com:user/repo.git".to_string(),
+            remote_name: "origin".to_string(),
             branch: Some("main".to_string()),
             object_format: "sha1".to_string(),
             repo_id: "a1b2c3d4".to_string(),
@@ -4526,6 +4609,7 @@ mod tests {
             path: "/tmp/repo.git".to_string(),
             bare: true,
             remote_url: "git@github.com:user/repo.git".to_string(),
+            remote_name: "origin".to_string(),
             branch: Some("main".to_string()),
             object_format: "sha1".to_string(),
             repo_id: "a1b2c3d4".to_string(),
