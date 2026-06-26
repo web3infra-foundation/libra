@@ -34,6 +34,7 @@ list their entries and blobs print their text content (or a binary summary).
 | `--no-abbrev-commit` | | Show the full (unabbreviated) commit object name, countermanding an earlier `--abbrev-commit` (last one wins). The full hash is the default, so on its own this is a no-op. |
 | `--name-only` | | Show only changed file names (no diff hunks). |
 | `--name-status` | | Show changed file names prefixed by a status letter (`A`/`M`/`D`), tab-separated. |
+| `--raw` | | Show the raw diff format `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>` (object ids abbreviated to 7) instead of a patch, like `git show --raw`. |
 | `--stat` | | Show diff statistics (insertions / deletions per file). |
 | `--patch-with-stat` | | Show the diffstat block followed by the full patch (Git's legacy synonym for `-p --stat`). |
 | `--summary` | | Show a condensed summary of created and deleted files (their mode and path), like `git show --summary`. Created/deleted files only — no rename/copy detection. |
@@ -198,8 +199,9 @@ naturally to the internal tree-walk operation that Libra already performs.
 `oneline` preset or a `%`-placeholder template (`format:`/`tformat:`/bare), sharing
 `libra log`'s formatter. The named presets `short`, `full`, `fuller`, `reference`,
 and `raw` are rendered distinctly (matching Git's preset structure); `medium`
-maps to the default format. (This is separate from the `--raw` diff format, which
-is not yet exposed.) For programmatic consumers, `--json` remains the
+maps to the default format. (This is separate from the `--raw` diff format —
+see the `--raw` option — which selects the raw `:<old-mode> <new-mode> …` diff
+format instead of a preset.) For programmatic consumers, `--json` remains the
 recommended interface: it gives every field in a well-typed, type-discriminated
 schema (typed fields vs. string parsing), avoiding format-string fragility.
 

@@ -321,6 +321,7 @@ async fn test_show_non_quiet_uses_forced_pager() {
         abbrev_commit: false,
         name_only: false,
         name_status: false,
+        raw: false,
         stat: false,
         patch_with_stat: false,
         summary: false,
@@ -379,6 +380,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         abbrev_commit: false,
         name_only: false,
         name_status: false,
+        raw: false,
         stat: false,
         patch_with_stat: false,
         summary: false,
@@ -438,6 +440,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         abbrev_commit: false,
         name_only: false,
         name_status: false,
+        raw: false,
         stat: true,
         patch_with_stat: false,
         summary: false,
@@ -906,6 +909,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         abbrev_commit: false,
         name_only: false,
         name_status: false,
+        raw: false,
         stat: false,
         patch_with_stat: false,
         summary: false,
@@ -956,6 +960,7 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         abbrev_commit: false,
         name_only: false,
         name_status: false,
+        raw: false,
         stat: false,
         patch_with_stat: false,
         summary: false,
@@ -1206,4 +1211,86 @@ fn show_log_display_no_op_flags_are_accepted() {
             .to_string();
         assert_eq!(hdr, plain_hdr, "show {flag} prints the same commit header");
     }
+}
+
+/// `show --raw` renders the raw diff format (`:<old-mode> <new-mode> <old-sha>
+/// <new-sha> <status>\t<path>`) instead of a patch, matching `git show --raw`.
+#[test]
+fn test_show_raw_diff_format() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // First commit: a regular file `f` and a file `d` to be deleted later.
+    fs::write(p.join("f"), "one\n").expect("write f");
+    fs::write(p.join("d"), "old\n").expect("write d");
+    assert_cli_success(&run_libra_command(&["add", "f", "d"], p), "add f d");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+
+    // Second commit: modify `f`, add an executable `g`, delete `d`.
+    fs::write(p.join("f"), "two\n").expect("modify f");
+    fs::write(p.join("g"), "new\n").expect("write g");
+    fs::set_permissions(p.join("g"), fs::Permissions::from_mode(0o755)).expect("chmod g");
+    fs::remove_file(p.join("d")).expect("rm d");
+    assert_cli_success(
+        &run_libra_command(&["add", "f", "g", "d"], p),
+        "stage changes",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+
+    let out = run_libra_command(&["show", "--raw", "HEAD"], p);
+    assert_cli_success(&out, "show --raw");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let raw: Vec<&str> = stdout.lines().filter(|l| l.starts_with(':')).collect();
+
+    // Modified regular file: both modes 100644, both ids present, status M.
+    let modified = raw
+        .iter()
+        .find(|l| l.ends_with("M\tf"))
+        .unwrap_or_else(|| panic!("modified line for f: {stdout}"));
+    assert!(
+        modified.starts_with(":100644 100644 "),
+        "modified f modes: {modified}"
+    );
+
+    // Added executable: old side zeroed, new mode 100755, status A.
+    let added = raw
+        .iter()
+        .find(|l| l.ends_with("A\tg"))
+        .unwrap_or_else(|| panic!("added line for g: {stdout}"));
+    assert!(
+        added.starts_with(":000000 100755 0000000 "),
+        "added g modes/old-zero: {added}"
+    );
+
+    // Deleted file: old mode 100644, new side zeroed, status D.
+    let deleted = raw
+        .iter()
+        .find(|l| l.ends_with("D\td"))
+        .unwrap_or_else(|| panic!("deleted line for d: {stdout}"));
+    assert!(
+        deleted.starts_with(":100644 000000 "),
+        "deleted d modes: {deleted}"
+    );
+    assert!(
+        deleted.contains(" 0000000 D\td"),
+        "deleted d new-id zeroed: {deleted}"
+    );
+
+    // The commit header/message still precede the raw lines (no patch body).
+    assert!(
+        stdout.contains("commit "),
+        "raw still shows the commit header"
+    );
+    assert!(
+        !stdout.contains("diff --git"),
+        "--raw replaces the patch: {stdout}"
+    );
 }

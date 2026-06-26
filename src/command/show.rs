@@ -1,6 +1,10 @@
 //! Show command that resolves object IDs and prints commit, tree, blob, or ref details with formatting suitable for diffable objects.
 
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use clap::Parser;
 use colored::Colorize;
@@ -45,6 +49,7 @@ EXAMPLES:
     libra show --stat HEAD~1                Show only diff statistics
     libra show --patch-with-stat HEAD       Show the diffstat followed by the full patch
     libra show --name-status HEAD           Show changed files with A/M/D status
+    libra show --raw HEAD                    Raw diff format (mode/sha/status per file)
     libra show --summary HEAD               Show created/deleted file mode summary
     libra show --format='%h %s' HEAD        Custom header format (alias for --pretty)
     libra show --abbrev-commit HEAD         Abbreviate the commit hash in the header
@@ -95,6 +100,11 @@ pub struct ShowArgs {
     /// Show only names and status (A/M/D) of changed files.
     #[clap(long = "name-status")]
     pub name_status: bool,
+
+    /// Show the diff in the raw format (`:<old-mode> <new-mode> <old-sha>
+    /// <new-sha> <status>\t<path>`) instead of a patch, like `git show --raw`.
+    #[clap(long)]
+    pub raw: bool,
 
     /// Show diff statistics.
     #[clap(long)]
@@ -448,6 +458,14 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<Str
                     output.push_str(&format!("{}\t{}\n", status, file.path.display()));
                 }
             }
+        } else if args.raw {
+            // Show the raw diff format, matching `git show --raw`:
+            // `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>`.
+            let raw_lines = raw_diff_lines_for_commit(&commit, &paths).await?;
+            if !raw_lines.is_empty() {
+                output.push('\n');
+                output.push_str(&raw_lines);
+            }
         } else if args.name_only {
             // Show only changed file names.
             let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
@@ -526,6 +544,83 @@ fn reconstruct_identical_diff_path(body: &str) -> Option<String> {
     }
 }
 
+/// Build the `git show --raw` body for a commit: one line per changed file,
+/// `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>` (object ids
+/// abbreviated to 7, the absent side rendered as zeros). The change set is built
+/// directly from the commit and its first-parent trees so it is mode-aware (a
+/// same-content file whose mode changed still shows as `M`, matching Git —
+/// reachable e.g. for history imported from Git) and path-ordered.
+async fn raw_diff_lines_for_commit(commit: &Commit, paths: &[PathBuf]) -> CliResult<String> {
+    let new_map = tree_entry_map(&commit.tree_id)?;
+    let old_map = if let Some(parent) = commit.parent_commit_ids.first() {
+        let parent_commit =
+            load_object::<Commit>(parent).map_err(|e| show_object_load_error(parent, e))?;
+        tree_entry_map(&parent_commit.tree_id)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok(build_raw_lines(&old_map, &new_map, paths))
+}
+
+/// Map each blob path in a tree to its `(octal-mode, abbreviated-id)`.
+fn tree_entry_map(tree_id: &ObjectHash) -> CliResult<BTreeMap<PathBuf, (String, String)>> {
+    let tree = load_object::<Tree>(tree_id).map_err(|e| show_object_load_error(tree_id, e))?;
+    Ok(tree
+        .get_plain_items_with_mode()
+        .into_iter()
+        .map(|(path, hash, mode)| {
+            let mode_str = String::from_utf8_lossy(mode.to_bytes()).into_owned();
+            let sha = hash.to_string().chars().take(7).collect::<String>();
+            (path, (mode_str, sha))
+        })
+        .collect())
+}
+
+/// Render the raw diff lines for the union of `old_map`/`new_map` paths (filtered
+/// by `paths`): added paths show a zeroed old side, deleted paths a zeroed new
+/// side, and a path present on both sides is `M` when its `(mode, id)` differs
+/// (so a mode-only change is reported, like Git). Output is path-ordered.
+fn build_raw_lines(
+    old_map: &BTreeMap<PathBuf, (String, String)>,
+    new_map: &BTreeMap<PathBuf, (String, String)>,
+    paths: &[PathBuf],
+) -> String {
+    const ZERO_MODE: &str = "000000";
+    let zero_sha = "0".repeat(7);
+    let absent = || (ZERO_MODE.to_string(), zero_sha.clone());
+    let matches_filter = |path: &Path| {
+        paths.is_empty() || paths.iter().any(|filter| util::is_sub_path(path, filter))
+    };
+
+    let mut all_paths: BTreeSet<&PathBuf> = BTreeSet::new();
+    all_paths.extend(old_map.keys());
+    all_paths.extend(new_map.keys());
+
+    let mut out = String::new();
+    for path in all_paths {
+        if !matches_filter(path) {
+            continue;
+        }
+        let (status, (old_mode, old_sha), (new_mode, new_sha)) =
+            match (old_map.get(path), new_map.get(path)) {
+                (None, Some(new)) => ("A", absent(), new.clone()),
+                (Some(old), None) => ("D", old.clone(), absent()),
+                (Some(old), Some(new)) => {
+                    if old == new {
+                        continue;
+                    }
+                    ("M", old.clone(), new.clone())
+                }
+                (None, None) => continue,
+            };
+        out.push_str(&format!(
+            ":{old_mode} {new_mode} {old_sha} {new_sha} {status}\t{}\n",
+            path.display()
+        ));
+    }
+    out
+}
+
 async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     let commit =
         load_object::<Commit>(commit_hash).map_err(|e| show_object_load_error(commit_hash, e))?;
@@ -535,10 +630,11 @@ async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> Cl
     }
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    if args.stat || args.name_only || args.name_status {
-        // --stat / --name-only / --name-status human paths only need tree-level file lists,
-        // not blob contents.  Use the same function so quiet mode has the same
-        // success/failure semantics as the visible rendering path.
+    if args.stat || args.name_only || args.name_status || args.raw {
+        // --stat / --name-only / --name-status / --raw human paths only need
+        // tree-level file lists, not blob contents.  Use the same function so
+        // quiet mode has the same success/failure semantics as the visible
+        // rendering path.
         let _ = get_changed_files_for_commit(&commit, &paths).await?;
     } else {
         let _ = generate_diff(&commit, paths).await?;
@@ -1077,6 +1173,48 @@ async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::utils::error::StableErrorCode;
+
+    #[test]
+    fn build_raw_lines_reports_adds_deletes_and_mode_only_changes() {
+        let entry = |mode: &str, sha: &str| (mode.to_string(), sha.to_string());
+        let mut old = BTreeMap::new();
+        old.insert(PathBuf::from("f"), entry("100644", "587be6b"));
+        old.insert(PathBuf::from("gone"), entry("100644", "1111111"));
+        let mut new = BTreeMap::new();
+        // `f` keeps its blob id but flips to executable: a mode-only change that
+        // a sha-only diff would miss, but Git's --raw reports as `M`.
+        new.insert(PathBuf::from("f"), entry("100755", "587be6b"));
+        new.insert(PathBuf::from("added"), entry("100644", "2222222"));
+
+        let out = build_raw_lines(&old, &new, &[]);
+        assert!(
+            out.contains(":000000 100644 0000000 2222222 A\tadded\n"),
+            "added: {out}"
+        );
+        assert!(
+            out.contains(":100644 100755 587be6b 587be6b M\tf\n"),
+            "mode-only change must be reported as M: {out}"
+        );
+        assert!(
+            out.contains(":100644 000000 1111111 0000000 D\tgone\n"),
+            "deleted: {out}"
+        );
+        // Path order (BTreeSet): added, f, gone.
+        let order: Vec<&str> = out
+            .lines()
+            .map(|l| l.rsplit('\t').next().unwrap())
+            .collect();
+        assert_eq!(order, vec!["added", "f", "gone"]);
+
+        // An identical (mode, id) pair on both sides emits nothing.
+        let same = old.clone();
+        assert_eq!(build_raw_lines(&same, &same, &[]), "");
+
+        // A pathspec filter keeps only matching paths.
+        let filtered = build_raw_lines(&old, &new, &[PathBuf::from("added")]);
+        assert!(filtered.contains("A\tadded"));
+        assert!(!filtered.contains("\tf\n"), "filtered out f: {filtered}");
+    }
 
     #[test]
     fn show_error_to_cli_error_pins_stable_codes_and_hints() {

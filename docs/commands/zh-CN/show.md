@@ -26,6 +26,7 @@ libra show [OPTIONS] [OBJECT] [-- <PATHS>...]
 | `--abbrev-commit` | | 把默认 header 的 commit 对象名缩写为 7 位前缀。 |
 | `--no-abbrev-commit` | | 显示完整（未缩写）commit 对象名，撤销先前的 `--abbrev-commit`（最后出现者生效）。完整哈希是默认，故单独使用时为 no-op。 |
 | `--name-only` | | 只显示已更改文件名（没有 diff hunk）。 |
+| `--raw` | | 以原始 diff 格式 `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\t<path>`（对象 id 缩写 7 位）显示而非 patch，类似 `git show --raw`。 |
 | `--stat` | | 显示 diff 统计（每个文件的插入 / 删除）。 |
 | `--patch-with-stat` | | 先显示 diffstat 块，再显示完整 patch（Git 对 `-p --stat` 的旧式同义词）。 |
 | `--summary` | | 显示创建/删除文件的精简摘要（mode 与路径），类似 `git show --summary`。仅含创建/删除文件，不做 rename/copy 检测。 |
@@ -178,7 +179,7 @@ libra --json show HEAD              # 结构化 JSON 输出
 
 ### `--pretty` / `--format` 与结构化 JSON
 
-`--pretty=<fmt>` 及其别名 `--format=<fmt>` 以 `oneline` 预设或 `%` 占位符模板（`format:`/`tformat:`/裸模板）渲染 commit header，复用 `libra log` 的 formatter。命名预设 `short` / `full` / `fuller` / `reference` / `raw` 已单独渲染（结构对齐 Git 预设），`medium` 映射默认格式（这与尚未公开的 `--raw` diff 格式不同）。对程序消费者，仍推荐 `--json`：它在类型良好、按类型判别的 schema 中提供每个字段（类型化字段而非字符串解析），避免格式字符串的脆弱性。
+`--pretty=<fmt>` 及其别名 `--format=<fmt>` 以 `oneline` 预设或 `%` 占位符模板（`format:`/`tformat:`/裸模板）渲染 commit header，复用 `libra log` 的 formatter。命名预设 `short` / `full` / `fuller` / `reference` / `raw` 已单独渲染（结构对齐 Git 预设），`medium` 映射默认格式（这与 `--raw` diff 格式不同——见 `--raw` 选项，它选择原始 `:<old-mode> <new-mode> …` diff 格式而非预设）。对程序消费者，仍推荐 `--json`：它在类型良好、按类型判别的 schema 中提供每个字段（类型化字段而非字符串解析），避免格式字符串的脆弱性。
 
 ### 为什么使用类型感知 JSON schema？
 
