@@ -69,6 +69,7 @@ EXAMPLES:
     libra commit --amend --no-edit                   Amend without changing the message
     libra commit -a -m 'Fix typo'                    Auto-stage tracked changes and commit
     libra commit -F message.txt                      Read commit message from file
+    libra commit -t template.txt                     Seed the message from a template file
     libra commit -s -m 'Add feature'                 Add Signed-off-by trailer
     libra commit -e -m 'Draft'                       Edit the message in $EDITOR before committing
     libra commit -v                                  Show the staged diff in the editor template
@@ -86,6 +87,13 @@ pub struct CommitArgs {
     /// read message from file
     #[arg(short = 'F', long)]
     pub file: Option<String>,
+
+    /// Use the contents of FILE as the initial commit message (seeds the editor,
+    /// or is used directly with --no-edit), matching `git commit -t`. Falls back
+    /// to the `commit.template` config when unset. Ignored when a message source
+    /// (-m/-F/-C/-c/--fixup/--squash) is given.
+    #[arg(short = 't', long = "template", value_name = "FILE")]
+    pub template: Option<String>,
 
     /// allow commit with empty index
     #[arg(long)]
@@ -236,6 +244,12 @@ pub enum CommitError {
     #[error("failed to read message file '{path}': {detail}")]
     MessageFileRead { path: String, detail: String },
 
+    #[error("could not read commit template '{path}': {detail}")]
+    TemplateRead { path: String, detail: String },
+
+    #[error("aborting commit; you did not edit the message")]
+    TemplateUnedited,
+
     #[error("aborting commit due to empty commit message")]
     EmptyMessage,
 
@@ -308,6 +322,12 @@ impl From<CommitError> for CliError {
             CommitError::MessageFileRead { .. } => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            CommitError::TemplateRead { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            CommitError::TemplateUnedited => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("edit the message in the editor, or pass -m to set it directly"),
             CommitError::EmptyMessage => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("use -m to provide a commit message"),
@@ -631,7 +651,12 @@ pub async fn run_commit(
             parent_commit.author.clone()
         };
 
-        let final_message = if args.no_edit {
+        // `--amend --no-edit` reuses the parent message verbatim (no re-cleanup),
+        // EXCEPT when an explicit `-t/--template` supplied a message — then the
+        // resolved template wins (matching Git, where `-t` overrides the amend
+        // parent message). Other message sources (`-m`/`-F`/`-C`) keep their
+        // existing behavior.
+        let final_message = if args.no_edit && args.template.is_none() {
             parent_commit.message.clone()
         } else {
             message.clone()
@@ -846,14 +871,27 @@ async fn resolve_final_message(
     let needs_editor =
         args.edit || args.reedit_message.is_some() || (base.is_none() && !args.no_edit);
 
+    // `-t`/`--template` (or the `commit.template` config) seeds the message only
+    // when no explicit source was supplied (a message source wins, and the
+    // template is then not even read — matching Git). The template takes
+    // precedence over the amend parent's message as the editor seed.
+    let template_content = if base.is_none() {
+        resolve_commit_template(args).await?
+    } else {
+        None
+    };
+
     // Initial editor buffer / non-editor fallback: the explicit source, else the
-    // amend parent's message, else empty.
+    // template, else the amend parent's message, else empty.
     let initial = match &base {
         Some(text) => text.clone(),
-        None if args.amend && !parent_ids.is_empty() => load_object::<Commit>(&parent_ids[0])
-            .map(|commit| commit.message.trim_start_matches('\n').to_string())
-            .unwrap_or_default(),
-        None => String::new(),
+        None => match &template_content {
+            Some(template) => template.clone(),
+            None if args.amend && !parent_ids.is_empty() => load_object::<Commit>(&parent_ids[0])
+                .map(|commit| commit.message.trim_start_matches('\n').to_string())
+                .unwrap_or_default(),
+            None => String::new(),
+        },
     };
 
     // The cleanup mode and verbose flag fall back to `commit.cleanup` /
@@ -921,6 +959,7 @@ async fn resolve_final_message(
         None
     };
 
+    let editor_opened = editor_cmd.is_some();
     let resolved = if let Some(editor_cmd) = editor_cmd {
         let buffer = if verbose {
             build_verbose_template(&initial, status_section.as_deref(), cleanup_strips_comments)
@@ -966,6 +1005,23 @@ async fn resolve_final_message(
         cleanup_commit_message(&initial, effective_mode)
     };
 
+    // When a template seeded the message and the editor was meant to open
+    // (i.e. NOT `--no-edit`), Git aborts unless the user actually edited it:
+    //   - editor ran but the result equals the cleaned template → unedited;
+    //   - the editor was required but none was available → never edited.
+    // `--no-edit` (needs_editor == false) bypasses this and uses the template
+    // directly.
+    if let Some(template) = &template_content {
+        let unedited = if editor_opened {
+            resolved == cleanup_commit_message(template, mode)
+        } else {
+            needs_editor
+        };
+        if unedited {
+            return Err(CommitError::TemplateUnedited);
+        }
+    }
+
     if resolved.trim().is_empty() {
         return Err(CommitError::EmptyMessage);
     }
@@ -975,6 +1031,46 @@ async fn resolve_final_message(
     } else {
         Ok(append_trailers(&resolved, &args.trailers))
     }
+}
+
+/// Resolve the commit message template: the `-t`/`--template` file when given,
+/// otherwise the `commit.template` config (a file path), otherwise `None`. A
+/// leading `~/` is expanded to `$HOME`. The caller only invokes this when no
+/// explicit message source was supplied, so a `-t` path is never read when a
+/// message source (e.g. `-m`) wins — matching Git, which then ignores `-t`.
+async fn resolve_commit_template(args: &CommitArgs) -> Result<Option<String>, CommitError> {
+    let path = match &args.template {
+        // An explicit `-t` always applies (it overrides the amend parent message).
+        Some(path) => Some(path.clone()),
+        // The `commit.template` config seeds new commits only — `--amend` reuses
+        // the parent message, so the config template is not consulted there (and
+        // is not read, so a bad config path cannot break an `--amend` reuse).
+        None if !args.amend => {
+            read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, "commit.template")
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.clone(),
+        },
+        None => path.clone(),
+    };
+    let content =
+        tokio::fs::read_to_string(&expanded)
+            .await
+            .map_err(|e| CommitError::TemplateRead {
+                path,
+                detail: e.to_string(),
+            })?;
+    Ok(Some(content))
 }
 
 /// Build the `commit -v` editor template: the initial message, a commented

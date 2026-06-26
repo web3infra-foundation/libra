@@ -345,7 +345,6 @@ fn cleanup_flag_overrides_config() {
 }
 
 #[test]
-#[ignore = "PR-15 scope: -t/--template is deferred (see plan D10)"]
 fn template_t_flag_loads_initial_content() {
     // -t supplies the initial message; with --no-edit it is used directly.
     let temp = tempdir().unwrap();
@@ -363,6 +362,188 @@ fn template_t_flag_loads_initial_content() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(last_commit_message(&repo).contains("templated subject"));
+}
+
+#[cfg(unix)]
+#[test]
+fn template_seeds_editor_and_edited_message_is_committed() {
+    // -t seeds the editor buffer; an editor that rewrites the message commits
+    // the edited content (and does NOT trigger the unedited-template abort).
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "a.txt", "x\n");
+    let tpl = temp.path().join("tpl.txt");
+    fs::write(&tpl, "templated subject\n").unwrap();
+    let editor = write_editor_script(temp.path(), "ed.sh", "brand new message\\n");
+
+    let out = run_libra_env(
+        &["commit", "-t", tpl.to_str().unwrap()],
+        &repo,
+        &[("EDITOR", &editor)],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "templated editor commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let message = last_commit_message(&repo);
+    assert!(
+        message.contains("brand new message"),
+        "the edited message should be committed: {message}"
+    );
+    assert!(
+        !message.contains("templated subject"),
+        "the template was replaced by the edit: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn template_overrides_amend_parent_message_with_no_edit() {
+    // `--amend --no-edit -t` uses the template directly, overriding the amend
+    // parent message (matching Git's `-t` precedence over the reused message).
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "a.txt", "x\n");
+    let first = run_libra(&["commit", "-m", "original parent", "--no-verify"], &repo);
+    assert_eq!(first.status.code(), Some(0));
+    let tpl = temp.path().join("tpl.txt");
+    fs::write(&tpl, "templated amend message\n").unwrap();
+
+    stage_file(&repo, "a.txt", "y\n");
+    let out = run_libra(
+        &[
+            "commit",
+            "--amend",
+            "--no-edit",
+            "-t",
+            tpl.to_str().unwrap(),
+            "--no-verify",
+        ],
+        &repo,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "amend with template failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let message = last_commit_message(&repo);
+    assert!(
+        message.contains("templated amend message"),
+        "the template overrides the amend parent message: {message}"
+    );
+    assert!(
+        !message.contains("original parent"),
+        "the parent message was replaced by the template: {message}"
+    );
+}
+
+#[test]
+fn amend_no_edit_ignores_bad_commit_template_config() {
+    // A bad `commit.template` config must NOT break a bare `--amend --no-edit`
+    // (the config template seeds new commits, not the amend parent reuse), so
+    // it is never read on this path.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    assert!(
+        run_libra(
+            &["config", "commit.template", "/nonexistent/template/path"],
+            &repo,
+        )
+        .status
+        .success()
+    );
+    stage_file(&repo, "a.txt", "x\n");
+    assert_eq!(
+        run_libra(&["commit", "-m", "amend parent", "--no-verify"], &repo)
+            .status
+            .code(),
+        Some(0)
+    );
+
+    stage_file(&repo, "a.txt", "y\n");
+    let out = run_libra(&["commit", "--amend", "--no-edit", "--no-verify"], &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bare --amend --no-edit must not read/fail on commit.template: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("commit template"),
+        "the bad commit.template config must not be read on amend reuse: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        last_commit_message(&repo).contains("amend parent"),
+        "the amend reuses the parent message: {}",
+        last_commit_message(&repo)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn template_requires_editing_when_no_editor_available() {
+    // `-t` (without --no-edit) needs the editor; with no editor configured and a
+    // non-interactive stdin the template is never edited, so the commit aborts
+    // rather than silently committing the unedited template.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "a.txt", "x\n");
+    let tpl = temp.path().join("tpl.txt");
+    fs::write(&tpl, "templated subject\n").unwrap();
+
+    // run_libra strips GIT_EDITOR/EDITOR; with no editor env and a piped stdin,
+    // no editor can open.
+    let out = run_libra(
+        &["commit", "-t", tpl.to_str().unwrap(), "--no-verify"],
+        &repo,
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "an unedited template with no editor must abort"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("did not edit the message"),
+        "abort names the unedited template: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn template_left_unedited_aborts() {
+    // -t seeds the editor; leaving the buffer unchanged (a no-op `true` editor)
+    // aborts with Git's "you did not edit the message" message.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    stage_file(&repo, "a.txt", "x\n");
+    let tpl = temp.path().join("tpl.txt");
+    fs::write(&tpl, "templated subject\n").unwrap();
+
+    let out = run_libra_env(
+        &["commit", "-t", tpl.to_str().unwrap()],
+        &repo,
+        &[("EDITOR", "true")],
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "an unedited template must abort the commit"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("did not edit the message"),
+        "abort names the unedited template: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `commit -v`: the editor template must contain the scissors marker and the

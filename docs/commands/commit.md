@@ -11,6 +11,7 @@ libra commit [OPTIONS] -m <MESSAGE>
 libra commit [OPTIONS] -F <FILE>
 libra commit [OPTIONS] -C <COMMIT>
 libra commit [OPTIONS] -c <COMMIT>
+libra commit [OPTIONS] -t <FILE>
 libra commit [OPTIONS] --fixup <COMMIT>
 libra commit [OPTIONS] --squash <COMMIT>
 libra commit --amend [--no-edit]
@@ -46,6 +47,20 @@ message is the initial buffer). Conflicts with `--no-edit`.
 
 ```bash
 libra commit -e -m "Draft message"
+```
+
+### `-t, --template <FILE>`
+
+Use the contents of `FILE` as the initial commit message. With the editor open (the default
+when no other message source is given), `FILE` seeds the editor buffer; with `--no-edit` it is
+used directly. When the `-t` flag is unset, the `commit.template` config (a file path, with a
+leading `~/` expanded to `$HOME`) is consulted. The template is **ignored** when a message
+source (`-m`/`-F`/`-C`/`-c`/`--fixup`/`--squash`) is given — that source wins and the template
+file is not even read. As in Git, if the editor leaves the template unchanged the commit is
+aborted ("you did not edit the message"); `--no-edit` bypasses that check.
+
+```bash
+libra commit -t .libra/commit-template.txt
 ```
 
 ### `-v, --verbose`

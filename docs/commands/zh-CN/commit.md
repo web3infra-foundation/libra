@@ -36,6 +36,14 @@ libra commit -m "Add new feature"
 libra commit -F message.txt
 ```
 
+### `-t, --template <FILE>`
+
+以 `FILE` 内容作为初始提交消息：打开编辑器时（无其它消息源的默认情形）用作编辑器初始缓冲，`--no-edit` 时直接用作消息。`-t` 未给时回落到 `commit.template` 配置（文件路径，前导 `~/` 展开为 `$HOME`）。当提供消息源（`-m`/`-F`/`-C`/`-c`/`--fixup`/`--squash`）时模板被忽略——该源胜出，模板文件甚至不会被读取。与 Git 一致：若编辑器未改动模板，则中止提交（"you did not edit the message"）；`--no-edit` 不触发该检查。
+
+```bash
+libra commit -t .libra/commit-template.txt
+```
+
 ### `--amend`
 
 通过创建新提交替换当前分支 tip。新提交拥有与被替换提交相同的父提交。不能 amend merge commits（有多个父提交的提交）。
