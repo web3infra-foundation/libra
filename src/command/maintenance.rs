@@ -725,11 +725,9 @@ async fn run_commit_graph(
     if commits.is_empty() {
         return Ok(skip("no commits to index; skipped"));
     }
-    if commits.values().any(|c| c.parent_commit_ids.len() > 2) {
-        return Ok(skip(
-            "octopus merges (>2 parents) are not yet supported by the commit-graph writer; skipped",
-        ));
-    }
+    // Octopus merges (>2 parents) are written via the EDGE chunk by
+    // `build_commit_graph`. SHA-256 repositories still need the wider hashes and
+    // a SHA-256 trailer, which the writer does not yet emit.
     if commits.keys().next().map(ObjectHash::kind) == Some(HashKind::Sha256) {
         return Ok(skip(
             "commit-graph for SHA-256 repositories is not yet supported; skipped",
@@ -786,11 +784,17 @@ fn compute_generations(commits: &HashMap<ObjectHash, Commit>) -> HashMap<ObjectH
     generations
 }
 
-/// Encode a v1 commit-graph file (SHA-1, ≤2 parents per commit) with the OIDF,
-/// OIDL, and CDAT chunks and a trailing SHA-1 checksum, matching Git's format.
+/// Encode a v1 commit-graph file (SHA-1) with the OIDF, OIDL, and CDAT chunks —
+/// plus an EDGE chunk when any commit has more than two parents (octopus
+/// merges) — and a trailing SHA-1 checksum, matching Git's format.
 fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> {
     /// Sentinel parent slot meaning "no parent" (GRAPH_PARENT_NONE).
     const GRAPH_PARENT_NONE: u32 = 0x7000_0000;
+    /// In a CDAT second-parent slot, this high bit means "more than two parents:
+    /// the low 31 bits are an index into the EDGE chunk" (GRAPH_EXTRA_EDGES_NEEDED).
+    const GRAPH_EXTRA_EDGES_NEEDED: u32 = 0x8000_0000;
+    /// In the EDGE chunk, this high bit marks a commit's final extra parent.
+    const GRAPH_LAST_EDGE: u32 = 0x8000_0000;
     if commits.is_empty() {
         return None;
     }
@@ -806,6 +810,42 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
     let n = oids.len();
     let generations = compute_generations(commits);
 
+    // Pre-compute each commit's two CDAT parent slots and, for octopus merges
+    // (>2 parents), the EDGE chunk holding parents 2..N. A commit with >2
+    // parents stores `GRAPH_EXTRA_EDGES_NEEDED | <edge index>` in its second
+    // slot; the EDGE chunk then lists those parents' positions, the last one
+    // OR-ed with `GRAPH_LAST_EDGE`.
+    let mut parent_slots: Vec<(u32, u32)> = Vec::with_capacity(n);
+    let mut edge_data: Vec<u32> = Vec::new();
+    for o in &oids {
+        let parents = &commits[o].parent_commit_ids;
+        let p1 = parents
+            .first()
+            .and_then(|p| pos.get(p))
+            .copied()
+            .unwrap_or(GRAPH_PARENT_NONE);
+        let p2 = if parents.len() <= 2 {
+            parents
+                .get(1)
+                .and_then(|p| pos.get(p))
+                .copied()
+                .unwrap_or(GRAPH_PARENT_NONE)
+        } else {
+            let edge_index = edge_data.len() as u32;
+            let extra = &parents[1..];
+            for (i, par) in extra.iter().enumerate() {
+                let mut slot = pos.get(par).copied().unwrap_or(GRAPH_PARENT_NONE);
+                if i + 1 == extra.len() {
+                    slot |= GRAPH_LAST_EDGE;
+                }
+                edge_data.push(slot);
+            }
+            GRAPH_EXTRA_EDGES_NEEDED | edge_index
+        };
+        parent_slots.push((p1, p2));
+    }
+    let has_edges = !edge_data.is_empty();
+
     // Cumulative OID fanout over the first OID byte.
     let mut fanout = [0u32; 256];
     for o in &oids {
@@ -817,16 +857,25 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
         *slot = acc;
     }
 
-    let toc_len = 4u64 * 12; // OIDF, OIDL, CDAT + terminator
+    // The EDGE chunk (when present) follows CDAT; the chunk count and offsets
+    // grow accordingly.
+    let num_chunks: u8 = if has_edges { 4 } else { 3 };
+    let toc_len = (num_chunks as u64 + 1) * 12; // chunks + terminator entry
     let oidf_off = 8 + toc_len;
     let oidl_off = oidf_off + 1024;
     let cdat_off = oidl_off + (n as u64) * (hash_len as u64);
-    let trailer_off = cdat_off + (n as u64) * (hash_len as u64 + 16);
+    let edge_off = cdat_off + (n as u64) * (hash_len as u64 + 16);
+    let edge_bytes = edge_data.len() as u64 * 4;
+    let trailer_off = if has_edges {
+        edge_off + edge_bytes
+    } else {
+        cdat_off + (n as u64) * (hash_len as u64 + 16)
+    };
 
     let mut buf: Vec<u8> = Vec::with_capacity(trailer_off as usize + hash_len);
-    // Header: "CGPH", version 1, hash version 1 (SHA-1), 3 chunks, 0 base graphs.
+    // Header: "CGPH", version 1, hash version 1 (SHA-1), N chunks, 0 base graphs.
     buf.extend_from_slice(b"CGPH");
-    buf.extend_from_slice(&[1, 1, 3, 0]);
+    buf.extend_from_slice(&[1, 1, num_chunks, 0]);
     // Chunk table of contents.
     buf.extend_from_slice(b"OIDF");
     buf.extend_from_slice(&oidf_off.to_be_bytes());
@@ -834,6 +883,10 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
     buf.extend_from_slice(&oidl_off.to_be_bytes());
     buf.extend_from_slice(b"CDAT");
     buf.extend_from_slice(&cdat_off.to_be_bytes());
+    if has_edges {
+        buf.extend_from_slice(b"EDGE");
+        buf.extend_from_slice(&edge_off.to_be_bytes());
+    }
     buf.extend_from_slice(&[0u8; 4]);
     buf.extend_from_slice(&trailer_off.to_be_bytes());
     // OIDF.
@@ -845,20 +898,9 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
         buf.extend_from_slice(o.as_ref());
     }
     // CDAT.
-    for o in &oids {
+    for (o, (p1, p2)) in oids.iter().zip(&parent_slots) {
         let commit = &commits[o];
         buf.extend_from_slice(commit.tree_id.as_ref());
-        let parents = &commit.parent_commit_ids;
-        let p1 = parents
-            .first()
-            .and_then(|p| pos.get(p))
-            .copied()
-            .unwrap_or(GRAPH_PARENT_NONE);
-        let p2 = parents
-            .get(1)
-            .and_then(|p| pos.get(p))
-            .copied()
-            .unwrap_or(GRAPH_PARENT_NONE);
         buf.extend_from_slice(&p1.to_be_bytes());
         buf.extend_from_slice(&p2.to_be_bytes());
         // Last 8 bytes pack generation (top 30 bits) + commit time (34 bits).
@@ -868,6 +910,12 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
         let second = (t & 0xFFFF_FFFF) as u32;
         buf.extend_from_slice(&first.to_be_bytes());
         buf.extend_from_slice(&second.to_be_bytes());
+    }
+    // EDGE (octopus extra parents), when present.
+    if has_edges {
+        for slot in &edge_data {
+            buf.extend_from_slice(&slot.to_be_bytes());
+        }
     }
     // Trailer: SHA-1 checksum of everything written so far.
     let digest = sha1::Sha1::digest(&buf);
@@ -1844,5 +1892,98 @@ mod tests {
                 assert_eq!(genhi >> 2, 1, "root generation is 1");
             }
         }
+    }
+
+    #[test]
+    fn commit_graph_build_writes_octopus_edge_chunk() {
+        use std::str::FromStr;
+
+        use git_internal::internal::object::signature::Signature;
+
+        git_internal::hash::set_hash_kind(HashKind::Sha1);
+
+        let tree = ObjectHash::from_str("2222222222222222222222222222222222222222").unwrap();
+        let sig =
+            Signature::from_data(b"committer t <t@example.com> 1000000000 +0000".to_vec()).unwrap();
+        // Three distinct roots (distinct messages → distinct ids) and a merge
+        // that has all three as parents (an octopus merge, >2 parents).
+        let p1 = Commit::new(sig.clone(), sig.clone(), tree, vec![], "p1");
+        let p2 = Commit::new(sig.clone(), sig.clone(), tree, vec![], "p2");
+        let p3 = Commit::new(sig.clone(), sig.clone(), tree, vec![], "p3");
+        let (p1id, p2id, p3id) = (p1.id, p2.id, p3.id);
+        let merge = Commit::new(
+            sig.clone(),
+            sig.clone(),
+            tree,
+            vec![p1id, p2id, p3id],
+            "octopus",
+        );
+        let merge_id = merge.id;
+
+        let mut commits = HashMap::new();
+        for c in [p1, p2, p3, merge] {
+            commits.insert(c.id, c);
+        }
+        let bytes = build_commit_graph(&commits).expect("commit-graph bytes");
+
+        // Octopus merges add the EDGE chunk, so the header now has 4 chunks.
+        assert_eq!(&bytes[0..4], b"CGPH");
+        assert_eq!(&bytes[4..8], &[1, 1, 4, 0]);
+
+        // The TOC (after the 8-byte header) lists OIDF/OIDL/CDAT/EDGE; read the
+        // CDAT and EDGE offsets from it.
+        let chunk_off = |id: &[u8; 4]| -> usize {
+            let mut i = 8;
+            loop {
+                let tag = &bytes[i..i + 4];
+                let off = u64::from_be_bytes(bytes[i + 4..i + 12].try_into().unwrap()) as usize;
+                if tag == id {
+                    return off;
+                }
+                assert_ne!(tag, &[0, 0, 0, 0], "chunk {id:?} present");
+                i += 12;
+            }
+        };
+        let cdat_off = chunk_off(b"CDAT");
+        let edge_off = chunk_off(b"EDGE");
+
+        let mut oids: Vec<ObjectHash> = commits.keys().copied().collect();
+        oids.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        let position = |id: &ObjectHash| oids.iter().position(|o| o == id).unwrap() as u32;
+        let merge_idx = oids.iter().position(|o| *o == merge_id).unwrap();
+
+        // The merge's CDAT entry: first parent is p1's position; the second slot
+        // has the EXTRA_EDGES_NEEDED high bit set, with an index into EDGE.
+        let stride = 20 + 16;
+        let base = cdat_off + merge_idx * stride;
+        let mp1 = u32::from_be_bytes(bytes[base + 20..base + 24].try_into().unwrap());
+        let mp2 = u32::from_be_bytes(bytes[base + 24..base + 28].try_into().unwrap());
+        assert_eq!(mp1, position(&p1id), "octopus first parent is p1");
+        assert_eq!(mp2 & 0x8000_0000, 0x8000_0000, "EXTRA_EDGES_NEEDED bit set");
+        let edge_index = (mp2 & 0x7fff_ffff) as usize;
+
+        // The EDGE chunk holds parents 2..N (p2, p3); the last entry has the
+        // GRAPH_LAST_EDGE high bit set.
+        let e0 = u32::from_be_bytes(
+            bytes[edge_off + edge_index * 4..edge_off + edge_index * 4 + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let e1 = u32::from_be_bytes(
+            bytes[edge_off + (edge_index + 1) * 4..edge_off + (edge_index + 1) * 4 + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            e0,
+            position(&p2id),
+            "first extra edge is p2 (no terminator)"
+        );
+        assert_eq!(e1 & 0x7fff_ffff, position(&p3id), "second extra edge is p3");
+        assert_eq!(e1 & 0x8000_0000, 0x8000_0000, "last extra edge terminated");
+
+        // Trailer still covers the whole body including the EDGE chunk.
+        let body = &bytes[..bytes.len() - 20];
+        assert_eq!(&sha1::Sha1::digest(body)[..], &bytes[bytes.len() - 20..]);
     }
 }
