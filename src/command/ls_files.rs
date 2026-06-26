@@ -23,8 +23,8 @@ pub const LS_FILES_EXAMPLES: &str = "\
 EXAMPLES:
     libra ls-files                      List all files in the index (cached)
     libra ls-files --cached             Show only files staged in the index
-    libra ls-files --deleted            Show only deleted files
-    libra ls-files --modified           Show only modified files
+    libra ls-files -d                   Show only deleted files (-d = --deleted)
+    libra ls-files -m                   Show only modified files (-m = --modified)
     libra ls-files --stage              Include stage information (for conflicts)
     libra ls-files --others             Show untracked files
     libra ls-files --exclude-standard   Exclude files matching .libraignore
@@ -45,11 +45,11 @@ pub struct LsFilesArgs {
     pub cached: bool,
 
     /// Show only deleted files
-    #[clap(long)]
+    #[clap(long, short = 'd')]
     pub deleted: bool,
 
     /// Show only modified files
-    #[clap(long)]
+    #[clap(long, short = 'm')]
     pub modified: bool,
 
     /// Include stage information for conflict resolution

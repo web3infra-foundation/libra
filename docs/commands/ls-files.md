@@ -35,8 +35,8 @@ sparse-checkout integration remain deferred.
 | Option | Description |
 |--------|-------------|
 | `--cached` | Show cached index entries. This is the default when no state filter is provided. |
-| `--deleted` | Show tracked paths whose working-tree file is missing. |
-| `--modified` | Show tracked paths whose working-tree content hash differs from the index. |
+| `--deleted`, `-d` | Show tracked paths whose working-tree file is missing. |
+| `--modified`, `-m` | Show tracked paths whose working-tree content hash differs from the index. |
 | `--stage` | Print stage-style records, including conflict stages when present. |
 | `-s` | Short alias for stage-style output: `<mode> <object> <stage>\t<path>`. |
 | `--abbrev[=<n>]` | Abbreviate the object name to `<n>` hex digits in `-s`/`--stage` output. Bare `--abbrev` uses 7; `--abbrev=<n>` sets the length (the value requires the `=` form, so bare `--abbrev` never consumes a following pathspec). Libra truncates to a fixed length rather than computing the shortest unique prefix. |
@@ -129,8 +129,8 @@ entries use `null` for fields that do not apply:
 | Feature | Libra | Git | Jujutsu |
 |---------|-------|-----|---------|
 | Cached index listing | Default / `--cached` | Default / `--cached` | Use status/file commands |
-| Modified tracked files | `--modified` | `--modified` | Use status/diff commands |
-| Deleted tracked files | `--deleted` | `--deleted` | Use status commands |
+| Modified tracked files | `-m` / `--modified` | `-m` / `--modified` | Use status/diff commands |
+| Deleted tracked files | `-d` / `--deleted` | `-d` / `--deleted` | Use status commands |
 | Stage-style output | `--stage` / `-s` | `--stage` / `-s` | Different model |
 | Abbreviate object name | `--abbrev[=<n>]` (fixed-length) | `--abbrev[=<n>]` (shortest unique) | N/A |
 | Untracked files | `--others` | `--others` | Use status/file commands |

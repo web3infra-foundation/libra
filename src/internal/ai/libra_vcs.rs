@@ -494,11 +494,15 @@ fn ls_files_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
     if matches!(
         arg,
         "--cached"
+            | "-c"
             | "--deleted"
+            | "-d"
             | "--modified"
+            | "-m"
             | "--stage"
             | "-s"
             | "--others"
+            | "-o"
             | "--exclude-standard"
             | "--error-unmatch"
             | "--json"
@@ -507,6 +511,19 @@ fn ls_files_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
     ) || arg.starts_with("--json=")
         || arg.starts_with("-J=")
         || !arg.starts_with('-')
+    {
+        return (ArgSafety::Allow, idx + 1);
+    }
+
+    // Clap expands grouped boolean shorts (e.g. `-dm` == `-d -m`), so a single
+    // `-…` token is read-only iff every letter is an allowlisted read-only short
+    // (`-z` is intentionally excluded, keeping `-z`/`-dz` unknown).
+    if !arg.starts_with("--")
+        && let Some(group) = arg.strip_prefix('-')
+        && !group.is_empty()
+        && group
+            .chars()
+            .all(|c| matches!(c, 'c' | 'd' | 'm' | 'o' | 's' | 'J'))
     {
         return (ArgSafety::Allow, idx + 1);
     }

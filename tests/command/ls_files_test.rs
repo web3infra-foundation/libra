@@ -768,3 +768,41 @@ fn test_ls_files_ignored() {
         String::from_utf8_lossy(&no_exclude.stderr)
     );
 }
+
+#[test]
+fn modified_and_deleted_short_flags_alias_long_forms() {
+    let repo = setup_ls_files_repo();
+    let p = repo.path();
+
+    // `-m` is `--modified`: the fixture modifies `tracked.txt`.
+    let m_short = run_libra_command(&["ls-files", "-m"], p);
+    assert_cli_success(&m_short, "ls-files -m");
+    let m_long = run_libra_command(&["ls-files", "--modified"], p);
+    assert_cli_success(&m_long, "ls-files --modified");
+    assert_eq!(
+        stdout_lines(&m_short),
+        stdout_lines(&m_long),
+        "-m must match --modified"
+    );
+    assert!(
+        stdout_lines(&m_short).contains(&"tracked.txt".to_string()),
+        "-m lists the modified file: {:?}",
+        stdout_lines(&m_short)
+    );
+
+    // `-d` is `--deleted`: the fixture removes `delete.txt`.
+    let d_short = run_libra_command(&["ls-files", "-d"], p);
+    assert_cli_success(&d_short, "ls-files -d");
+    let d_long = run_libra_command(&["ls-files", "--deleted"], p);
+    assert_cli_success(&d_long, "ls-files --deleted");
+    assert_eq!(
+        stdout_lines(&d_short),
+        stdout_lines(&d_long),
+        "-d must match --deleted"
+    );
+    assert!(
+        stdout_lines(&d_short).contains(&"delete.txt".to_string()),
+        "-d lists the deleted file: {:?}",
+        stdout_lines(&d_short)
+    );
+}

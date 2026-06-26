@@ -57,6 +57,10 @@ fn ai_libra_vcs_safety_allows_read_only_parameter_combinations() {
         ("branch", vec!["--show-current"]),
         ("ls-files", vec!["--others", "--exclude-standard"]),
         ("ls-files", vec!["--error-unmatch", "src"]),
+        // Git's read-only mode short aliases mirror their long forms, including
+        // clap's grouped form (`-dm` == `-d -m`).
+        ("ls-files", vec!["-c", "-d", "-m", "-o"]),
+        ("ls-files", vec!["-dm"]),
     ] {
         let decision = classify_run_libra_vcs_safety(command, &strings(&args));
 
@@ -86,6 +90,8 @@ fn ai_libra_vcs_safety_requires_human_for_recoverable_or_unknown_combinations() 
             "libra_vcs.recoverable_mutation",
         ),
         ("ls-files", vec!["-z"], "libra_vcs.unknown_args"),
+        // A grouped short containing a non-allowlisted letter (`z`) stays unknown.
+        ("ls-files", vec!["-dz"], "libra_vcs.unknown_args"),
         ("status", vec!["--unknown"], "libra_vcs.unknown_args"),
         ("stash", vec!["pop"], "libra_vcs.unknown_command"),
     ] {
