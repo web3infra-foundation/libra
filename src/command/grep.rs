@@ -4,7 +4,7 @@
 use std::{
     fs,
     io::{BufRead, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::Parser;
@@ -50,6 +50,7 @@ EXAMPLES:
     libra grep -c 'unsafe' src/           Per-file match counts
     libra grep -l 'unwrap()' src/         Just the filenames that have matches
     libra grep -m 3 'TODO' src/           Stop after 3 matches per file
+    libra grep --max-depth 1 'TODO' src/  Limit the search to 1 directory level below src/
     libra grep -o 'v[0-9]*' CHANGELOG     Print only the matched substrings
     libra grep -e 'TODO' -e 'FIXME'       Match either of multiple regexps
     libra grep --cached 'TODO'            Search files staged in the index instead of the worktree
@@ -194,6 +195,16 @@ pub struct GrepArgs {
     /// Stop after NUM matching lines per file.
     #[clap(short = 'm', long = "max-count", value_name = "NUM")]
     max_count: Option<usize>,
+
+    /// For each pathspec, descend at most DEPTH levels of directories below it
+    /// (0 = only files directly in the pathspec, with no pathspec = top-level
+    /// files). A negative value means no limit.
+    #[clap(
+        long = "max-depth",
+        value_name = "DEPTH",
+        allow_negative_numbers = true
+    )]
+    max_depth: Option<i64>,
 
     /// Print only the matched (non-empty) parts of a matching line, one match
     /// per output line (context lines are suppressed).
@@ -618,29 +629,108 @@ fn escape_regex(s: &str) -> String {
 
 /// Get the list of files to search, respecting pathspec and ignore rules.
 async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
-    if args.no_index {
-        // Search the filesystem directly (no repository / index).
-        return get_no_index_files(&args.pathspec);
-    }
     if args.untracked && args.tree.is_some() {
         return Err(
             CliError::command_usage("--untracked cannot be used with a --tree revision")
                 .with_stable_code(StableErrorCode::CliInvalidArguments),
         );
     }
-    if let Some(tree_ref) = &args.tree {
+
+    let files = if args.no_index {
+        // Search the filesystem directly (no repository / index).
+        get_no_index_files(&args.pathspec)?
+    } else if let Some(tree_ref) = &args.tree {
         // Search in a specific tree/commit
-        get_tree_files(tree_ref, &args.pathspec).await
+        get_tree_files(tree_ref, &args.pathspec).await?
     } else if args.cached {
         // Search in index (staged files)
-        get_index_files(&args.pathspec)
+        get_index_files(&args.pathspec)?
     } else if args.untracked {
         // Search tracked files plus untracked, non-ignored working-tree files.
-        get_working_tree_files_with_untracked(&args.pathspec)
+        get_working_tree_files_with_untracked(&args.pathspec)?
     } else {
         // Search in working tree
-        get_working_tree_files(&args.pathspec)
+        get_working_tree_files(&args.pathspec)?
+    };
+
+    Ok(apply_max_depth(files, args))
+}
+
+/// Drop files deeper than `--max-depth` levels below their matching pathspec
+/// (or below the search root when no pathspec is given). A negative depth, or
+/// no `--max-depth`, leaves the list unchanged. Depth is measured the same way
+/// as Git: a file directly inside a pathspec directory is depth 0.
+fn apply_max_depth(files: Vec<SearchFile>, args: &GrepArgs) -> Vec<SearchFile> {
+    let Some(max_depth) = args.max_depth else {
+        return files;
+    };
+    if max_depth < 0 {
+        return files;
     }
+    let max_depth = max_depth as usize;
+    // Normalise the pathspecs into the SAME path form as the collected file
+    // paths so the component math lines up: working-tree/index/tree paths are
+    // workdir-relative (`to_workdir_path`), while `--no-index` display paths are
+    // relative to the current directory.
+    let specs: Vec<PathBuf> = if args.no_index {
+        let cwd = util::cur_dir();
+        args.pathspec
+            .iter()
+            .map(|spec| {
+                let path = PathBuf::from(spec);
+                let absolute = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    cwd.join(&path)
+                };
+                pathdiff::diff_paths(&absolute, &cwd).unwrap_or(path)
+            })
+            .collect()
+    } else {
+        args.pathspec.iter().map(util::to_workdir_path).collect()
+    };
+    files
+        .into_iter()
+        .filter(|file| within_max_depth(&file.path, &specs, max_depth))
+        .collect()
+}
+
+/// Whether `file` is within `max_depth` directory levels of at least one of
+/// `specs` (or of the search root when `specs` is empty). The depth of a file
+/// is `components(file) - components(spec) - 1`, clamped at 0, so a file
+/// directly inside the pathspec (or a pathspec naming the file itself) is
+/// depth 0 — matching Git's `--max-depth`.
+fn within_max_depth(file: &Path, specs: &[PathBuf], max_depth: usize) -> bool {
+    let file_comps = path_depth_components(file);
+    if specs.is_empty() {
+        // No pathspec: depth is measured from the WORKTREE ROOT. Unlike Git
+        // (which scopes a no-pathspec search to the current directory), `libra
+        // grep` always searches the whole worktree with worktree-relative
+        // paths regardless of cwd; the implicit root therefore stays the
+        // worktree root. To limit to a subdirectory, pass it as a pathspec —
+        // then depth is measured relative to that pathspec, matching Git.
+        return file_comps.saturating_sub(1) <= max_depth;
+    }
+    specs.iter().any(|spec| {
+        if file == spec || util::is_sub_path(file, spec) {
+            let spec_comps = path_depth_components(spec);
+            let depth = file_comps.saturating_sub(spec_comps + 1);
+            depth <= max_depth
+        } else {
+            false
+        }
+    })
+}
+
+/// Count the path components that contribute to directory depth, ignoring
+/// `.` (`CurDir`) segments. A pathspec of `.` / `./` (the search root) thus
+/// has depth 0, matching `util::is_sub_path`'s normalization and Git's
+/// treatment of a root pathspec.
+fn path_depth_components(path: &Path) -> usize {
+    use std::path::Component;
+    path.components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .count()
 }
 
 /// Collect files for `--no-index`: walk the given paths (or the current directory)

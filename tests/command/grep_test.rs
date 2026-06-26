@@ -1113,3 +1113,112 @@ async fn test_grep_max_count_and_only_matching() {
         "line2 match offset 4 (not 8): {obm:?}"
     );
 }
+
+/// `--max-depth` limits how many directory levels below each pathspec (or below
+/// the search root when no pathspec is given) `grep` descends, matching Git: a
+/// file directly inside the pathspec directory is depth 0.
+#[tokio::test]
+#[serial]
+async fn test_grep_max_depth_limits_directory_descent() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::create_dir_all("a/b/c").expect("failed to create nested dirs");
+    fs::write("top.txt", "match\n").expect("write top");
+    fs::write("a/m1.txt", "match\n").expect("write a/m1");
+    fs::write("a/b/m2.txt", "match\n").expect("write a/b/m2");
+    fs::write("a/b/c/m3.txt", "match\n").expect("write a/b/c/m3");
+    add_and_commit(
+        "add nested files",
+        vec![
+            "top.txt".to_string(),
+            "a/m1.txt".to_string(),
+            "a/b/m2.txt".to_string(),
+            "a/b/c/m3.txt".to_string(),
+        ],
+    )
+    .await;
+
+    // Names with matches, sorted, for the given args.
+    let names = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["grep", "-l", "match"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, repo.path());
+        assert_cli_success(&out, "grep -l --max-depth");
+        let mut paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    // No pathspec: depth 0 is top-level files only; depth 1 adds files one
+    // directory down; a high depth (or negative) reaches everything.
+    assert_eq!(names(&["--max-depth", "0"]), vec!["top.txt"]);
+    assert_eq!(names(&["--max-depth", "1"]), vec!["a/m1.txt", "top.txt"]);
+    assert_eq!(
+        names(&["--max-depth", "2"]),
+        vec!["a/b/m2.txt", "a/m1.txt", "top.txt"]
+    );
+    assert_eq!(
+        names(&["--max-depth", "-1"]),
+        vec!["a/b/c/m3.txt", "a/b/m2.txt", "a/m1.txt", "top.txt"]
+    );
+
+    // With a pathspec, depth is measured relative to that directory: depth 0
+    // keeps only the files directly inside it.
+    assert_eq!(names(&["--max-depth", "0", "a"]), vec!["a/m1.txt"]);
+    assert_eq!(names(&["--max-depth", "0", "a/b"]), vec!["a/b/m2.txt"]);
+    assert_eq!(
+        names(&["--max-depth", "1", "a"]),
+        vec!["a/b/m2.txt", "a/m1.txt"]
+    );
+
+    // A pathspec naming a file exactly is always within depth 0 (no directory
+    // descent), and multiple pathspecs union their in-depth matches.
+    assert_eq!(
+        names(&["--max-depth", "0", "a/b/c/m3.txt"]),
+        vec!["a/b/c/m3.txt"]
+    );
+    assert_eq!(
+        names(&["--max-depth", "0", "a", "a/b"]),
+        vec!["a/b/m2.txt", "a/m1.txt"]
+    );
+
+    // A `.` / `./` pathspec is the search root (depth 0 = top-level files),
+    // matching Git — the `CurDir` component must not be counted toward depth.
+    assert_eq!(names(&["--max-depth", "0", "."]), vec!["top.txt"]);
+    assert_eq!(names(&["--max-depth", "0", "./"]), vec!["top.txt"]);
+
+    // Run from a subdirectory. `libra grep` searches the whole worktree with
+    // worktree-relative paths regardless of cwd, so with NO pathspec depth is
+    // measured from the worktree root (a deliberate Libra/Git difference: Git
+    // would scope to the current directory). With a pathspec, depth is measured
+    // relative to that pathspec — matching Git's file selection.
+    {
+        let subdir = repo.path().join("a");
+        let _guard = test::ChangeDirGuard::new(&subdir);
+        let names_from_sub = |args: &[&str]| -> Vec<String> {
+            let mut full = vec!["grep", "-l", "match"];
+            full.extend_from_slice(args);
+            let out = run_libra_command(&full, &subdir);
+            assert_cli_success(&out, "grep -l --max-depth from subdir");
+            let mut paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.to_string())
+                .collect();
+            paths.sort();
+            paths
+        };
+        // No pathspec: worktree-root-relative depth (top.txt is depth 0).
+        assert_eq!(names_from_sub(&["--max-depth", "0"]), vec!["top.txt"]);
+        // Pathspec `b` (relative to cwd `a/`): depth 0 keeps `a/b/m2.txt`,
+        // exactly the file Git would select (Git shows it as `b/m2.txt`).
+        assert_eq!(
+            names_from_sub(&["--max-depth", "0", "b"]),
+            vec!["a/b/m2.txt"]
+        );
+    }
+}

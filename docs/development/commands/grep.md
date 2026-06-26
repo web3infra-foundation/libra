@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra grep` 的目标是在已跟踪文件或指定范围内搜索文本模式。实现需要覆盖仓库内搜索、未跟踪/无仓库模式、忽略规则、输出格式和 byte offset，并把上下文行、扩展/Perl 正则、函数显示和深度限制作为后续兼容缺口。
+`libra grep` 的目标是在已跟踪文件或指定范围内搜索文本模式。实现需要覆盖仓库内搜索、未跟踪/无仓库模式、忽略规则、输出格式、byte offset、上下文行、扩展正则与深度限制（`--max-depth`）；剩余兼容缺口主要是 Perl 正则（`-P` 显式拒绝）与函数显示（`-p`/`-W`）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching`、`--untracked`（worktree 搜索额外纳入未跟踪、非忽略文件）、`--no-index`（无仓库、递归遍历文件系统、不套用 ignore）已支持。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching`、`--untracked`（worktree 搜索额外纳入未跟踪、非忽略文件）、`--no-index`（无仓库、递归遍历文件系统、不套用 ignore）、`--max-depth <DEPTH>`（每个 pathspec 下最多下降 DEPTH 层目录；无 pathspec 时相对搜索根；负值=无限制）已支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -53,7 +53,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/grep.md`。
 - Synopsis：`libra grep [<options>] [<pattern>] [<pathspec>...]`。
-- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached`、`--heading`/`--no-heading`、`--break`/`--no-break`、`-z, --null`、`-m, --max-count <NUM>`、`-o, --only-matching` 等。`-m`/`--max-count` 在 `search_in_content` 之后按文件截断到前 NUM 个真实匹配行（连同其后续上下文）；`-o`/`--only-matching` 用 `matcher.find_iter` 把每个匹配行展开为逐个匹配子串（每个匹配一行，上下文行被丢弃；`-b` 时输出每个匹配的行内字节偏移 `m.start()`，与 Libra 既有的行内 `-b`（首个匹配的行内偏移）一致）。
+- 公开参数/子命令包括：位置参数 `<PATTERN>`（可选，`pattern`）、位置参数 `<PATHS>...`（`pathspec`）、`-e, --regexp <PATTERN>`、`-f, --file <FILE>`、`--all-match`、`-F, --fixed-string`、`-E, --extended-regexp`、`-G, --basic-regexp`、`-P, --perl-regexp`（拒绝，退出 129）、`-i, --ignore-case`、`-c, --count`、`-l, --files-with-matches`、`-L, --files-without-matches`、`-n, --line-number`、`-w, --word-regexp`、`-v, --invert-match`、`-b, --byte-offset`、`-A, --after-context <NUM>`、`-B, --before-context <NUM>`、`-C, --context <NUM>`、`-a, --text`、`-I`、`--tree <REVISION>`、`--cached`、`--heading`/`--no-heading`、`--break`/`--no-break`、`-z, --null`、`-m, --max-count <NUM>`、`-o, --only-matching`、`--max-depth <DEPTH>` 等。`-m`/`--max-count` 在 `search_in_content` 之后按文件截断到前 NUM 个真实匹配行（连同其后续上下文）；`-o`/`--only-matching` 用 `matcher.find_iter` 把每个匹配行展开为逐个匹配子串（每个匹配一行，上下文行被丢弃；`-b` 时输出每个匹配的行内字节偏移 `m.start()`，与 Libra 既有的行内 `-b`（首个匹配的行内偏移）一致）。
 
 
 ## 还未实现的功能
@@ -64,7 +64,7 @@ flowchart TD
 | ✅ 已实现 | 扩展/基本正则 `-E`/`-G` | 已重新实现：作为别名接受（Libra 的 `regex` 引擎默认即 ERE 近似；`-G` 不做严格 BRE 翻译，属有意近似）。 |
 | ✅ 已实现（拒绝） | Perl 正则 `-P` | 已重新实现：显式拒绝并以退出码 129 返回 `grep -P/--perl-regexp is not supported`（命令层 usage 错误）。带集成测试。 |
 | 兼容差异项 | 显示函数 | 原始对照：不支持；相关参数/替代：-p / --show-function；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 最大深度 `--max-depth <DEPTH>` | 在 `get_search_files` 收集后由 `apply_max_depth` 统一过滤：把 pathspec 归一化到与文件路径同一形态（tracked/index/tree 用 `to_workdir_path` 的 workdir-relative；`--no-index` 用相对 cwd 的 display 形态），`within_max_depth` 按 `components(file) - components(spec) - 1`（clamp 0；无 pathspec 时 `components(file) - 1`）算深度，文件命中**任一** pathspec 的深度 ≤ DEPTH 即保留。pathspec 恰好命名某文件→深度 0 必留；负 DEPTH 或未给=不过滤。**有意差异（无 pathspec 时）**：libra grep 始终搜索整个工作树并返回工作树相对路径（与 cwd 无关，pre-existing 设计），故无 pathspec 时深度从**工作树根**度量，而非 git 的当前目录；要限定到子目录请将其作为 pathspec 传入（此时深度相对 pathspec，与 git 一致——已验证从子目录运行 `--max-depth 0 <subdir>` 选中的文件集与 git 相同）。与 git 差分验证（working-tree/`--cached`/`--tree`/`--no-index` × 无/单/深/精确文件/多 pathspec × depth 0/1/2/负）全部一致，带集成测试 `test_grep_max_depth_limits_directory_descent`（含从子目录运行的 pathspec-relative 断言）。 |
 | ✅ 已实现 | 搜索未跟踪文件 | `--untracked` 已重新落地（#160，原 `01997f50` 被 `900c062` 回退）：worktree 搜索时除 tracked 外，还纳入 `util::list_workdir_files()` 返回的未跟踪、非忽略文件（`get_working_tree_files_with_untracked`：tracked ∪ 未跟踪-非忽略，按路径排序，均从磁盘读取）。与 `--cached` 冲突（clap 129），与 `--tree` 同用为运行期 usage 错误（LBR-CLI-002）。与 git 差分验证（tracked+untracked，排除 ignored）。带集成测试 `test_grep_untracked_searches_untracked_non_ignored_files`。 |
 | ✅ 已实现 | 无仓库文件系统搜索 | `--no-index` 已重新落地（#161，原 `0e22f00d` 被 `900c062` 回退）：`get_no_index_files` 用 `walkdir` 从给定路径（或 cwd）递归遍历，纳入每个常规文件（**不**套用 ignore，与 git 一致；跳过 `.git`/`.libra` 目录与符号链接），显示路径相对 cwd（`pathdiff`），内容经 `SearchFile.read_override`（绝对路径）读取。`cli.rs` preflight 对 `Grep{no_index}` 返回 `CommandPreflight::none()`、`execute_safe` 跳过 `require_repo`，故仓库外可用。`conflicts_with_all = [cached, untracked, tree]`。与 git 差分验证（仓库外递归、路径参数、仓库内含 ignored）。带集成测试 `test_grep_no_index_searches_filesystem_without_repository`、`test_grep_no_index_searches_ignored_files_inside_repo`。 |
 | ✅ 已实现 | 文件名分组标题 `--heading`/`--no-heading` | 已重新实现：`--heading` 把文件名作为独立标题行打印，匹配行去掉每行文件名前缀；`--no-heading` 为默认。带集成测试（`test_grep_heading_groups_matches_under_file_name`）。 |
