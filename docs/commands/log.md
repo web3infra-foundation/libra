@@ -103,9 +103,17 @@ Show only the last line of the `--stat` output: ` N files changed, M insertions(
 deletions(-)` for each commit (the insertion/deletion clauses are omitted when zero),
 without the per-file breakdown.
 
+### `--patch-with-stat`
+
+Git's synonym for `-p --stat`: show the diffstat block followed by the full patch for each
+commit. An explicit `-p --stat` combination is equivalent and likewise shows both. (The
+diffstat and patch blocks follow Libra's existing `--stat`/`-p` rendering, so they differ
+slightly from Git's formatting.)
+
 ```bash
 libra log --stat
 libra log --shortstat
+libra log --patch-with-stat -1
 libra log --range main..feature
 libra log --all --oneline
 libra log --reverse --oneline

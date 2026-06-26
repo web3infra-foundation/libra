@@ -382,6 +382,7 @@ fn log_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
         "--oneline"
             | "--stat"
             | "--shortstat"
+            | "--patch-with-stat"
             | "--numstat"
             | "--summary"
             | "--patch"
@@ -440,6 +441,7 @@ fn show_arg_safety(args: &[String], idx: usize) -> (ArgSafety, usize) {
         arg,
         "--stat"
             | "--shortstat"
+            | "--patch-with-stat"
             | "--numstat"
             | "--summary"
             | "--name-only"

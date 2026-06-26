@@ -51,6 +51,7 @@ EXAMPLES:
     libra log --grep WIP --invert-grep     Hide commits whose message matches
     libra log --name-status src/           Show changed files under src/
     libra log --shortstat -n 5             Show just the diffstat summary line
+    libra log --patch-with-stat -1         Diffstat block followed by the full patch
     libra log --oneline --parents          Show parent ids after each commit hash
     libra log --author-date-order          Order by author date instead of committer date
     libra --json log -n 1                  Structured JSON output for agents";
@@ -193,6 +194,11 @@ pub struct LogArgs {
     /// deletions) for each commit
     #[clap(long)]
     pub shortstat: bool,
+
+    /// Show the diffstat block followed by the full patch for each commit
+    /// (Git's synonym for `-p --stat`).
+    #[clap(long = "patch-with-stat")]
+    pub patch_with_stat: bool,
 
     /// Files to limit diff output (used with -p, --name-only, --name-status,
     /// --stat, or --shortstat)
@@ -1097,7 +1103,12 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let name_status = args.name_status;
     // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
     let name_only = args.name_only && !name_status;
-    let patch = args.patch && !name_only && !name_status;
+    // `--patch-with-stat` is Git's synonym for `-p --stat`, so it enables the
+    // patch view. The name flags still take precedence over any diff output.
+    let patch = (args.patch || args.patch_with_stat) && !name_only && !name_status;
+    // Emit the diffstat block before the patch when both are requested — via
+    // `--patch-with-stat` or an explicit `-p --stat` combination.
+    let stat_before_patch = patch && (args.stat || args.patch_with_stat);
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
@@ -1357,12 +1368,25 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
                 message.push_str(&format_changes(&changes, name_status));
             }
         } else if patch {
+            // Build the optional diffstat block first (stat, blank line, then the
+            // patch), reusing the existing `--stat` and `-p` renderers in Git's
+            // `--patch-with-stat` order.
+            let mut block = String::new();
+            if stat_before_patch {
+                let stats = compute_commit_stat(&commit, path_filters.clone()).await?;
+                let stat_output = format_stat_output(&stats);
+                if !stat_output.is_empty() {
+                    block.push_str(stat_output.trim_end_matches('\n'));
+                    block.push_str("\n\n");
+                }
+            }
             let patch_output = generate_diff(&commit, path_filters.clone()).await?;
-            if !patch_output.is_empty() {
+            block.push_str(&patch_output);
+            if !block.is_empty() {
                 if !message.ends_with('\n') {
                     message.push('\n');
                 }
-                message.push_str(&patch_output);
+                message.push_str(&block);
             }
         } else if args.stat {
             let stats = compute_commit_stat(&commit, path_filters.clone()).await?;

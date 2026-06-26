@@ -93,9 +93,14 @@ libra log --name-status -- src/
 
 只显示 `--stat` 输出的最后一行：每个提交的 ` N files changed, M insertions(+), K deletions(-)`（插入/删除为零时省略对应子句），不含逐文件明细。
 
+### `--patch-with-stat`
+
+Git 中 `-p --stat` 的同义词：先显示 diffstat 块，再显示每个提交的完整 patch。显式的 `-p --stat` 组合等价，同样会同时显示两者。（diffstat 与 patch 块沿用 Libra 既有的 `--stat`/`-p` 渲染，故格式与 Git 略有差异。）
+
 ```bash
 libra log --stat
 libra log --shortstat
+libra log --patch-with-stat -1
 libra log --range main..feature
 libra log --all --oneline
 libra log --reverse --oneline

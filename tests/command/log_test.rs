@@ -1147,6 +1147,112 @@ async fn test_log_stat() {
 
 #[tokio::test]
 #[serial]
+async fn test_log_patch_with_stat_shows_diffstat_before_patch() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("file1.txt", Some("line1\nline2\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add file1".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+        ..Default::default()
+    })
+    .await;
+
+    test::ensure_file("file1.txt", Some("line1\nline2\nline3\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("extend file1".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+        ..Default::default()
+    })
+    .await;
+
+    // `--patch-with-stat` emits the diffstat block, then the patch.
+    let out = run_libra_command(&["log", "--patch-with-stat", "-1"], temp_path.path());
+    assert_cli_success(&out, "log --patch-with-stat");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stat_pos = stdout
+        .find("1 file changed")
+        .expect("diffstat summary present");
+    let patch_pos = stdout.find("diff --git").expect("patch body present");
+    assert!(
+        stat_pos < patch_pos,
+        "diffstat must precede the patch body:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("+line3"),
+        "patch shows the added line:\n{stdout}"
+    );
+
+    // `-p --stat` is the same thing and likewise shows both, in stat-then-patch order.
+    let combo = run_libra_command(&["log", "-p", "--stat", "-1"], temp_path.path());
+    assert_cli_success(&combo, "log -p --stat");
+    let combo_out = String::from_utf8_lossy(&combo.stdout);
+    let combo_stat = combo_out.find("1 file changed").expect("stat present");
+    let combo_patch = combo_out.find("diff --git").expect("patch present");
+    assert!(
+        combo_stat < combo_patch,
+        "-p --stat: stat before patch:\n{combo_out}"
+    );
+
+    // Plain `-p` still shows the patch with no diffstat summary line.
+    let patch_only = run_libra_command(&["log", "-p", "-1"], temp_path.path());
+    assert_cli_success(&patch_only, "log -p");
+    let patch_only_out = String::from_utf8_lossy(&patch_only.stdout);
+    assert!(patch_only_out.contains("diff --git"));
+    assert!(
+        !patch_only_out.contains("1 file changed"),
+        "plain -p has no diffstat summary:\n{patch_only_out}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_log_stat_with_modifications() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
