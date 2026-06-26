@@ -35,6 +35,7 @@ EXAMPLES:
     libra for-each-ref --sort=refname   Sort by ref name
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
+    libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -66,8 +67,8 @@ pub struct ForEachRefArgs {
     pub format: Option<String>,
 
     /// Sort output by key: `refname`, `objectname`, `version:refname`
-    /// (alias `v:refname`), or the date keys `committerdate` / `authordate` /
-    /// `creatordate`; prefix with `-` to reverse.
+    /// (alias `v:refname`), `objectsize`, or the date keys `committerdate` /
+    /// `authordate` / `creatordate`; prefix with `-` to reverse.
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -340,9 +341,15 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
     // Date-based sort keys (`committerdate` / `authordate` / `creatordate`)
     // resolve each ref's timestamp by loading its object (peeling tags), so they
     // are handled separately; all other keys go through the plain key sorter.
-    match _args.sort.as_deref().and_then(parse_date_sort_key) {
-        Some((date_key, reverse)) => sort_entries_by_date(&mut entries, date_key, reverse),
-        None => sort_entries(&mut entries, _args.sort.as_deref())?,
+    // Date and object-size keys require loading each ref's object, so they are
+    // handled separately; all other keys go through the plain key sorter.
+    let sort = _args.sort.as_deref();
+    if let Some((date_key, reverse)) = sort.and_then(parse_date_sort_key) {
+        sort_entries_by_date(&mut entries, date_key, reverse);
+    } else if let Some(reverse) = sort.and_then(parse_objectsize_sort_key) {
+        sort_entries_by_objectsize(&mut entries, reverse)?;
+    } else {
+        sort_entries(&mut entries, sort)?;
     }
     if let Some(count) = _args.count {
         entries.truncate(count);
@@ -590,6 +597,57 @@ fn parse_date_sort_key(sort: &str) -> Option<(DateSortKey, bool)> {
         _ => return None,
     };
     Some((key, reverse))
+}
+
+/// Recognise the `objectsize` sort key, returning whether a leading `-` requested
+/// reversed (descending) order. Non-matching keys return `None`.
+fn parse_objectsize_sort_key(sort: &str) -> Option<bool> {
+    match sort.strip_prefix('-') {
+        Some("objectsize") => Some(true),
+        _ if sort == "objectsize" => Some(false),
+        _ => None,
+    }
+}
+
+/// The byte size of the object a ref points at directly (the tag object for an
+/// annotated tag, the commit for a branch) — Git's `%(objectsize)`.
+/// `ClientStorage::get` returns the decompressed object content, whose length is
+/// the size Git reports. A missing/unreadable object is a real corruption and is
+/// surfaced as an error (rather than silently reported as size 0).
+fn ref_object_size(entry: &RefEntry) -> CliResult<i64> {
+    let hash = ObjectHash::from_str(&entry.objectname).map_err(|source| {
+        CliError::fatal(format!(
+            "ref '{}' has an invalid object id '{}': {source}",
+            entry.refname, entry.objectname
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let data = util::objects_storage().get(&hash).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read object {} for ref '{}': {source}",
+            entry.objectname, entry.refname
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(data.len() as i64)
+}
+
+/// Sort entries by their object's byte size (`objectsize`); ties break by refname
+/// ascending, matching Git's final ordering key.
+fn sort_entries_by_objectsize(entries: &mut [RefEntry], reverse: bool) -> CliResult<()> {
+    let mut sizes: Vec<i64> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        sizes.push(ref_object_size(entry)?);
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let primary = sizes[a].cmp(&sizes[b]);
+        let primary = if reverse { primary.reverse() } else { primary };
+        primary.then_with(|| entries[a].refname.cmp(&entries[b].refname))
+    });
+    let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
+    entries.clone_from_slice(&reordered);
+    Ok(())
 }
 
 /// Sort entries by a date key. The timestamp for each ref is resolved by loading
@@ -842,6 +900,13 @@ fn render_format(
     // strings are distinct, so order is not load-bearing, only for clarity).
     let refname_short = short_refname(&entry.refname);
     let objectname_short: String = entry.objectname.chars().take(7).collect();
+    // `%(objectsize)`: the byte size of the ref's object (computed lazily only
+    // when the atom is present, to avoid an extra object read per ref).
+    let objectsize = if format.contains("%(objectsize)") {
+        ref_object_size(entry)?.to_string()
+    } else {
+        String::new()
+    };
     // `%(HEAD)`: `*` for the currently checked-out branch, a space otherwise.
     let head_marker = if head_refname == Some(entry.refname.as_str()) {
         "*"
@@ -886,7 +951,8 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 24] = [
+    let atoms: [(&str, &str); 25] = [
+        ("objectsize", objectsize.as_str()),
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),

@@ -1476,3 +1476,111 @@ fn test_for_each_ref_quoting_styles() {
     );
     assert_eq!(conflict.status.code(), Some(129));
 }
+
+#[test]
+fn test_for_each_ref_objectsize_atom_and_sort() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Two annotated tags whose object sizes differ only by message length, so
+    // `small` < `big` deterministically. (Commit signing makes commit sizes an
+    // unreliable baseline, so the sort assertion scopes to `--tags`.)
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "s", "small"], p),
+        "small tag",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "tag",
+                "-m",
+                "an annotated tag with a deliberately long message body to inflate its object size",
+                "big",
+            ],
+            p,
+        ),
+        "big tag",
+    );
+
+    // `%(objectsize)` is the size of the tag object itself; the longer message
+    // makes `big` larger than `small`.
+    let size = |reff: &str| -> i64 {
+        let out = run_libra_command(&["for-each-ref", reff, "--format=%(objectsize)"], p);
+        assert_cli_success(&out, "objectsize atom");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("objectsize is numeric")
+    };
+    let small_size = size("refs/tags/small");
+    let big_size = size("refs/tags/big");
+    assert!(small_size > 0, "tag objectsize is positive: {small_size}");
+    assert!(
+        big_size > small_size,
+        "the longer-message tag ({big_size}) is larger than the short one ({small_size})"
+    );
+
+    // `--sort=objectsize` orders the tags ascending (small first); `-objectsize`
+    // reverses.
+    let tags = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["for-each-ref", "--tags", "--format=%(refname:short)"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "objectsize sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        tags(&["--sort=objectsize"]),
+        vec!["small".to_string(), "big".to_string()],
+        "ascending objectsize: small before big"
+    );
+    assert_eq!(
+        tags(&["--sort=-objectsize"]),
+        vec!["big".to_string(), "small".to_string()],
+        "descending objectsize: big before small"
+    );
+}
+
+#[test]
+fn test_for_each_ref_objectsize_errors_on_unreadable_object() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, loose_object_path, run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let head = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_cli_success(&head, "rev-parse HEAD");
+    let hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Remove the commit's loose object so refs/heads/main points at an object
+    // that cannot be read.
+    std::fs::remove_file(loose_object_path(p, &hash)).expect("remove loose object");
+
+    // `%(objectsize)` surfaces a read error (not a silent 0) naming the ref.
+    let atom = run_libra_command(
+        &["for-each-ref", "refs/heads/main", "--format=%(objectsize)"],
+        p,
+    );
+    assert!(
+        !atom.status.success(),
+        "%(objectsize) must error on an unreadable object, got: {}",
+        String::from_utf8_lossy(&atom.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&atom.stderr).contains("refs/heads/main"),
+        "the error names the ref: {}",
+        String::from_utf8_lossy(&atom.stderr)
+    );
+
+    // `--sort=objectsize` likewise errors rather than treating the size as 0.
+    let sort = run_libra_command(&["for-each-ref", "--sort=objectsize"], p);
+    assert!(
+        !sort.status.success(),
+        "--sort=objectsize must error on an unreadable object"
+    );
+}
