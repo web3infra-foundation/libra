@@ -10,11 +10,15 @@ Summarize reachable commits by author.
 libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges | --merges]
                [--top <N>] [--min-count <N>] [--reverse]
                [--since <date>] [--until <date>] [-w[<W>[,<I1>[,<I2>]]]] [--format <FORMAT>]
+
+git log | libra shortlog [-n] [-s] [-e] [--group <TYPE>] [--author <pattern>] [-w[...]]
 ```
 
 ## Description
 
 `libra shortlog` summarizes reachable commits grouped by author, primarily used for release announcements and contributor overviews. It walks the commit graph from the specified revision (defaulting to HEAD) and aggregates commits per author, displaying each author's commit count and optionally their commit subjects.
+
+When no revision is given and standard input is not a terminal and carries data, `libra shortlog` instead summarizes piped `git log` / `libra log` output (e.g. `git log | libra shortlog`), matching Git's stdin mode. An empty or terminal stdin falls back to the `HEAD` default (an intentional convenience over Git, which has no default revision). Pipe mode parses the default (`medium`) or `fuller` log format — `Author:` / `Commit:` identity headers and the 4-space-indented message — and honors the grouping and display options (`-n` / `-s` / `-e` / `--group` / `--author` / `-w` / `--top` / `--min-count` / `--reverse`); the walk-only filters (`--since` / `--until` / `--merges` / `--no-merges` / `--format`) have no commit objects to act on and are ignored, as in Git. Pipe mode still runs inside a Libra repository.
 
 By default, authors are sorted alphabetically by name. With `-n`, they are sorted by commit count (descending). The `-s` flag produces a summary with only counts, suppressing individual commit subjects. The `-e` flag includes the author's email address in the output.
 
@@ -132,6 +136,9 @@ libra shortlog --since 2026-01-01 --until 2026-03-31
 
 # JSON output for scripting
 libra shortlog --json
+
+# Summarize piped log output (Git's stdin mode)
+git log | libra shortlog -n -s
 ```
 
 ## Human Output
@@ -185,11 +192,9 @@ The `total_authors` and `total_commits` fields provide aggregate counts for quic
 
 Git's `--group=author`/`--group=committer`/`--group=trailer:<key>` selects what commits are grouped by. Libra supports all three: `author` (the default) and `committer` mirror the identity grouping also available via `-c`, while `trailer:<key>` groups by each value of the named commit-message trailer (e.g. `--group=trailer:Co-authored-by`), which is useful for analyzing co-authored commits or attributions recorded via trailers like `Signed-off-by`. A commit may contribute to several trailer groups (one per matching trailer line) or none. `--group` takes precedence over `-c`/`--committer`. The trailer key is matched case-insensitively against the last paragraph (the trailer block) of each commit message, and `Name <email>` values are split into name and email for the report. Git's full `interpret-trailers` configuration (folding, separators, custom config) is not modeled.
 
-### Why positional revision instead of piped input?
+### Revision argument and piped input
 
-Git's `shortlog` can operate in two modes: reading from `git log` output piped via stdin, or directly traversing commit history. The piped mode (`git log | git shortlog`) is a Unix-philosophy composability feature, but it requires parsing serialized commit data, which is fragile and format-dependent.
-
-Libra takes the revision as a positional argument and always reads directly from the commit graph. This is simpler, faster (no serialization/deserialization), and works naturally with the `--json` output mode. For filtering beyond the built-in filters (`--since`/`--until`, `--author`, `--merges`/`--no-merges`), use `libra log --json` with external tooling.
+Git's `shortlog` can operate in two modes: reading `git log` output piped via stdin, or directly traversing commit history. Libra supports **both**, and both feed the `--json` output. Its primary mode takes the revision as a positional argument (defaulting to `HEAD`) and reads directly from the commit graph — simpler and faster (no serialization round-trip). When no revision is given and stdin is piped with data, Libra parses that piped log output instead (`git log | libra shortlog`), for Unix-style composability and parity with Git's stdin mode. Because the piped data is serialized text rather than commit objects, pipe mode is limited to the identity/subject information the log format carries: the grouping and display options apply, but commit-graph filters (`--since`/`--until`/`--merges`/`--no-merges`) and the object-dependent `--format` template do not.
 
 ### Why a curated filter subset instead of full log options?
 
@@ -212,7 +217,7 @@ The `--since`/`--until` filters use the committer timestamp (not the author time
 | Group by | `--group=author\|committer\|trailer:<key>` | `--group=author\|committer\|trailer:<key>` | N/A |
 | Format | `--format=<format>` | `--format=<format>` | N/A |
 | Committer grouping | `-c` / `--committer` | `--committer` (deprecated, use `--group=committer`) | N/A |
-| Piped input | Not supported | Reads from stdin when piped | N/A |
+| Piped input | `git log \| libra shortlog` (no revision, non-tty stdin with data; inside a repo) | Reads from stdin when piped | N/A |
 | No merges | `--no-merges` | `--no-merges` | N/A |
 | Merges only | `--merges` | `--merges` | N/A |
 | Author filter | `--author=<pattern>` | `--author=<pattern>` | N/A |

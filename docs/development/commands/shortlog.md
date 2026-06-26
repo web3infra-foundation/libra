@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、`--merges`/`--no-merges`、top 限制、mailmap、范围解析和 JSON 摘要，同时把 stdin 和更复杂过滤作为差异项（`--format` 已实现）。
+`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、`--merges`/`--no-merges`、top 限制、mailmap、范围解析和 JSON 摘要，更复杂过滤作为差异项（`--format`、stdin 管道输入已实现）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--merges`/`--no-merges`（互相覆盖）、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）、`--format <FORMAT>`（复用 `log --format` 的 `CommitFormatter`/`format_custom` 自定义模板渲染每条提交行）已支持；stdin 输入尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--merges`/`--no-merges`（互相覆盖）、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）、`--format <FORMAT>`（复用 `log --format` 的 `CommitFormatter`/`format_custom` 自定义模板渲染每条提交行）、stdin 管道输入（`git log | libra shortlog`：无 revision + 非 tty + 有数据时解析管道 `git log`/`libra log` 输出，medium/fuller 格式，仅作用于分组/显示选项，walk-only 过滤 `--since`/`--until`/`--merges`/`--no-merges`/`--format` 忽略；仍需在 Libra 仓库内运行；空/tty stdin 回落到 HEAD 默认）已支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -55,7 +55,7 @@ flowchart TD
 |---|---|---|
 | ✅ 已实现 | 分组方式 `--group=author\|committer\|trailer:<key>` | `resolve_group_mode` 解析 `--group`（优先于 `-c`）；`trailer:<key>` 经 `extract_trailer_identities` 从消息末段 trailer 块按 key（忽略大小写）提取每个值作为分组（单提交可贡献 0..N 组）。带集成测试（`group_trailer_groups_by_trailer_value`）。 |
 | ✅ 已实现 | 格式化输出 `--format=<format>` | `ShortlogArgs.format` + `aggregate_shortlog` 在分组时用 `log` 的 `CommitFormatter::new(FormatType::Custom(fmt))` 渲染每条提交行（取代默认 subject），short-hash 宽度用 `util::get_min_unique_hash_length(&commits).max(7)` 与 `libra log` 对齐；支持 `log --format` 的同一占位符子集（`%H`/`%h`/`%s`/`%f`/`%an`/`%ae`/`%ad`/`%cn`/`%ce`/`%cd`/`%d`）。渲染行经 split('\n') 后按既有 6 空格缩进 + `-w` 换行路径输出（默认 subject 为单行，故对默认路径是 no-op）。`--summary` 仍优先（仅计数）。带集成测试（`test_shortlog_format_renders_custom_per_commit_line`）。 |
-| 兼容差异项 | 管道输入 | 原始对照：不支持；相关参数/替代：从 stdin 读取管道输入；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 管道输入（stdin） | `run_shortlog` 在 `revision.is_none() && !stdin().is_terminal()` 且读入非空时，用 `parse_shortlog_stdin` 解析 medium/fuller `git log` 输出（`commit ` 分隔记录，`Author:`/`Commit:` 头取身份——`:` 区分 `AuthorDate:`/`CommitDate:`——4 空格缩进行为消息），经 `aggregate_shortlog_stdin` 复用提取出的 `finalize_shortlog`（与 walk 路径共用排序/过滤尾）。`--group=author/committer/trailer`、`-n`/`-s`/`-e`/`--author`/`-w`/`--top`/`--min-count`/`--reverse` 均生效；无 Commit 对象故 `--format` 用解析出的 subject（与 git 一致）、walk-only `--since`/`--until`/`--merges`/`--no-merges` 忽略（与 git 一致）。空/tty stdin 回落到 HEAD（intentionally-different：git 无默认 revision）；仍需在 Libra 仓库内（cli.rs 预检 + execute_safe require_repo）。带集成测试（`test_shortlog_reads_piped_log_input`）。与 walk 输出自洽（`libra log | libra shortlog` == `libra shortlog`，已差分验证 default/-n/-s/-e/--author）。 |
 | ✅ 已实现 | 作者过滤 `--author <PATTERN>` | 聚合前按作者 `name <email>` 的大小写不敏感子串过滤（即使配合 `-c` 也按作者过滤）。带 `author_identity_matches` 单元测试。 |
 | ✅ 已实现 | 换行宽度 `-w[<width>[,<indent1>[,<indent2>]]]` | `ShortlogArgs.wrap` + `parse_wrap_spec`（默认 76/6/9，width 0 仅缩进）+ `wrap_subject_lines`（词级换行，首行 I1、续行 I2）。带集成测试（`shortlog_wrap_wraps_long_subjects`）。 |
 
