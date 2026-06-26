@@ -156,6 +156,11 @@ pub struct GrepArgs {
     #[clap(long)]
     cached: bool,
 
+    /// In addition to tracked files, also search untracked, non-ignored files in the
+    /// working tree. Cannot be combined with `--cached` or a `--tree` revision.
+    #[clap(long, conflicts_with = "cached")]
+    untracked: bool,
+
     /// Print the file name as a heading above its matches instead of as a per-line prefix.
     /// Paired with `--no-heading`; the last one given wins (Git semantics).
     #[clap(long, overrides_with = "no_heading")]
@@ -595,16 +600,58 @@ fn escape_regex(s: &str) -> String {
 
 /// Get the list of files to search, respecting pathspec and ignore rules.
 async fn get_search_files(args: &GrepArgs) -> CliResult<Vec<SearchFile>> {
+    if args.untracked && args.tree.is_some() {
+        return Err(
+            CliError::command_usage("--untracked cannot be used with a --tree revision")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
+    }
     if let Some(tree_ref) = &args.tree {
         // Search in a specific tree/commit
         get_tree_files(tree_ref, &args.pathspec).await
     } else if args.cached {
         // Search in index (staged files)
         get_index_files(&args.pathspec)
+    } else if args.untracked {
+        // Search tracked files plus untracked, non-ignored working-tree files.
+        get_working_tree_files_with_untracked(&args.pathspec)
     } else {
         // Search in working tree
         get_working_tree_files(&args.pathspec)
     }
+}
+
+/// Tracked working-tree files plus untracked, non-ignored files (matching
+/// `git grep --untracked`). Both kinds read from disk (`blob_hash: None`); the
+/// combined list is sorted by path for deterministic, Git-like output.
+fn get_working_tree_files_with_untracked(pathspec: &[String]) -> CliResult<Vec<SearchFile>> {
+    let index = load_index()?;
+    let path_filters: Vec<PathBuf> = pathspec.iter().map(util::to_workdir_path).collect();
+
+    let mut files = tracked_files_from_index(&index, &path_filters, false);
+    let tracked: std::collections::HashSet<PathBuf> =
+        files.iter().map(|file| file.path.clone()).collect();
+
+    // `list_workdir_files` returns non-ignored working-tree files (tracked and
+    // untracked); the ones not already tracked are the untracked, non-ignored files.
+    let worktree = util::list_workdir_files().map_err(|error| {
+        CliError::fatal(format!("failed to list working tree: {error}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    for path in worktree {
+        if tracked.contains(&path) {
+            continue;
+        }
+        if path_filters.is_empty() || path_filters.iter().any(|f| util::is_sub_path(&path, f)) {
+            files.push(SearchFile {
+                path,
+                blob_hash: None,
+            });
+        }
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
 }
 
 async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<SearchFile>> {

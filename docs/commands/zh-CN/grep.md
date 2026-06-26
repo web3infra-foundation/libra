@@ -42,6 +42,7 @@ libra grep -f <file> [-- <pathspec>...]
 | Pathspec | | 尾随位置参数 | 将搜索限制到匹配给定路径的文件。 |
 | Tree | | `--tree <REVISION>` | 在指定修订或提交树中搜索，而不是工作树。 |
 | Cached | | `--cached` | 在索引（暂存区）中搜索，而不是工作树。 |
+| Untracked | | `--untracked` | 除已跟踪文件外，还搜索工作树中未跟踪、非忽略的文件。不能与 `--cached` 或 `--tree` 同用。 |
 
 ### 选项细节
 

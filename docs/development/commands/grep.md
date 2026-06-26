@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching` 已支持；`--untracked`、`--no-index` 仍未公开。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching`、`--untracked`（worktree 搜索额外纳入未跟踪、非忽略文件）已支持；`--no-index` 仍未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -37,7 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2026-04-05 `45291721`（`feat(grep): add git-like grep support (#336)`）：基础实现节点：add git-like grep support (#336)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：功能演进：add --untracked to also search untracked, non-ignored files；但该 `--untracked` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
+- 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：曾添加 `--untracked`，但被 `900c062`（`Update integration`）回退（[[goal_loop_work_vanished]] 模式）。
+- 2026-06-26 (#160)：重新落地 `--untracked`。`get_search_files` 新增分支 → `get_working_tree_files_with_untracked`（tracked ∪ `list_workdir_files()` 的未跟踪-非忽略，按路径排序，`blob_hash: None` 从磁盘读取）；`conflicts_with = "cached"`；`--tree` 同用时运行期报错。
 - 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：功能演进：add --no-index to search the filesystem without a repository；但该 `--no-index` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
 - 2026-06-05 `e3bfe11`（`feat(grep): add -A/-B/-C context lines with group separators`）：曾添加 `-A`/`-B`/`-C` 上下文行与分组分隔符；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「上下文行」一行）。
 - 2026-06-05 `2d471be`（`feat(grep): add --heading/--no-heading, --break, and -z/--null output formats`）：曾添加 `--heading`/`--no-heading`、`--break` 与 `-z`/`--null` 输出格式；该批改动一度被 `900c062`（`Update integration`）回退，现已重新实现并补齐集成测试（见「当前状态」与缺口表中标记为「✅ 已实现」的三行）。
@@ -63,7 +64,7 @@ flowchart TD
 | ✅ 已实现（拒绝） | Perl 正则 `-P` | 已重新实现：显式拒绝并以退出码 129 返回 `grep -P/--perl-regexp is not supported`（命令层 usage 错误）。带集成测试。 |
 | 兼容差异项 | 显示函数 | 原始对照：不支持；相关参数/替代：-p / --show-function；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 搜索未跟踪文件 | 原始对照：不支持；相关参数/替代：--untracked；当前说明：`01997f50` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 搜索未跟踪文件 | `--untracked` 已重新落地（#160，原 `01997f50` 被 `900c062` 回退）：worktree 搜索时除 tracked 外，还纳入 `util::list_workdir_files()` 返回的未跟踪、非忽略文件（`get_working_tree_files_with_untracked`：tracked ∪ 未跟踪-非忽略，按路径排序，均从磁盘读取）。与 `--cached` 冲突（clap 129），与 `--tree` 同用为运行期 usage 错误（LBR-CLI-002）。与 git 差分验证（tracked+untracked，排除 ignored）。带集成测试 `test_grep_untracked_searches_untracked_non_ignored_files`。 |
 | 兼容差异项 | 无仓库文件系统搜索 | 原始对照：不支持；相关参数/替代：--no-index；当前说明：`0e22f00d` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | 文件名分组标题 `--heading`/`--no-heading` | 已重新实现：`--heading` 把文件名作为独立标题行打印，匹配行去掉每行文件名前缀；`--no-heading` 为默认。带集成测试（`test_grep_heading_groups_matches_under_file_name`）。 |
 | ✅ 已实现 | 文件分组空行 `--break`/`--no-break` | 已实现：`--break` 在不同文件的匹配之间插入空行（保留每行前缀，与 Git 一致）；`--no-break` 为默认。带集成测试（`test_grep_break_inserts_blank_line_between_files`）。 |

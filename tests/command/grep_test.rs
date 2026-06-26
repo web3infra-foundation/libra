@@ -94,6 +94,60 @@ async fn test_grep_working_tree_searches_only_tracked_files() {
 
 #[tokio::test]
 #[serial]
+async fn test_grep_untracked_searches_untracked_non_ignored_files() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("tracked.txt", "needle in tracked file\n").expect("write tracked");
+    add_and_commit("add tracked file", vec!["tracked.txt".to_string()]).await;
+    fs::write("untracked.txt", "needle in untracked file\n").expect("write untracked");
+    fs::write(".libraignore", "ignored.txt\n").expect("write ignore");
+    fs::write("ignored.txt", "needle in ignored file\n").expect("write ignored");
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "--untracked", "needle"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --untracked should succeed");
+    let json = parse_json_stdout(&output);
+    let paths: Vec<String> = json["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("path").to_string())
+        .collect();
+
+    // Tracked AND untracked (non-ignored) are searched; the ignored file is not.
+    assert!(
+        paths.contains(&"tracked.txt".to_string()),
+        "tracked searched: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"untracked.txt".to_string()),
+        "untracked non-ignored searched: {paths:?}"
+    );
+    assert!(
+        !paths.contains(&"ignored.txt".to_string()),
+        "ignored file is not searched: {paths:?}"
+    );
+
+    // --untracked conflicts with --cached (clap, exit 129).
+    let conflict = run_libra_command(&["grep", "--untracked", "--cached", "needle"], repo.path());
+    assert_eq!(conflict.status.code(), Some(129));
+
+    // --untracked with a --tree revision is a usage error.
+    let with_tree = run_libra_command(
+        &["grep", "--untracked", "--tree", "HEAD", "needle"],
+        repo.path(),
+    );
+    assert_eq!(with_tree.status.code(), Some(129));
+    let (_stderr, report) = parse_cli_error_stderr(&with_tree.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_grep_after_context_marks_context_lines() {
     let repo = tempdir().expect("failed to create repo dir");
     test::setup_with_new_libra_in(repo.path()).await;
