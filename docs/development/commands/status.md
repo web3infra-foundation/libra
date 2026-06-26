@@ -48,7 +48,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/status.md`。
 - Synopsis：`libra status [OPTIONS]`。
-- 公开参数/子命令包括：`-s, --short`、`--long`（显式选择默认长格式，no-op，与 `--short`/`--porcelain` 互斥）、`--porcelain [VERSION]`、`-b, --branch`、`--ahead-behind`、`--no-ahead-behind`、`--show-stash`、`--ignored`、`--untracked-files <MODE>`、`--column`、`--no-column`、`-z`、`--find-renames [PERCENT]`、`--renames`、`--no-renames`、`--exit-code`。`--renames`/`--no-renames`（`overrides_with` 互斥）切换重命名检测：`--no-renames` 关闭（优先于 `--renames`/`--find-renames`），`--renames` 以默认（或 `--find-renames`）阈值开启。`--column`/`--no-column`（`overrides_with` 互斥）切换列对齐：`--no-column`（= `--column=never`）撤销先前的 `--column`（last-wins，读 `column` 布尔字段，`no_column` 不直接读取），status 默认非列式故单独为 no-op。
+- 公开参数/子命令包括：`-s, --short`、`--long`（显式选择默认长格式，no-op，与 `--short`/`--porcelain` 互斥）、`--porcelain [VERSION]`、`-b, --branch`、`--ahead-behind`、`--no-ahead-behind`、`--show-stash`、`--ignored`、`-u`/`--untracked-files [<MODE>]`（短/长形式；不带值即 `all`，短形式接受附加值 `-uno`/`-uall`/`-unormal`，经 `num_args=0..=1` + `default_missing_value=all`；默认 `normal`）、`--column`、`--no-column`、`-z`、`--find-renames [PERCENT]`、`--renames`、`--no-renames`、`--exit-code`。`--renames`/`--no-renames`（`overrides_with` 互斥）切换重命名检测：`--no-renames` 关闭（优先于 `--renames`/`--find-renames`），`--renames` 以默认（或 `--find-renames`）阈值开启。`--column`/`--no-column`（`overrides_with` 互斥）切换列对齐：`--no-column`（= `--column=never`）撤销先前的 `--column`（last-wins，读 `column` 布尔字段，`no_column` 不直接读取），status 默认非列式故单独为 no-op。
 
 
 ## 还未实现的功能

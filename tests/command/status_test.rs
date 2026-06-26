@@ -2587,3 +2587,40 @@ fn status_no_column_countermands_column() {
         String::from_utf8_lossy(&out2.stderr)
     );
 }
+
+/// `-u`/`--untracked-files` parses like Git: bare = `all`, attached values
+/// (`-uno`, `-uall`, `-unormal`, `--untracked-files=no`) select the mode, and
+/// the default (absent) is `normal`.
+#[test]
+fn untracked_files_short_flag_parses_like_git() {
+    use clap::Parser;
+
+    let mode = |args: &[&str]| -> UntrackedFiles {
+        StatusArgs::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("parse {args:?} failed: {e}"))
+            .untracked_files
+    };
+
+    assert_eq!(
+        mode(&["status"]),
+        UntrackedFiles::Normal,
+        "default is normal"
+    );
+    assert_eq!(
+        mode(&["status", "-u"]),
+        UntrackedFiles::All,
+        "bare -u is all"
+    );
+    assert_eq!(
+        mode(&["status", "--untracked-files"]),
+        UntrackedFiles::All,
+        "bare --untracked-files is all"
+    );
+    assert_eq!(mode(&["status", "-uno"]), UntrackedFiles::No);
+    assert_eq!(mode(&["status", "-uall"]), UntrackedFiles::All);
+    assert_eq!(mode(&["status", "-unormal"]), UntrackedFiles::Normal);
+    assert_eq!(
+        mode(&["status", "--untracked-files=no"]),
+        UntrackedFiles::No
+    );
+}

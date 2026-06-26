@@ -138,14 +138,16 @@ Include ignored files in the output.
 libra status --ignored
 ```
 
-### `--untracked-files <MODE>`
+### `-u, --untracked-files [<MODE>]`
 
 Control how untracked files are displayed. Accepted values: `normal` (default, shows untracked
 directories but not their contents), `all` (recursively lists files within untracked directories),
-`no` (hides untracked files entirely).
+`no` (hides untracked files entirely). As in Git, the flag with no value means `all`, and the short
+form takes an attached value (`-uno`, `-uall`, `-unormal`).
 
 ```bash
-libra status --untracked-files=no
+libra status -uno                  # hide untracked files
+libra status -u                    # same as -uall (recurse into untracked dirs)
 libra status --untracked-files=all
 ```
 
@@ -391,7 +393,7 @@ a branch needs to be pushed or pulled, without having to run separate `libra log
 | Branch info in short | `git status -sb` | Always shown | `libra status -sb` (`--short --branch`) |
 | Show stash count | `git status --show-stash` | N/A | `libra status --show-stash` (standard mode) |
 | Show ignored files | `git status --ignored` | N/A | `libra status --ignored` |
-| Untracked files control | `git status -u<mode>` | N/A (always shows) | `libra status --untracked-files=<mode>` |
+| Untracked files control | `git status -u<mode>` | N/A (always shows) | `libra status -u<mode>` / `--untracked-files=<mode>` |
 | Exit code for dirty | `git diff --exit-code` | N/A | `libra status --exit-code` |
 | Quiet mode | `git status -q` | N/A | `libra status --quiet` (global flag) |
 | Column display | `git status --column` | N/A | `libra status --column` (`--no-column` countermands) |

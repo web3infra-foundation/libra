@@ -52,7 +52,7 @@ EXAMPLES:
     libra status -sb                   Include branch info in short output (-b = --branch)
     libra status --show-stash          Show stash count
     libra status --ignored             Include ignored files
-    libra status --untracked-files=no  Hide untracked files
+    libra status -uno                  Hide untracked files (-u = --untracked-files; bare -u = all)
     libra status --renames             Detect renames (--no-renames disables)
     libra status --json                Structured JSON output for agents
     libra status --exit-code           Exit 1 if working tree is dirty
@@ -107,11 +107,16 @@ pub struct StatusArgs {
     #[clap(long = "ignored")]
     pub ignored: bool,
 
-    /// Control untracked files display (normal|all|no)
+    /// Control untracked files display: `no`, `normal` (default), or `all`. As
+    /// in Git, the short `-u`/long `--untracked-files` with no value means
+    /// `all` (e.g. `-u`, `-uno`, `--untracked-files=all`).
     #[clap(
+        short = 'u',
         long = "untracked-files",
         value_name = "MODE",
-        default_value = "normal"
+        num_args = 0..=1,
+        default_value = "normal",
+        default_missing_value = "all"
     )]
     pub untracked_files: UntrackedFiles,
 

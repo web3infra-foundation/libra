@@ -71,12 +71,13 @@ libra status --show-stash
 libra status --ignored
 ```
 
-### `--untracked-files <MODE>`
+### `-u, --untracked-files [<MODE>]`
 
-控制如何显示未跟踪文件。可接受值：`normal`（默认，显示未跟踪目录但不显示其内容）、`all`（递归列出未跟踪目录内的文件）、`no`（完全隐藏未跟踪文件）。
+控制如何显示未跟踪文件。可接受值：`normal`（默认，显示未跟踪目录但不显示其内容）、`all`（递归列出未跟踪目录内的文件）、`no`（完全隐藏未跟踪文件）。与 Git 一致：不带值即 `all`，短形式接受附加值（`-uno`、`-uall`、`-unormal`）。
 
 ```bash
-libra status --untracked-files=no
+libra status -uno                  # 隐藏未跟踪文件
+libra status -u                    # 等同 -uall（递归未跟踪目录）
 libra status --untracked-files=all
 ```
 
@@ -287,7 +288,7 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 | 短格式中的分支信息 | `git status -sb` | 始终显示 | `libra status -sb`（`--short --branch`） |
 | 显示 stash 数量 | `git status --show-stash` | N/A | `libra status --show-stash`（标准模式） |
 | 显示被忽略文件 | `git status --ignored` | N/A | `libra status --ignored` |
-| 未跟踪文件控制 | `git status -u<mode>` | N/A（始终显示） | `libra status --untracked-files=<mode>` |
+| 未跟踪文件控制 | `git status -u<mode>` | N/A（始终显示） | `libra status -u<mode>` / `--untracked-files=<mode>` |
 | 脏状态退出码 | `git diff --exit-code` | N/A | `libra status --exit-code` |
 | Quiet 模式 | `git status -q` | N/A | `libra status --quiet`（全局标志） |
 | 列显示 | `git status --column` | N/A | `libra status --column`（`--no-column` 撤销） |
