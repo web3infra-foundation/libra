@@ -35,6 +35,9 @@ use git_internal::{
 use sea_orm::EntityTrait;
 use serde::Serialize;
 use sha1::Digest;
+// Brought into scope (anonymously) so `sha2::Sha256::digest` resolves; sha1 and
+// sha2 use different `digest` trait versions here, so both must be in scope.
+use sha2::Digest as _;
 
 use crate::{
     command::{fetch::fetch_repository_safe, load_object, log::get_reachable_commits},
@@ -725,14 +728,9 @@ async fn run_commit_graph(
     if commits.is_empty() {
         return Ok(skip("no commits to index; skipped"));
     }
-    // Octopus merges (>2 parents) are written via the EDGE chunk by
-    // `build_commit_graph`. SHA-256 repositories still need the wider hashes and
-    // a SHA-256 trailer, which the writer does not yet emit.
-    if commits.keys().next().map(ObjectHash::kind) == Some(HashKind::Sha256) {
-        return Ok(skip(
-            "commit-graph for SHA-256 repositories is not yet supported; skipped",
-        ));
-    }
+    // Octopus merges (>2 parents) are written via the EDGE chunk and SHA-256
+    // repositories via the wider OIDs + a SHA-256 header version/trailer, both
+    // handled by `build_commit_graph`.
 
     let count = commits.len();
     if dry_run {
@@ -784,9 +782,10 @@ fn compute_generations(commits: &HashMap<ObjectHash, Commit>) -> HashMap<ObjectH
     generations
 }
 
-/// Encode a v1 commit-graph file (SHA-1) with the OIDF, OIDL, and CDAT chunks —
-/// plus an EDGE chunk when any commit has more than two parents (octopus
-/// merges) — and a trailing SHA-1 checksum, matching Git's format.
+/// Encode a v1 commit-graph file with the OIDF, OIDL, and CDAT chunks — plus an
+/// EDGE chunk when any commit has more than two parents (octopus merges) — and a
+/// trailing checksum, matching Git's format. The OID width, header hash version,
+/// and trailer digest follow the repository's hash kind (SHA-1 or SHA-256).
 fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> {
     /// Sentinel parent slot meaning "no parent" (GRAPH_PARENT_NONE).
     const GRAPH_PARENT_NONE: u32 = 0x7000_0000;
@@ -872,10 +871,18 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
         cdat_off + (n as u64) * (hash_len as u64 + 16)
     };
 
+    // Hash version: 1 for SHA-1, 2 for SHA-256 (matches the OID width already
+    // used by the OIDL/CDAT chunks via `hash_len`).
+    let hash_version: u8 = if oids[0].kind() == HashKind::Sha256 {
+        2
+    } else {
+        1
+    };
+
     let mut buf: Vec<u8> = Vec::with_capacity(trailer_off as usize + hash_len);
-    // Header: "CGPH", version 1, hash version 1 (SHA-1), N chunks, 0 base graphs.
+    // Header: "CGPH", version 1, hash version, N chunks, 0 base graphs.
     buf.extend_from_slice(b"CGPH");
-    buf.extend_from_slice(&[1, 1, num_chunks, 0]);
+    buf.extend_from_slice(&[1, hash_version, num_chunks, 0]);
     // Chunk table of contents.
     buf.extend_from_slice(b"OIDF");
     buf.extend_from_slice(&oidf_off.to_be_bytes());
@@ -917,8 +924,12 @@ fn build_commit_graph(commits: &HashMap<ObjectHash, Commit>) -> Option<Vec<u8>> 
             buf.extend_from_slice(&slot.to_be_bytes());
         }
     }
-    // Trailer: SHA-1 checksum of everything written so far.
-    let digest = sha1::Sha1::digest(&buf);
+    // Trailer: checksum of everything written so far, in the repository's hash
+    // algorithm (SHA-1 or SHA-256), matching the OID width used above.
+    let digest: Vec<u8> = match oids[0].kind() {
+        HashKind::Sha256 => sha2::Sha256::digest(&buf).to_vec(),
+        HashKind::Sha1 => sha1::Sha1::digest(&buf).to_vec(),
+    };
     buf.extend_from_slice(&digest);
     Some(buf)
 }
@@ -1985,5 +1996,52 @@ mod tests {
         // Trailer still covers the whole body including the EDGE chunk.
         let body = &bytes[..bytes.len() - 20];
         assert_eq!(&sha1::Sha1::digest(body)[..], &bytes[bytes.len() - 20..]);
+    }
+
+    #[test]
+    fn commit_graph_build_handles_sha256_repository() {
+        use git_internal::internal::object::signature::Signature;
+
+        let sig =
+            Signature::from_data(b"committer t <t@example.com> 1000000000 +0000".to_vec()).unwrap();
+        // Craft SHA-256 OIDs directly (overriding the ids/tree/parents) so the
+        // graph is built for a SHA-256 repository without touching the global
+        // hash kind — `build_commit_graph` keys everything off the OID width and
+        // kind, not the process-wide setting.
+        let sha256 = |b: u8| ObjectHash::Sha256([b; 32]);
+        let mut root = Commit::new(sig.clone(), sig.clone(), sha256(0x10), vec![], "root");
+        root.id = sha256(0xA1);
+        let mut child = Commit::new(
+            sig.clone(),
+            sig.clone(),
+            sha256(0x11),
+            vec![root.id],
+            "child",
+        );
+        child.id = sha256(0xB2);
+
+        let mut commits = HashMap::new();
+        commits.insert(root.id, root);
+        commits.insert(child.id, child);
+        let bytes = build_commit_graph(&commits).expect("commit-graph bytes");
+
+        // Header hash version is 2 (SHA-256); chunk count is 3 (no octopus).
+        assert_eq!(&bytes[0..4], b"CGPH");
+        assert_eq!(&bytes[4..8], &[1, 2, 3, 0]);
+
+        // OIDL stores 32-byte object ids; the OIDF chunk follows the header+TOC.
+        let oidf_off = u64::from_be_bytes(bytes[12..20].try_into().unwrap()) as usize;
+        let oidl_off = u64::from_be_bytes(bytes[24..32].try_into().unwrap()) as usize;
+        assert_eq!(
+            oidl_off - (oidf_off + 1024),
+            0,
+            "OIDL right after OIDF+fanout"
+        );
+        let cdat_off = u64::from_be_bytes(bytes[36..44].try_into().unwrap()) as usize;
+        assert_eq!(cdat_off - oidl_off, 2 * 32, "two 32-byte OIDs in OIDL");
+
+        // Trailer is the SHA-256 of the body (32 bytes), not SHA-1.
+        let body = &bytes[..bytes.len() - 32];
+        assert_eq!(&sha2::Sha256::digest(body)[..], &bytes[bytes.len() - 32..]);
     }
 }

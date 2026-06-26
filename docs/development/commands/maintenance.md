@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。`commit-graph` task 现写出 Git 兼容 v1 commit-graph 文件（`build_commit_graph`：CGPH 头 + OIDF/OIDL/CDAT chunk + 拓扑 generation + SHA-1 trailer → `.libra/objects/info/commit-graph`；octopus(>2 父)经 EDGE chunk（`GRAPH_EXTRA_EDGES_NEEDED`/`GRAPH_LAST_EDGE`）写出已支持；SHA-256 仓库暂跳过并提示——仍需 32 字节 OID 与 SHA-256 trailer）；`prefetch` task 现遍历 `ConfigKv::all_remote_configs()` 并复用 `fetch_repository_safe` 预取所有已配置远端（无远端时跳过；`--dry-run` 仅列出）——与 Git 不同：Libra 复用普通 fetch 路径、刷新标准 remote-tracking refs 而非 `refs/prefetch/` 命名空间（intentionally-different，因 `maintenance` 是显式 opt-in 运行）
+- 兼容级别：`partial`。`run` / `register` / `unregister` / `status` / `start` / `stop` exposed；`start`/`stop` 安装/移除 OS 调度入口（macOS 写 launchd LaunchAgents plist，登录时自动加载；其他 Unix 写 cron 片段），调度目录可由 `LIBRA_MAINTENANCE_AGENT_DIR` 覆盖（测试用）。`commit-graph` task 现写出 Git 兼容 v1 commit-graph 文件（`build_commit_graph`：CGPH 头 + OIDF/OIDL/CDAT chunk + 拓扑 generation + 按仓库 hash kind 的 trailer（SHA-1 或 SHA-256）→ `.libra/objects/info/commit-graph`；octopus(>2 父)经 EDGE chunk（`GRAPH_EXTRA_EDGES_NEEDED`/`GRAPH_LAST_EDGE`）写出已支持；SHA-256 仓库写 32 字节 OID（OIDL/CDAT 按 `hash_len` 自适应）+ header hash version 2 + SHA-256 trailer 已支持）；`prefetch` task 现遍历 `ConfigKv::all_remote_configs()` 并复用 `fetch_repository_safe` 预取所有已配置远端（无远端时跳过；`--dry-run` 仅列出）——与 Git 不同：Libra 复用普通 fetch 路径、刷新标准 remote-tracking refs 而非 `refs/prefetch/` 命名空间（intentionally-different，因 `maintenance` 是显式 opt-in 运行）
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -54,7 +54,7 @@ flowchart TD
 |---|---|---|
 | 兼容矩阵说明 | `run` / `register` / `unregister` / `status` / `start` / `stop` exposed; `commit-graph` 与 `prefetch` 已有实际任务实现，但仍保留 Git 语义差异 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | ✅ 已实现 | commit-graph octopus merge | `build_commit_graph` 对 >2 父提交写出 EDGE chunk：CDAT 第二父槽置 `GRAPH_EXTRA_EDGES_NEEDED`(0x80000000) 按位或 EDGE 索引，EDGE chunk 列出第 2..N 个父的位置、末项按位或 `GRAPH_LAST_EDGE`(0x80000000)；有 octopus 时 chunk 数 3→4、TOC 增 `EDGE` 项、偏移顺延。非 octopus 输出逐字节不变。带单元测试 `commit_graph_build_writes_octopus_edge_chunk`（构造 3 父 merge，解析 EDGE/EXTRA 位/LAST 位）。注：libra `merge` 不支持 >2 分支，故 octopus 提交来自导入历史，不可经 CLI 复现。 |
-| 兼容差异项 | commit-graph SHA-256 | 当前会写 Git-compatible v1 commit-graph 文件（含 octopus）；SHA-256 仓库会跳过并提示（需 32 字节 OID 与 SHA-256 trailer，`sha2` 依赖未引入）。后续补齐时需同步兼容矩阵和回归测试。 |
+| ✅ 已实现 | commit-graph SHA-256 | `build_commit_graph` 按 `oids[0].kind()` 选择 header hash version（1=SHA-1/2=SHA-256）与 trailer 摘要（`sha1::Sha1` / `sha2::Sha256`，新增 `sha2` 直接依赖，复用既有 transitive 0.10）；OIDL/CDAT 的 OID 宽度本就由 `hash_len = oids[0].size()` 自适应（20/32）。trailer 由 OID kind 决定（不依赖全局 hash kind），故对导入的 SHA-256 历史也自洽。带单元测试 `commit_graph_build_handles_sha256_repository`（直接构造 32 字节 OID，断言 header version 2 + 32 字节 OIDL 条目 + SHA-256 trailer）。 |
 | 兼容差异项 | prefetch | 当前复用普通 fetch 路径刷新标准 remote-tracking refs；不同于 Git 的 `refs/prefetch/` namespace。无 remote 时跳过；后续若改为 Git namespace 语义，需要同步兼容矩阵和测试。 |
 
 ## 维护要求
