@@ -1868,3 +1868,79 @@ async fn test_config_typed_get() {
     assert_cli_success(&e, "--bool get empty");
     assert_eq!(String::from_utf8_lossy(&e.stdout).trim(), "false");
 }
+
+/// `--type=<bool|int|path>` (and the `--bool`/`--int`/`--path` shortcuts) also
+/// apply when SETTING: the value is validated and canonicalized before storage,
+/// matching `git config --type` (e.g. `yes` → `true`, `1k` → `1024`). An
+/// invalid value errors without storing, and `--type` with a non-get/non-set
+/// mode is still rejected.
+#[tokio::test]
+#[serial]
+async fn test_config_typed_set() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    let get = |k: &str| -> String {
+        let out = run_libra_command(&["config", "--local", "--get", k], p);
+        assert_cli_success(&out, "get");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // bool canonicalizes on set (yes → true).
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "--local", "--type", "bool", "flag.on", "yes"],
+            p,
+        ),
+        "typed bool set",
+    );
+    assert_eq!(get("flag.on"), "true");
+
+    // --bool shortcut likewise (ON → true).
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--bool", "flag.up", "ON"], p),
+        "--bool set",
+    );
+    assert_eq!(get("flag.up"), "true");
+
+    // int with a k multiplier canonicalizes (1k → 1024).
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--type", "int", "num.size", "1k"], p),
+        "typed int set",
+    );
+    assert_eq!(get("num.size"), "1024");
+
+    // path expands ~/ on set.
+    assert_cli_success(
+        &run_libra_command(&["config", "--local", "--path", "dir.home", "~/work"], p),
+        "typed path set",
+    );
+    assert!(
+        get("dir.home").ends_with("/work") && !get("dir.home").starts_with('~'),
+        "path is home-expanded: {}",
+        get("dir.home")
+    );
+
+    // An invalid typed value errors and does NOT store the key.
+    let bad = run_libra_command(&["config", "--local", "--type", "int", "n.bad", "abc"], p);
+    assert!(!bad.status.success(), "invalid int must error");
+    let missing = run_libra_command(&["config", "--local", "--get", "n.bad"], p);
+    assert!(
+        !missing.status.success(),
+        "the invalid value must not be stored"
+    );
+
+    // `--type` with a non-get/non-set mode (here `--unset`) is still a usage error.
+    let unset = run_libra_command(
+        &["config", "--local", "--type", "int", "--unset", "num.size"],
+        p,
+    );
+    assert_eq!(
+        unset.status.code(),
+        Some(129),
+        "--type with --unset is a usage error: {}",
+        String::from_utf8_lossy(&unset.stderr)
+    );
+}

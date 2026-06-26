@@ -233,7 +233,7 @@ These flags provide backward compatibility with `git config` invocation patterns
 | `--import` | `import` |
 | `--get-regexp` | `get --regexp <key>` |
 | `--show-origin` | `list --show-origin` |
-| `--type=<bool\|int\|path>`, `--bool`, `--int`, `--path` | Canonicalize the read value (with `--get`/`--get-all`/`--get-regexp`): bool variants → `true`/`false`; int with optional k/m/g (1024-based) multiplier; path expands a leading `~`/`~/`. Invalid values and non-get use are rejected (exit 129). |
+| `--type=<bool\|int\|path>`, `--bool`, `--int`, `--path` | Canonicalize a value when reading (`--get`/`--get-all`/`--get-regexp`) **and when setting**: bool variants → `true`/`false`; int with optional k/m/g (1024-based) multiplier; path expands a leading `~`/`~/`. On a set the value is validated/canonicalized before storage (matching `git config --type`: `yes` → `true`, `1k` → `1024`), and an invalid value errors without storing. A non-get/non-set mode is rejected (exit 129). |
 | `--remove-section <name>` | Delete the keys in section `<name>` in one transaction, using Git's section/subsection identity (so `--remove-section branch` removes `branch.<key>` but not the `branch.feature.*` subsection). Missing section → exit 128. |
 | `--rename-section <old> <new>` | Move section `<old>`'s keys to `<new>`, preserving each value and its encryption flag. Missing source → exit 128; identical names → exit 2; an already-existing destination section is refused → exit 128. |
 
@@ -431,7 +431,7 @@ Git exits with code 1 when a key is not found, which is indistinguishable from o
 | Edit in editor | `git config -e` | `jj config edit` | Not supported (SQLite storage) |
 | Regex search | `git config --get-regexp` | No | `libra config get --regexp` |
 | Show origin | `git config --show-origin` | No | `libra config list --show-origin` |
-| Type coercion | `--type=bool\|int\|path` | No (TOML types) | `--type=bool\|int\|path` + `--bool`/`--int`/`--path` (read-time canonicalization; set-time validation not yet) |
+| Type coercion | `--type=bool\|int\|path` | No (TOML types) | `--type=bool\|int\|path` + `--bool`/`--int`/`--path` (canonicalize on both read and set) |
 | Default fallback | `--default value` | No | `--default value` |
 | Null-delimited | `-z` | No | `-z` / `--null` (`value\0` for get/get-all; `key\nvalue\0` for `--get-regexp`/`--list`; `key\0` with `--name-only`) |
 | Rename/remove section | Yes | No | `--remove-section` / `--rename-section` (Git section/subsection semantics; rename refuses an existing destination) |

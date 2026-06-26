@@ -36,6 +36,7 @@ static GLOBAL_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
 const EXAMPLES: &str = r#"EXAMPLES:
     libra config set user.name "John Doe"              Set local config value
     libra config get user.name                         Get value (cascade lookup)
+    libra config --type int core.editorTimeout 30       Validate/canonicalize a typed value on set
     libra config list                                  List all local entries
     libra config list --show-origin                    List with scope labels
     libra config set --global user.email "j@x.com"     Set global config
@@ -511,6 +512,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
             encrypt,
             plaintext,
             stdin,
+            value_type,
         } => {
             handle_set(
                 &key,
@@ -519,6 +521,7 @@ async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()>
                 encrypt,
                 plaintext,
                 stdin,
+                value_type,
                 scope,
                 output,
             )
@@ -609,6 +612,9 @@ enum ResolvedCommand {
         encrypt: bool,
         plaintext: bool,
         stdin: bool,
+        /// Validate and canonicalize the value to this type before storing
+        /// (`--type`/`--bool`/etc. on a set, matching `git config --type`).
+        value_type: Option<ConfigValueType>,
     },
     Get {
         key: String,
@@ -657,21 +663,32 @@ enum ResolvedCommand {
 }
 
 fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
-    // `--type`/`--bool`/`--int`/`--path` canonicalize a value when READING, so
-    // they are only valid with a get operation. Resolve them once and reject
-    // any other mode up front rather than silently ignoring the flag.
-    let value_type = resolve_value_type(args)?;
-    if value_type.is_some()
-        && !(args.get
-            || args.get_all
-            || args.get_regexp
-            || matches!(args.command, Some(ConfigCommand::Get { .. })))
+    let cmd = resolve_command_typed(args)?;
+
+    // `--type`/`--bool`/`--int`/`--path` canonicalize a value when reading and
+    // validate/canonicalize it when setting, so they apply only to get and set
+    // operations; any other mode is rejected up front (Git silently ignores the
+    // flag there, but Libra prefers an explicit usage error).
+    if resolve_value_type(args)?.is_some()
+        && !matches!(
+            cmd,
+            ResolvedCommand::Get { .. } | ResolvedCommand::Set { .. }
+        )
     {
         return Err(CliError::command_usage(
-            "--type/--bool/--int/--path is only valid with --get/--get-all/--get-regexp",
+            "--type/--bool/--int/--path is only valid with --get/--get-all/--get-regexp or when setting a value",
         )
         .with_stable_code(StableErrorCode::CliInvalidArguments));
     }
+
+    Ok(cmd)
+}
+
+fn resolve_command_typed(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
+    // The type flag is threaded into get (canonicalize on read) and set
+    // (validate/canonicalize on write); applicability to the resolved command is
+    // checked by the caller.
+    let value_type = resolve_value_type(args)?;
 
     // If an explicit subcommand was provided, use it directly
     if let Some(ref cmd) = args.command {
@@ -690,6 +707,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
                 encrypt: *encrypt,
                 plaintext: *plaintext,
                 stdin: *stdin,
+                value_type,
             },
             ConfigCommand::Get {
                 key,
@@ -888,6 +906,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
             encrypt: false,
             plaintext: false,
             stdin: false,
+            value_type,
         });
     }
 
@@ -901,6 +920,7 @@ fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
         encrypt: false,
         plaintext: false,
         stdin: false,
+        value_type,
     })
 }
 
@@ -916,6 +936,7 @@ async fn handle_set(
     encrypt: bool,
     plaintext: bool,
     stdin: bool,
+    value_type: Option<ConfigValueType>,
     scope: ConfigScope,
     output: &OutputConfig,
 ) -> CliResult<()> {
@@ -1009,6 +1030,16 @@ async fn handle_set(
             ))
             .with_exit_code(2));
         }
+    };
+
+    // `--type`/`--bool`/`--int`/`--path` on a set validate and canonicalize the
+    // value before it is stored (matching `git config --type`: `yes` -> `true`,
+    // `1k` -> `1024`, `~/x` -> the expanded path), erroring on a value that is
+    // not valid for the type. Canonicalize the logical value before any
+    // encryption so the stored secret round-trips to the canonical form.
+    let resolved_value = match value_type {
+        Some(value_type) => canonicalize_typed_value(&resolved_value, value_type)?,
+        None => resolved_value,
     };
 
     // Determine encryption
