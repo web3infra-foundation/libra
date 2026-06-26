@@ -185,6 +185,7 @@ async fn test_clone_branch() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -224,6 +225,7 @@ async fn test_clone_bare_repository() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -278,6 +280,7 @@ async fn test_clone_branch_single_branch() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -316,6 +319,7 @@ async fn test_clone_default_branch() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -354,6 +358,7 @@ async fn test_clone_default_branch_single_branch() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -394,6 +399,7 @@ async fn test_clone_to_existing_empty_dir() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -437,6 +443,7 @@ async fn test_clone_to_existing_dir() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -476,6 +483,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -514,6 +522,7 @@ async fn test_clone_with_depth() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -552,6 +561,7 @@ async fn test_clone_with_depth_and_branch() {
         origin: None,
         local: false,
         no_local: false,
+        reject_shallow: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -827,4 +837,76 @@ fn test_clone_local_flag_accepted_for_local_source() {
         out.status.success(),
         "clone --local --no-local should succeed"
     );
+}
+
+/// `--reject-shallow` allows a normal clone and a `--depth` clone (the
+/// depth-induced shallowness is expected); it only rejects an *unrequested*
+/// shallow result (a shallow source), which the unit test
+/// `clone_should_reject_shallow_only_for_unrequested_shallowness` covers.
+#[test]
+#[serial]
+fn test_clone_reject_shallow_allows_normal_and_depth() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    for i in 0..3 {
+        fs::write(sp.join("f.txt"), format!("v{i}\n")).expect("write f");
+        assert!(
+            run_libra_command(&["add", "f.txt"], sp).status.success(),
+            "add"
+        );
+        assert!(
+            run_libra_command(&["commit", "-m", &format!("c{i}"), "--no-verify"], sp)
+                .status
+                .success(),
+            "commit c{i}"
+        );
+    }
+    let source_str = sp.to_str().unwrap();
+
+    let dest_root = tempdir().expect("dest root");
+    // A full `--reject-shallow` clone of a non-shallow source succeeds.
+    let full = dest_root.path().join("full");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--reject-shallow",
+            source_str,
+            full.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "--reject-shallow on a non-shallow source succeeds: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(full.join(".libra").exists(), "full clone created");
+
+    // `--reject-shallow --depth` is allowed: the shallowness was requested.
+    let shallow = dest_root.path().join("shallow");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--reject-shallow",
+            "--depth",
+            "2",
+            &format!("file://{source_str}"),
+            shallow.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "--reject-shallow with --depth is allowed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(shallow.join(".libra").exists(), "depth clone created");
 }

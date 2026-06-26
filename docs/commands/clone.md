@@ -149,6 +149,25 @@ libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
 ```
 
+### `--reject-shallow`
+
+Fail if the clone would be a shallow repository that you did not request — i.e.
+the source repository is shallow — matching `git clone --reject-shallow`
+(exit 128). Combining it with `--depth` is allowed: the depth-induced
+shallowness is expected and not rejected. On rejection the partially-created
+destination is removed.
+
+Two narrowings vs Git: (1) Libra's clone of a local-path source re-fetches the
+full history rather than inheriting the source's shallow marker, so this check
+is most meaningful when cloning a shallow *remote*; (2) because Libra cannot
+distinguish a shallow source from `--depth`-induced shallowness, passing
+`--depth` suppresses the check entirely (Git would still reject a shallow source
+with `--depth`).
+
+```bash
+libra clone --reject-shallow git@github.com:user/repo.git
+```
+
 ### `--tags` / `--no-tags`
 
 `libra clone` fetches **all** tags by default (matching Git). `--no-tags` clones

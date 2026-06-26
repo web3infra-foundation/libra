@@ -162,6 +162,35 @@ pub struct CloneArgs {
     /// Libra never hardlinks objects, so there is nothing to disable.
     #[clap(long = "no-local", overrides_with = "local")]
     pub no_local: bool,
+
+    /// Fail if the clone would be a shallow repository that was not explicitly
+    /// requested — i.e. the source repository is shallow (matching
+    /// `git clone --reject-shallow`). Two narrowings vs Git: (1) Libra cannot
+    /// distinguish a shallow source from `--depth`-induced shallowness, so
+    /// passing `--depth` suppresses this check entirely (Git would still reject);
+    /// (2) cloning a local-path source re-fetches full history and does not
+    /// inherit the source's shallow marker, so the check is most meaningful for
+    /// shallow remotes.
+    #[clap(long = "reject-shallow")]
+    pub reject_shallow: bool,
+}
+
+/// `--reject-shallow`: refuse a clone that ended up shallow without the user
+/// asking for it. A shallow result is fine when the user passed `--depth`;
+/// otherwise it means the source repository was shallow, which Git rejects.
+///
+/// NARROWING vs Git: Git rejects a shallow SOURCE regardless of `--depth`, but
+/// Libra has no protocol signal distinguishing a shallow source from
+/// `--depth`-induced shallowness (both only leave a `.libra/shallow` marker), so
+/// when `--depth` is given Libra does NOT reject. The common cases still match
+/// Git: `--reject-shallow` alone rejects a shallow result, and a full clone of a
+/// non-shallow source is allowed.
+fn clone_should_reject_shallow(
+    reject_shallow: bool,
+    is_shallow: bool,
+    depth: Option<usize>,
+) -> bool {
+    reject_shallow && is_shallow && depth.is_none()
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -241,6 +270,8 @@ pub enum CloneError {
     RestoreDirectory { path: PathBuf, source: io::Error },
     #[error("failed to initialize repository")]
     InitializeRepository { source: InitError },
+    #[error("source repository is shallow, reject to clone")]
+    RejectShallow,
     #[error("remote branch {branch} not found in upstream {remote}")]
     RemoteBranchNotFound { branch: String, remote: String },
     #[error("failed to inspect local branch state after fetch: {source}")]
@@ -458,6 +489,11 @@ impl From<CloneError> for CliError {
                 // Transparently reuse init's complete error mapping.
                 source.into()
             }
+            // `--reject-shallow` on a shallow source: mirror Git's exit 128.
+            CloneError::RejectShallow => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_exit_code(128)
+                .with_hint("the source is shallow; clone without --reject-shallow, or deepen the source first"),
             CloneError::RemoteBranchNotFound {
                 ref branch,
                 ref remote,
@@ -2994,6 +3030,20 @@ async fn clone_into_destination(
     )
     .await?;
 
+    // `--reject-shallow`: if the fetch left a shallow boundary that the user did
+    // not request via `--depth`, the source repository was shallow — refuse it
+    // (matching `git clone --reject-shallow`). The cwd is still the new repo
+    // here, so the shallow marker lives at the current `.libra/shallow`.
+    let is_shallow = std::fs::read_to_string(util::storage_path().join("shallow"))
+        .map(|contents| !contents.trim().is_empty())
+        .unwrap_or(false);
+    if clone_should_reject_shallow(args.reject_shallow, is_shallow, args.depth) {
+        // Restore the cwd before returning so the caller's cleanup can remove
+        // the partially-created destination.
+        let _ = env::set_current_dir(original_dir);
+        return Err(CloneError::RejectShallow);
+    }
+
     let mut warnings = init_output.warnings.clone();
     let mut gitignore_converted = Vec::new();
     if !args.bare {
@@ -3519,12 +3569,28 @@ mod tests {
     /// build a minimal `CloneArgs` skeleton with a `libra+cloud://` remote
     /// and every flag at its non-cloud default. Each test then flips the
     /// single unsupported flag it cares about.
+    #[test]
+    fn clone_should_reject_shallow_only_for_unrequested_shallowness() {
+        // Reject only when shallow AND the user did not ask for --depth.
+        assert!(clone_should_reject_shallow(true, true, None));
+        // --depth makes the shallowness expected, so it is allowed. NOTE: this
+        // also (intentionally) suppresses rejection for a shallow SOURCE cloned
+        // with --depth — a documented narrowing vs Git, since Libra cannot tell
+        // the two apart.
+        assert!(!clone_should_reject_shallow(true, true, Some(1)));
+        // A non-shallow result never triggers a rejection.
+        assert!(!clone_should_reject_shallow(true, false, None));
+        // Without the flag, nothing is rejected.
+        assert!(!clone_should_reject_shallow(false, true, None));
+    }
+
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
             no_single_branch: false,
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3740,6 +3806,7 @@ mod tests {
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3833,6 +3900,7 @@ mod tests {
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3914,6 +3982,7 @@ mod tests {
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -3985,6 +4054,7 @@ mod tests {
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4053,6 +4123,7 @@ mod tests {
             origin: None,
             local: false,
             no_local: false,
+            reject_shallow: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),

@@ -105,6 +105,16 @@ libra clone --depth 1 git@github.com:user/repo.git
 libra clone --depth 50 git@github.com:user/repo.git
 ```
 
+### `--reject-shallow`
+
+若克隆结果是你未请求的浅仓库（即源仓库本身是浅克隆），则失败，对齐 `git clone --reject-shallow`（exit 128）。与 `--depth` 同用是允许的：`--depth` 引入的浅克隆是预期的、不会被拒绝。拒绝时会删除部分创建的目标。
+
+相对 Git 的两点收窄：(1) Libra 克隆本地路径源时会重取完整历史、不继承源的浅标记，故该检查主要在克隆浅 *remote* 时有意义；(2) 由于 Libra 无法区分“源是浅克隆”与“`--depth` 导致的浅克隆”，给出 `--depth` 会整体抑制该检查（Git 即便带 `--depth` 也会拒绝浅源）。
+
+```bash
+libra clone --reject-shallow git@github.com:user/repo.git
+```
+
 ### `--no-progress`
 
 在克隆期间抑制 fetch 进度条（“Receiving objects” spinner），对齐 `git clone --no-progress`。其它输出不受影响。
