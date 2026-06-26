@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、`--merges`/`--no-merges`、top 限制、mailmap、范围解析和 JSON 摘要，同时把 format、stdin 和更复杂过滤作为差异项。
+`libra shortlog` 的目标是按作者或提交者汇总提交历史。实现需要支持 committer grouping、`--group=author|committer|trailer:<key>`、`--merges`/`--no-merges`、top 限制、mailmap、范围解析和 JSON 摘要，同时把 stdin 和更复杂过滤作为差异项（`--format` 已实现）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--merges`/`--no-merges`（互相覆盖）、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）已支持；`--format` 和 stdin 输入尚未公开。
+- 兼容级别：`partial`。基础 author summary、email、count sorting、时间过滤、单 revision、`-c`/`--committer` 分组、`--group=author|committer|trailer:<key>`（按提交消息 trailer 值分组）、`--merges`/`--no-merges`（互相覆盖）、`--top`/`--min-count`/`--reverse`、`--author` 过滤、`-w[<width>[,<indent1>[,<indent2>]]]` 主题换行（默认 76/6/9；width 0 仅缩进不换行）、`--format <FORMAT>`（复用 `log --format` 的 `CommitFormatter`/`format_custom` 自定义模板渲染每条提交行）已支持；stdin 输入尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -45,8 +45,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/shortlog.md`。
-- Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges | --merges] [--since <date>] [--until <date>]`。
-- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--group <TYPE>`（`author`/`committer`/`trailer:<key>`）、`--no-merges`、`--merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`-w, --wrap [<W>[,<I1>[,<I2>]]]`、`[<revision>]`。`--merges` 与 `--no-merges` 互为反向且 `overrides_with`（最后给出者生效）：`--no-merges` 保留父数 ≤1，`--merges` 保留父数 ≥2。`-w` 由 `parse_wrap_spec` 解析（默认 76/6/9，缺省组件回落默认值，非法值报 `LBR-CLI-002`），存入 `ShortlogOutput.wrap`（serde skip），渲染时由 `wrap_subject_lines` 对每个主题做词级换行（首行缩进 I1、续行 I2；width 0 仅缩进）。
+- Synopsis：`libra shortlog [<revision>] [-n] [-s] [-e] [-c] [--no-merges | --merges] [--since <date>] [--until <date>] [-w[<W>[,<I1>[,<I2>]]]] [--format <FORMAT>]`。
+- 公开参数/子命令包括：`-n, --numbered`、`-s, --summary`、`-e, --email`、`-c, --committer`、`--group <TYPE>`（`author`/`committer`/`trailer:<key>`）、`--no-merges`、`--merges`、`--top <N>`、`--min-count <N>`、`--reverse`、`--since <DATE>`、`--until <DATE>`、`--author <PATTERN>`、`-w, --wrap [<W>[,<I1>[,<I2>]]]`、`--format <FORMAT>`、`[<revision>]`。`--merges` 与 `--no-merges` 互为反向且 `overrides_with`（最后给出者生效）：`--no-merges` 保留父数 ≤1，`--merges` 保留父数 ≥2。`-w` 由 `parse_wrap_spec` 解析（默认 76/6/9，缺省组件回落默认值，非法值报 `LBR-CLI-002`），存入 `ShortlogOutput.wrap`（serde skip），渲染时由 `wrap_subject_lines` 对每个主题做词级换行（首行缩进 I1、续行 I2；width 0 仅缩进）。
 
 
 ## 还未实现的功能
@@ -54,7 +54,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | ✅ 已实现 | 分组方式 `--group=author\|committer\|trailer:<key>` | `resolve_group_mode` 解析 `--group`（优先于 `-c`）；`trailer:<key>` 经 `extract_trailer_identities` 从消息末段 trailer 块按 key（忽略大小写）提取每个值作为分组（单提交可贡献 0..N 组）。带集成测试（`group_trailer_groups_by_trailer_value`）。 |
-| 兼容差异项 | 格式化输出 | 原始对照：不支持；相关参数/替代：--format=<format>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 格式化输出 `--format=<format>` | `ShortlogArgs.format` + `aggregate_shortlog` 在分组时用 `log` 的 `CommitFormatter::new(FormatType::Custom(fmt))` 渲染每条提交行（取代默认 subject），short-hash 宽度用 `util::get_min_unique_hash_length(&commits).max(7)` 与 `libra log` 对齐；支持 `log --format` 的同一占位符子集（`%H`/`%h`/`%s`/`%f`/`%an`/`%ae`/`%ad`/`%cn`/`%ce`/`%cd`/`%d`）。渲染行经 split('\n') 后按既有 6 空格缩进 + `-w` 换行路径输出（默认 subject 为单行，故对默认路径是 no-op）。`--summary` 仍优先（仅计数）。带集成测试（`test_shortlog_format_renders_custom_per_commit_line`）。 |
 | 兼容差异项 | 管道输入 | 原始对照：不支持；相关参数/替代：从 stdin 读取管道输入；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | 作者过滤 `--author <PATTERN>` | 聚合前按作者 `name <email>` 的大小写不敏感子串过滤（即使配合 `-c` 也按作者过滤）。带 `author_identity_matches` 单元测试。 |
 | ✅ 已实现 | 换行宽度 `-w[<width>[,<indent1>[,<indent2>]]]` | `ShortlogArgs.wrap` + `parse_wrap_spec`（默认 76/6/9，width 0 仅缩进）+ `wrap_subject_lines`（词级换行，首行 I1、续行 I2）。带集成测试（`shortlog_wrap_wraps_long_subjects`）。 |

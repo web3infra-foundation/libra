@@ -60,7 +60,10 @@ use git_internal::internal::object::commit::Commit;
 use serde::Serialize;
 
 use crate::{
-    internal::log::date_parser::parse_date,
+    internal::log::{
+        date_parser::parse_date,
+        formatter::{CommitFormatter, FormatContext, FormatType},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -78,6 +81,7 @@ EXAMPLES:
     libra shortlog --no-merges      Exclude merge commits from the summary
     libra shortlog --merges         Summarize only merge commits
     libra shortlog --top 5          Show only the top 5 authors
+    libra shortlog --format='%h %s' Render each commit line with a custom template
     libra shortlog --since 24h      Restrict to commits in the last 24 hours
     libra shortlog -w50             Wrap commit subjects at 50 columns
     libra shortlog --json           Structured JSON output for agents";
@@ -145,6 +149,12 @@ pub struct ShortlogArgs {
     /// `trailer:Co-authored-by`). Takes precedence over `-c`/`--committer`.
     #[clap(long = "group", value_name = "TYPE")]
     pub group: Option<String>,
+
+    /// Render each commit under its author header with a custom format string
+    /// (the same `%`-placeholders as `libra log --format`: `%H`/`%h`/`%s`/`%f`/
+    /// `%an`/`%ae`/`%ad`/`%cn`/`%ce`/`%cd`/`%d`) instead of the commit subject.
+    #[clap(long = "format", value_name = "FORMAT")]
+    pub format: Option<String>,
 
     /// Revision to summarize. Defaults to HEAD.
     pub revision: Option<String>,
@@ -433,6 +443,15 @@ fn aggregate_shortlog(
     let total_commits = commits.len();
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
+    // `--format`: render each commit with a custom template (the same renderer as
+    // `libra log --format`) instead of its subject. The short-hash width matches
+    // what `libra log` uses so `%h` is consistent across the two commands.
+    let formatter = args
+        .format
+        .as_ref()
+        .map(|fmt| CommitFormatter::new(FormatType::Custom(fmt.clone())));
+    let abbrev_len = util::get_min_unique_hash_length(&commits).max(7);
+
     for commit in commits {
         // Each commit contributes one identity for author/committer grouping,
         // or zero-or-more for trailer grouping (one per matching trailer value).
@@ -447,7 +466,18 @@ fn aggregate_shortlog(
             GroupMode::Trailer(key) => extract_trailer_identities(&commit.message, key),
         };
 
-        let subject = commit.format_message();
+        let subject = match &formatter {
+            Some(formatter) => {
+                let ctx = FormatContext {
+                    graph_prefix: "",
+                    decoration: "",
+                    abbrev_len,
+                    extra_hashes: "",
+                };
+                formatter.format(&commit, &ctx)
+            }
+            None => commit.format_message(),
+        };
 
         for (author_name, author_email) in identities {
             let key = if args.email {
@@ -539,17 +569,22 @@ fn render_shortlog_output(output: &ShortlogOutput, writer: &mut impl Write) -> C
 
         if !output.summary {
             for subject in &stats.subjects {
-                match output.wrap {
-                    Some((width, indent1, indent2)) => {
-                        for line in wrap_subject_lines(subject, width, indent1, indent2) {
-                            if !write_shortlog_line(writer, format_args!("{line}"))? {
-                                return Ok(());
+                // A `--format` template may render multiple physical lines; each
+                // is indented independently (a plain subject is always one line,
+                // so this is a no-op for the default path).
+                for physical in subject.split('\n') {
+                    match output.wrap {
+                        Some((width, indent1, indent2)) => {
+                            for line in wrap_subject_lines(physical, width, indent1, indent2) {
+                                if !write_shortlog_line(writer, format_args!("{line}"))? {
+                                    return Ok(());
+                                }
                             }
                         }
-                    }
-                    None => {
-                        if !write_shortlog_line(writer, format_args!("      {}", subject))? {
-                            return Ok(());
+                        None => {
+                            if !write_shortlog_line(writer, format_args!("      {}", physical))? {
+                                return Ok(());
+                            }
                         }
                     }
                 }

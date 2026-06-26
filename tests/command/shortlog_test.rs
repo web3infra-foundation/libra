@@ -85,6 +85,51 @@ fn test_shortlog_json_output_has_author_summary() {
     assert_eq!(json["data"]["authors"][0]["count"], 1);
 }
 
+#[test]
+fn test_shortlog_format_renders_custom_per_commit_line() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("second.txt"), "second\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "second.txt"], p), "add second");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "second commit", "--no-verify"], p),
+        "commit second",
+    );
+
+    // `--format` replaces the subject line with the rendered template, indented
+    // by the standard 6 spaces, while keeping the author header.
+    let output = run_libra_command(&["shortlog", "--format=* %s (%an)"], p);
+    assert_cli_success(&output, "shortlog --format");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("      * second commit (Test User)"),
+        "rendered template line present: {stdout}"
+    );
+    assert!(
+        stdout.contains("Test User"),
+        "author header present: {stdout}"
+    );
+    // The bare subject must not leak through (it is wrapped in the template).
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "second commit"),
+        "bare subject must not appear under --format: {stdout}"
+    );
+
+    // `%h` renders an abbreviated hex hash (7+ chars), indented.
+    let hashes = run_libra_command(&["shortlog", "--format=%h"], p);
+    assert_cli_success(&hashes, "shortlog --format=%h");
+    let htext = String::from_utf8_lossy(&hashes.stdout);
+    assert!(
+        htext.lines().any(|line| {
+            line.starts_with("      ") && {
+                let h = line.trim();
+                h.len() >= 7 && h.chars().all(|c| c.is_ascii_hexdigit())
+            }
+        }),
+        "an abbreviated hash line is present: {htext}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_shortlog_revision_argument_limits_history() {
