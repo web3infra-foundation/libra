@@ -1584,3 +1584,72 @@ fn test_for_each_ref_objectsize_errors_on_unreadable_object() {
         "--sort=objectsize must error on an unreadable object"
     );
 }
+
+#[test]
+fn test_for_each_ref_deref_objectname_atom_and_sort() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // An annotated tag dereferences to the commit; a lightweight tag and the
+    // branch do not (their %(*objectname) is empty).
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated", "atag"], p),
+        "annotated tag",
+    );
+    assert_cli_success(&run_libra_command(&["tag", "lw"], p), "lightweight tag");
+
+    let field = |reff: &str, fmt: &str| -> String {
+        let out = run_libra_command(&["for-each-ref", reff, &format!("--format={fmt}")], p);
+        assert_cli_success(&out, "for-each-ref field");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // `%(*objectname)` of the annotated tag equals the commit it points at; it is
+    // empty for the branch and the lightweight tag.
+    let commit = field("refs/heads/main", "%(objectname)");
+    assert!(!commit.is_empty(), "commit objectname is non-empty");
+    assert_eq!(
+        field("refs/tags/atag", "%(*objectname)"),
+        commit,
+        "annotated tag dereferences to the commit"
+    );
+    assert_eq!(
+        field("refs/tags/atag", "%(*objectname:short)"),
+        commit.chars().take(7).collect::<String>(),
+        "%(*objectname:short) is the 7-char abbreviation"
+    );
+    assert_eq!(
+        field("refs/heads/main", "%(*objectname)"),
+        "",
+        "a branch has no dereferenced object"
+    );
+    assert_eq!(
+        field("refs/tags/lw", "%(*objectname)"),
+        "",
+        "a lightweight tag has no dereferenced object"
+    );
+
+    // `--sort=*objectname`: refs with an empty dereference sort first, so the
+    // annotated tag (the only non-empty one) comes last; `-*objectname` reverses.
+    let order = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["for-each-ref", "--format=%(refname:short)"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "deref sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        order(&["--sort=*objectname"]).last().map(String::as_str),
+        Some("atag"),
+        "ascending: annotated tag (non-empty deref) sorts last"
+    );
+    assert_eq!(
+        order(&["--sort=-*objectname"]).first().map(String::as_str),
+        Some("atag"),
+        "descending: annotated tag sorts first"
+    );
+}

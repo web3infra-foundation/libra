@@ -36,6 +36,7 @@ EXAMPLES:
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
     libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
+    libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -67,8 +68,9 @@ pub struct ForEachRefArgs {
     pub format: Option<String>,
 
     /// Sort output by key: `refname`, `objectname`, `version:refname`
-    /// (alias `v:refname`), `objectsize`, or the date keys `committerdate` /
-    /// `authordate` / `creatordate`; prefix with `-` to reverse.
+    /// (alias `v:refname`), `objectsize`, `*objectname` (an annotated tag's
+    /// dereferenced object), or the date keys `committerdate` / `authordate` /
+    /// `creatordate`; prefix with `-` to reverse.
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -348,6 +350,8 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         sort_entries_by_date(&mut entries, date_key, reverse);
     } else if let Some(reverse) = sort.and_then(parse_objectsize_sort_key) {
         sort_entries_by_objectsize(&mut entries, reverse)?;
+    } else if let Some(reverse) = sort.and_then(parse_deref_objectname_sort_key) {
+        sort_entries_by_deref_objectname(&mut entries, reverse);
     } else {
         sort_entries(&mut entries, sort)?;
     }
@@ -650,6 +654,32 @@ fn sort_entries_by_objectsize(entries: &mut [RefEntry], reverse: bool) -> CliRes
     Ok(())
 }
 
+/// Recognise the `*objectname` (dereferenced object name) sort key, returning
+/// whether a leading `-` requested reversed order. Non-matching keys return
+/// `None`.
+fn parse_deref_objectname_sort_key(sort: &str) -> Option<bool> {
+    match sort.strip_prefix('-') {
+        Some("*objectname") => Some(true),
+        _ if sort == "*objectname" => Some(false),
+        _ => None,
+    }
+}
+
+/// Sort entries by `*objectname` (the object an annotated tag dereferences to,
+/// empty for non-tag refs); ties break by refname ascending, matching Git's
+/// final ordering key. Empty values sort together (lexicographically first).
+fn sort_entries_by_deref_objectname(entries: &mut [RefEntry], reverse: bool) {
+    let derefs: Vec<String> = entries.iter().map(ref_deref_objectname).collect();
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let primary = derefs[a].cmp(&derefs[b]);
+        let primary = if reverse { primary.reverse() } else { primary };
+        primary.then_with(|| entries[a].refname.cmp(&entries[b].refname))
+    });
+    let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
+    entries.clone_from_slice(&reordered);
+}
+
 /// Sort entries by a date key. The timestamp for each ref is resolved by loading
 /// its object (peeling annotated tags to their commit); ties break by refname
 /// ascending, matching Git's final ordering key.
@@ -723,6 +753,39 @@ fn peel_to_commit(start: ObjectHash) -> Option<Commit> {
             ObjectType::Commit => return load_object::<Commit>(&current).ok(),
             ObjectType::Tag => current = load_object::<GitTag>(&current).ok()?.object_hash,
             _ => return None,
+        }
+    }
+    None
+}
+
+/// Git's `%(*objectname)`: the object an annotated tag dereferences to (empty
+/// string for non-tag refs). Only annotated tags dereference; the value is the
+/// tag's recorded target object id, following nested tags via the tag objects'
+/// own `object_type`/`object_hash` (no need to read the target object itself,
+/// matching Git, which reports the recorded id).
+fn ref_deref_objectname(entry: &RefEntry) -> String {
+    if entry.objecttype != "tag" {
+        return String::new();
+    }
+    ObjectHash::from_str(&entry.objectname)
+        .ok()
+        .and_then(peel_tag_to_target)
+        .map(|hash| hash.to_string())
+        .unwrap_or_default()
+}
+
+/// Follow an annotated-tag object to the first non-tag object it points at,
+/// returning that object's id. Uses each tag's recorded `object_type`/
+/// `object_hash` (not the target's stored type) and is bounded by
+/// [`MAX_TAG_PEEL_DEPTH`].
+fn peel_tag_to_target(tag_hash: ObjectHash) -> Option<ObjectHash> {
+    let mut current = tag_hash;
+    for _ in 0..=MAX_TAG_PEEL_DEPTH {
+        let tag = load_object::<GitTag>(&current).ok()?;
+        if tag.object_type == ObjectType::Tag {
+            current = tag.object_hash;
+        } else {
+            return Some(tag.object_hash);
         }
     }
     None
@@ -907,6 +970,14 @@ fn render_format(
     } else {
         String::new()
     };
+    // `%(*objectname)` / `%(*objectname:short)`: the object an annotated tag
+    // dereferences to (empty for non-tag refs); computed lazily.
+    let deref_objectname = if format.contains("%(*objectname") {
+        ref_deref_objectname(entry)
+    } else {
+        String::new()
+    };
+    let deref_objectname_short: String = deref_objectname.chars().take(7).collect();
     // `%(HEAD)`: `*` for the currently checked-out branch, a space otherwise.
     let head_marker = if head_refname == Some(entry.refname.as_str()) {
         "*"
@@ -951,8 +1022,10 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 25] = [
+    let atoms: [(&str, &str); 27] = [
         ("objectsize", objectsize.as_str()),
+        ("*objectname:short", deref_objectname_short.as_str()),
+        ("*objectname", deref_objectname.as_str()),
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
