@@ -35,7 +35,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         storage::{Storage, local::LocalStorage},
         util::{DATABASE, try_get_storage_path},
     },
@@ -141,7 +141,7 @@ pub struct GraphArgs {
 }
 
 /// Execute `libra graph`.
-pub async fn execute_safe(args: GraphArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: GraphArgs, output: &OutputConfig) -> CliResult<()> {
     let requested_thread_id = Uuid::parse_str(&args.thread_id).map_err(|error| {
         CliError::command_usage(format!(
             "graph expects a canonical thread_id UUID (got '{}': {error})",
@@ -164,6 +164,12 @@ pub async fn execute_safe(args: GraphArgs, _output: &OutputConfig) -> CliResult<
             .with_stable_code(StableErrorCode::RepoCorrupt)
             .with_hint("run `libra code` first so the thread projection can be recorded.")
         })?;
+
+    // `--json` / `--machine` emit the graph as structured data instead of the
+    // interactive TUI — the agent-friendly path (the TUI needs a terminal).
+    if output.is_json() {
+        return emit_json_data("graph", &graph.to_json(), output);
+    }
 
     run_graph_tui(graph).map_err(|error| {
         CliError::io(format!("failed to run graph TUI: {error}"))
@@ -497,6 +503,59 @@ impl GraphObjectDetails {
 }
 
 impl ThreadGraph {
+    /// Build a structured JSON representation of the graph for `--json` /
+    /// `--machine` output (the agent-friendly alternative to the TUI). Each
+    /// `GraphLine` becomes a node with its kind, hierarchy depth, label, tags,
+    /// key/value detail, and (when present) the underlying object's summary.
+    fn to_json(&self) -> serde_json::Value {
+        use serde_json::{Map, Value, json};
+
+        let pairs_to_object = |pairs: &[(String, String)]| -> Value {
+            let map: Map<String, Value> = pairs
+                .iter()
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect();
+            Value::Object(map)
+        };
+
+        let nodes: Vec<Value> = self
+            .lines
+            .iter()
+            .map(|line| {
+                let object = line.object.as_ref().map(|object| {
+                    json!({
+                        "object_type": object.object_type,
+                        "hash": object.hash,
+                        "git_object_type": object.git_object_type,
+                        "summary": pairs_to_object(&object.summary),
+                    })
+                });
+                json!({
+                    "depth": line.depth,
+                    "kind": line.kind.history_type(),
+                    "id": line.id,
+                    "label": line.label,
+                    "tags": line.tags,
+                    "detail": pairs_to_object(&line.detail),
+                    "object": object,
+                })
+            })
+            .collect();
+
+        json!({
+            "thread_id": self.thread_id.to_string(),
+            "title": self.title,
+            "freshness": self.freshness,
+            "thread_version": self.thread_version,
+            "scheduler_version": self.scheduler_version,
+            "updated_at": self.updated_at.to_rfc3339(),
+            "selected_plan_id": self.selected_plan_id.map(|id| id.to_string()),
+            "active_task_id": self.active_task_id.map(|id| id.to_string()),
+            "active_run_id": self.active_run_id.map(|id| id.to_string()),
+            "nodes": nodes,
+        })
+    }
+
     fn from_projection(
         bundle: ThreadBundle,
         rows: ProjectionIndexRows,
@@ -2526,6 +2585,72 @@ mod tests {
         assert!(graph.lines[1].tags.contains(&"selected".to_string()));
         assert!(graph.lines[2].tags.contains(&"active".to_string()));
         assert!(graph.lines[3].tags.contains(&"completed".to_string()));
+    }
+
+    #[test]
+    fn to_json_serializes_metadata_and_nodes() {
+        let graph = ThreadGraph {
+            thread_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            title: Some("demo".into()),
+            freshness: "fresh".into(),
+            thread_version: 3,
+            scheduler_version: 2,
+            updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            selected_plan_id: Some(
+                Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap(),
+            ),
+            active_task_id: None,
+            active_run_id: None,
+            lines: vec![
+                GraphLine {
+                    depth: 0,
+                    kind: GraphNodeKind::Intent,
+                    id: "i1".into(),
+                    label: "Intent one".into(),
+                    tags: vec!["root".into()],
+                    detail: vec![("status".into(), "open".into())],
+                    object: Some(GraphObjectDetail {
+                        object_type: "intent".into(),
+                        hash: Some("abc123".into()),
+                        git_object_type: Some("blob".into()),
+                        summary: vec![("kind".into(), "intent".into())],
+                        raw_json_lines: Vec::new(),
+                    }),
+                },
+                GraphLine {
+                    depth: 1,
+                    kind: GraphNodeKind::Plan,
+                    id: "p1".into(),
+                    label: "Plan".into(),
+                    tags: Vec::new(),
+                    detail: Vec::new(),
+                    object: None,
+                },
+            ],
+        };
+
+        let json = graph.to_json();
+        assert_eq!(json["thread_id"], "11111111-1111-4111-8111-111111111111");
+        assert_eq!(json["title"], "demo");
+        assert_eq!(json["thread_version"], 3);
+        assert_eq!(
+            json["selected_plan_id"],
+            "33333333-3333-4333-8333-333333333333"
+        );
+        assert_eq!(json["active_task_id"], serde_json::Value::Null);
+
+        let nodes = json["nodes"].as_array().expect("nodes is an array");
+        assert_eq!(nodes.len(), 2);
+        // Node kinds use the lowercase history-type names.
+        assert_eq!(nodes[0]["kind"], "intent");
+        assert_eq!(nodes[0]["label"], "Intent one");
+        assert_eq!(nodes[0]["tags"][0], "root");
+        assert_eq!(nodes[0]["detail"]["status"], "open");
+        assert_eq!(nodes[0]["object"]["hash"], "abc123");
+        assert_eq!(nodes[0]["object"]["summary"]["kind"], "intent");
+        // A node with no underlying object serializes `object` as null.
+        assert_eq!(nodes[1]["kind"], "plan");
+        assert_eq!(nodes[1]["object"], serde_json::Value::Null);
     }
 
     #[test]

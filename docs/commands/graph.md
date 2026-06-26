@@ -6,6 +6,7 @@ Inspect a Libra Code thread as an interactive version graph.
 
 ```bash
 libra graph <THREAD_ID> [--repo <PATH>]
+libra --json graph <THREAD_ID> [--repo <PATH>]
 ```
 
 ## Description
@@ -21,6 +22,8 @@ libra graph <THREAD_ID> [--repo <PATH>]
 The graph highlights current/latest intent heads, selected plan heads, active tasks/runs, latest runs, and latest patchsets when that projection data is available.
 
 The Details pane shows both the projection links for the selected graph node and the persisted AI object content loaded from history, including a bounded pretty-printed JSON view of the corresponding `intent`, `plan`, `task`, `run`, or `patchset` object.
+
+With the global `--json` (or `--machine`) flag, `libra graph` skips the interactive TUI and instead emits the graph as a structured JSON document — the agent-friendly path, since the TUI requires a terminal. The envelope's `data` carries the thread metadata (`thread_id`, `title`, `freshness`, `thread_version`, `scheduler_version`, `updated_at`, and the `selected_plan_id` / `active_task_id` / `active_run_id` heads) and a `nodes` array; each node has its `depth`, `kind` (`intent` / `plan` / `task` / `run` / `patchset`), `id`, `label`, `tags`, key/value `detail`, and — when the underlying AI object was loaded — an `object` with its `object_type`, `hash`, `git_object_type`, and a `summary` of key fields.
 
 After `libra code` exits, it prints a follow-up command in this form:
 
@@ -65,7 +68,7 @@ libra code --resume 11111111-1111-4111-8111-111111111111
 
 ## Output
 
-`libra graph` is an interactive TUI command and does not produce line-oriented stdout. Run it from an interactive terminal. The command exits with a usage error if the thread ID is not a UUID, and with a repository/projection error if neither the current directory nor `--repo` resolves to a Libra repository, or if the requested thread cannot be found.
+By default `libra graph` is an interactive TUI command that does not produce line-oriented stdout — run it from an interactive terminal. With the global `--json` (or `--machine`) flag it instead skips the TUI and writes the graph as a single structured JSON document to stdout (the envelope described under *Description*), so it can run headless in agent/automation contexts. In both modes the command exits with a usage error if the thread ID is not a UUID, and with a repository/projection error if neither the current directory nor `--repo` resolves to a Libra repository, or if the requested thread cannot be found.
 
 ## Design Notes
 

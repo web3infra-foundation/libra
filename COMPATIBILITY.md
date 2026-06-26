@@ -29,7 +29,7 @@ batch document.
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
 | automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
 | usage | intentionally-different | Libra AI provider/model usage reporting extension, not a Git command |
-| graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
+| graph | intentionally-different | Libra AI graph inspection extension, not a Git command; the interactive thread-graph TUI plus a global `--json`/`--machine` structured output (thread metadata + a `nodes` array) for agents |
 | sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`) |
