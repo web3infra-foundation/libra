@@ -22,7 +22,9 @@ EXAMPLES:
     libra notes list                                  List all notes
     libra notes remove abc1234                        Remove a note
     libra notes add -f -m \"Updated\" HEAD            Force-overwrite a note
-    libra notes merge -s theirs refs/notes/other      Merge another notes ref (theirs on conflict)";
+    libra notes merge -s theirs refs/notes/other      Merge another notes ref (theirs on conflict)
+    libra notes prune -v                              Drop notes for objects that no longer exist
+    libra notes get-ref                               Print the active notes ref";
 
 #[derive(Parser, Debug)]
 #[command(about = "Add, show, list, or remove notes attached to commits")]
@@ -124,6 +126,18 @@ pub enum NotesSubcommand {
         #[clap(short = 's', long)]
         strategy: Option<String>,
     },
+    /// Remove notes for objects that no longer exist in the object store
+    Prune {
+        /// Report what would be pruned without deleting anything
+        #[clap(short = 'n', long = "dry-run")]
+        dry_run: bool,
+
+        /// Print each pruned object id
+        #[clap(short = 'v', long)]
+        verbose: bool,
+    },
+    /// Print the notes ref that operations act on (honors `--ref`)
+    GetRef,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,6 +202,20 @@ pub enum NotesOutput {
         merged: usize,
         skipped: usize,
         resolved_conflicts: Vec<String>,
+    },
+    #[serde(rename = "prune")]
+    Prune {
+        #[serde(rename = "ref")]
+        notes_ref: String,
+        pruned: Vec<String>,
+        dry_run: bool,
+        #[serde(skip)]
+        verbose: bool,
+    },
+    #[serde(rename = "get-ref")]
+    GetRef {
+        #[serde(rename = "ref")]
+        notes_ref: String,
     },
 }
 
@@ -393,6 +421,24 @@ pub async fn execute_safe(
             };
             render_output(&out, output)?;
         }
+        NotesSubcommand::Prune { dry_run, verbose } => {
+            let pruned = notes::prune(notes_ref, dry_run)
+                .await
+                .map_err(NotesCliError::from)?;
+            let out = NotesOutput::Prune {
+                notes_ref: notes_ref.to_string(),
+                pruned,
+                dry_run,
+                verbose,
+            };
+            render_output(&out, output)?;
+        }
+        NotesSubcommand::GetRef => {
+            let out = NotesOutput::GetRef {
+                notes_ref: notes_ref.to_string(),
+            };
+            render_output(&out, output)?;
+        }
     }
 
     Ok(())
@@ -586,6 +632,23 @@ fn render_output(result: &NotesOutput, output: &OutputConfig) -> CliResult<()> {
                     println!("  {}", short_display_hash(object));
                 }
             }
+        }
+        NotesOutput::Prune {
+            notes_ref: _,
+            pruned,
+            dry_run,
+            verbose,
+        } => {
+            // Git's `notes prune` is silent unless `-v`/`-n`; then it prints the
+            // (full) object id of each pruned note, one per line.
+            if *verbose || *dry_run {
+                for object in pruned {
+                    println!("{object}");
+                }
+            }
+        }
+        NotesOutput::GetRef { notes_ref } => {
+            println!("{notes_ref}");
         }
     }
 

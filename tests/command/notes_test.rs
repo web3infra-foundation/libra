@@ -1625,3 +1625,118 @@ fn test_notes_merge_ours_cat_sort_uniq_and_manual_code() {
         "cat_sort_uniq sorts the lines (apple<banana<cherry): {csu}"
     );
 }
+
+#[test]
+fn get_ref_prints_active_notes_ref() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    let default = run_libra_command(&["notes", "get-ref"], p);
+    assert_cli_success(&default, "notes get-ref");
+    assert_eq!(
+        String::from_utf8_lossy(&default.stdout).trim(),
+        "refs/notes/commits"
+    );
+
+    let custom = run_libra_command(&["notes", "--ref", "refs/notes/review", "get-ref"], p);
+    assert_cli_success(&custom, "notes --ref get-ref");
+    assert_eq!(
+        String::from_utf8_lossy(&custom.stdout).trim(),
+        "refs/notes/review"
+    );
+}
+
+#[test]
+fn prune_removes_notes_for_missing_objects_only() {
+    use super::loose_object_path;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // A note on HEAD (its object stays reachable) and a note on a second commit
+    // whose object we then delete, making that note stale.
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "keep"], p),
+        "note on HEAD",
+    );
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    std::fs::write(p.join("f2.txt"), "2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f2.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "stale"], p),
+        "note on c2",
+    );
+
+    // Move HEAD off c2 and delete c2's object so its note is now orphaned.
+    assert_cli_success(&run_libra_command(&["reset", "--hard", &head], p), "reset");
+    std::fs::remove_file(loose_object_path(p, &c2)).expect("remove c2 object");
+
+    // `--dry-run -v` reports the stale object without deleting it.
+    let dry = run_libra_command(&["notes", "prune", "--dry-run", "-v"], p);
+    assert_cli_success(&dry, "notes prune --dry-run");
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).trim() == c2,
+        "dry-run lists the stale object: {}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+
+    // The real prune removes the stale note; the HEAD note survives.
+    let pruned = run_libra_command(&["notes", "prune", "-v"], p);
+    assert_cli_success(&pruned, "notes prune");
+    assert_eq!(String::from_utf8_lossy(&pruned.stdout).trim(), c2);
+
+    let list = run_libra_command(&["notes", "list"], p);
+    assert_cli_success(&list, "notes list");
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        listed.contains(&head[..7]) && !listed.contains(&c2[..7]),
+        "the HEAD note survives and the stale note is gone: {listed}"
+    );
+}
+
+#[test]
+fn prune_aborts_on_unreadable_object_and_keeps_note() {
+    use super::loose_object_path;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "keep"], p),
+        "note on HEAD",
+    );
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // Corrupt (not remove) HEAD's loose object: the file still exists, so the
+    // object-store read fails with a NON-ObjectNotFound error. Prune must abort
+    // rather than treat the read failure as "object missing".
+    std::fs::write(loose_object_path(p, &head), b"corrupt not-an-object").expect("corrupt object");
+
+    let out = run_libra_command(&["notes", "prune"], p);
+    assert!(
+        !out.status.success(),
+        "prune must abort on an unreadable (corrupt) object, not prune it: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // The note must survive — `notes list` reads DB rows (not the corrupt
+    // object), so it still reports the note.
+    let list = run_libra_command(&["notes", "list"], p);
+    assert_cli_success(&list, "notes list after aborted prune");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains(&head[..7]),
+        "the note survives the aborted prune: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+}

@@ -6,7 +6,7 @@
 
 use std::str::FromStr;
 
-use git_internal::{hash::ObjectHash, internal::object::ObjectTrait};
+use git_internal::{errors::GitError, hash::ObjectHash, internal::object::ObjectTrait};
 use sea_orm::{ConnectionTrait, DbErr, Statement, TransactionTrait};
 
 use crate::{internal::db::get_db_conn_instance, utils::util};
@@ -381,6 +381,89 @@ pub async fn remove(
     txn.commit().await?;
 
     Ok(to_delete)
+}
+
+/// Remove notes whose annotated object no longer exists in the object store
+/// (`notes prune`). Returns the object ids actually pruned (sorted). With
+/// `dry_run`, the stale notes are reported but not deleted.
+///
+/// A note is stale only when its annotated object is genuinely absent
+/// (`GitError::ObjectNotFound`) or its id is malformed; any other object-store
+/// read error aborts the whole prune (so a transient/corrupt read never deletes
+/// a still-valid note). Unlike [`remove`], stale rows are NOT resolved through
+/// `resolve_object` (their objects are gone) — instead they are deleted by a
+/// `(notes_ref, object, blob)` compare-and-swap, so a note rewritten between
+/// classification and deletion (0 rows affected) is left intact and not
+/// reported as pruned.
+pub async fn prune(notes_ref: &str, dry_run: bool) -> Result<Vec<String>, NotesError> {
+    validate_notes_ref(notes_ref)?;
+
+    let storage = util::objects_storage();
+    // Each stale row carries its blob hash so the delete can compare-and-swap on
+    // it (like `remove`): if the note was rewritten between classification and
+    // deletion — e.g. its object was restored and re-annotated — the blob no
+    // longer matches, the delete affects 0 rows, and the row is left intact.
+    let mut stale: Vec<(String, Option<String>)> = Vec::new();
+    for entry in list(notes_ref, None).await? {
+        // A note is stale ONLY when its annotated object is genuinely absent
+        // (`ObjectNotFound`) or its id is malformed and can never name an object.
+        // Any other read error (transient/corrupt/tiered-storage failure) must
+        // abort rather than risk deleting a note for a still-valid object.
+        let missing = match ObjectHash::from_str(&entry.annotated_object) {
+            Err(_) => true,
+            Ok(hash) => match storage.get(&hash) {
+                Ok(_) => false,
+                Err(GitError::ObjectNotFound(_)) => true,
+                Err(other) => {
+                    return Err(NotesError::ResolveFailed(format!(
+                        "failed to check object {} while pruning notes in {notes_ref}: {other}",
+                        entry.annotated_object
+                    )));
+                }
+            },
+        };
+        if missing {
+            stale.push((entry.annotated_object, entry.note_hash));
+        }
+    }
+    stale.sort();
+    stale.dedup();
+
+    if dry_run {
+        return Ok(stale.into_iter().map(|(object, _)| object).collect());
+    }
+
+    let db = get_db_conn_instance().await;
+    let txn = db.begin().await?;
+    let mut pruned = Vec::new();
+    for (object, blob) in stale {
+        let result = match &blob {
+            Some(blob) => {
+                txn.execute(Statement::from_sql_and_values(
+                    sea_orm::DatabaseBackend::Sqlite,
+                    "DELETE FROM notes WHERE notes_ref = ? AND object = ? AND blob = ?",
+                    [notes_ref.into(), object.clone().into(), blob.clone().into()],
+                ))
+                .await?
+            }
+            None => {
+                txn.execute(Statement::from_sql_and_values(
+                    sea_orm::DatabaseBackend::Sqlite,
+                    "DELETE FROM notes WHERE notes_ref = ? AND object = ?",
+                    [notes_ref.into(), object.clone().into()],
+                ))
+                .await?
+            }
+        };
+        // Only report rows actually removed: a 0-row delete means the note
+        // changed concurrently and is no longer the stale row we inspected.
+        if result.rows_affected() > 0 {
+            pruned.push(object);
+        }
+    }
+    txn.commit().await?;
+
+    Ok(pruned)
 }
 
 /// Merge the notes of `other_ref` into `notes_ref` (`notes merge <other-ref>`).

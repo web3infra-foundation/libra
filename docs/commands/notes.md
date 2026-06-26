@@ -6,7 +6,7 @@ without modifying the commits themselves.
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
 > operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`) and
 > `merge` (a 2-way merge of the flat note rows, with `--strategy`) are supported.
-> The remaining advanced subcommands (`prune`, `get-ref`) and the interactive
+> `prune` and `get-ref` are also supported; the interactive
 > editor are not implemented.
 
 ## Synopsis
@@ -20,6 +20,8 @@ libra notes list [<object>]
 libra notes show [<object>]
 libra notes remove [<object>...]
 libra notes merge [-s|--strategy <manual|ours|theirs|union|cat_sort_uniq>] <other-ref>
+libra notes prune [-n|--dry-run] [-v]
+libra notes get-ref
 ```
 
 ## Description
@@ -57,6 +59,8 @@ Omitting a subcommand defaults to `list`.
 | `show` | Show the note text for an object. |
 | `remove` | Remove notes for one or more objects. |
 | `merge` | Merge another notes ref (`<other-ref>`) into the current `--ref`. A 2-way merge of the flat note rows: copies notes new to the current ref, skips identical ones, and resolves a differing note per `-s`/`--strategy` (`manual` default, `ours`, `theirs`, `union`, `cat_sort_uniq`). |
+| `prune` | Remove notes whose annotated object no longer exists in the object store. Silent by default; `-n`/`--dry-run` reports what would be pruned, `-v` prints each pruned object id. |
+| `get-ref` | Print the notes ref operations act on (honors `--ref`; default `refs/notes/commits`). |
 
 ### Flag examples
 
@@ -204,7 +208,7 @@ invocations — editors assume an interactive user and are incompatible with
 headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
 for note creation.
 
-### `merge`, and why no `prune` / `get-ref`?
+### `merge`, `prune`, and `get-ref`
 
 `notes merge <other-ref>` merges another notes ref into the current one
 (`--ref`, default `refs/notes/commits`). Because Libra stores notes as flat
@@ -219,8 +223,13 @@ differing note on both sides is a conflict resolved by `--strategy`:
 - `union`: concatenate both note contents.
 - `cat_sort_uniq`: concatenate, then sort and de-duplicate the combined lines.
 
-`prune` and `get-ref` add complexity for niche workflows and can be added
-incrementally if real users or agents need them.
+`notes prune` removes notes whose annotated object no longer exists in the
+object store — Libra checks each flat note row's object against the object store
+and deletes the orphaned rows (in a transaction, with a blob compare-and-swap so
+a concurrently-rewritten note is left intact). It is silent by default; `-n` /
+`--dry-run` reports what would be pruned without deleting, and `-v` prints each
+pruned object id. `notes get-ref` prints the notes ref that operations act on
+(honoring `--ref`; default `refs/notes/commits`).
 
 ### Why SQLite-backed notes refs?
 
@@ -241,7 +250,8 @@ scan), and concurrency safety via SQLite WAL mode.
 | Copy | `notes copy [-f] <from> <to>` | Supported | N/A |
 | Edit | `notes edit` (`-m`/`-F`) | Supported | N/A |
 | Merge | `notes merge [-s <strategy>] <ref>` | `libra notes merge [-s <strategy>] <ref>` (2-way flat-row merge) | N/A |
-| Prune | Supported | Not supported | N/A |
+| Prune | `notes prune [-n] [-v]` | `libra notes prune [-n] [-v]` | N/A |
+| Get ref | `notes get-ref` | `libra notes get-ref` | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
 | Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |
