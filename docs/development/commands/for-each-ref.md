@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件、用户文档和顶层 CLI 入口均已公开；剩余工作集中在完整 atom 语言和 quoting mode（contains/merged 类高级过滤已实现）。
+`libra for-each-ref` 的目标是按格式列出本地引用，作为 Git ref listing 的 plumbing 兼容入口。当前实现文件、用户文档和顶层 CLI 入口均已公开；剩余工作集中在完整 atom 语言（shell/perl/python/tcl quoting modes 与 contains/merged 类高级过滤已实现）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort`（`refname`/`objectname`/`version:refname`/`committerdate`/`authordate`/`creatordate`，均可加 `-` 反转）/ `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `--exclude` / `<pattern>` supported; full Git atom language、`objectsize`/`*objectname` 等剩余 sort keys 和 shell quoting modes are not exposed
+- 兼容级别：`partial`。`--heads` / `--tags` / `--remotes` / `--all` / `--format` / `--sort`（`refname`/`objectname`/`version:refname`/`committerdate`/`authordate`/`creatordate`，均可加 `-` 反转）/ `--count` / `--points-at` / `--contains` / `--no-contains` / `--merged` / `--no-merged` / `--exclude` / `--shell` / `--perl` / `--python` / `--tcl`（互斥的输出引用模式）/ `<pattern>` supported; full Git atom language、`objectsize`/`*objectname` 等剩余 sort keys are not exposed
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -57,7 +57,7 @@ flowchart TD
 | ✅ 已实现 | `--sort=version:refname`（别名 `v:refname`，可加 `-` 反转） | 复用 `utils::util::version_refname_cmp`（与 `ls-remote` 共享）：数字串按数值比较，使 `v1.9` 排在 `v1.10` 前。带集成测试（`test_for_each_ref_sort_version_refname`）。 |
 | ✅ 已实现 | `--sort` date keys：`committerdate` / `authordate` / `creatordate`（均可加 `-` 反转） | 预解析每个 ref 的时间戳（`sort_entries_by_date`，同步）后排序：`committerdate`/`authordate` 取（剥离附注标签到的）commit 的 committer/author 时间戳；`creatordate` 对附注标签取 tagger 时间戳（`ref_sort_timestamp`），对 commit/轻量标签回落到 committer 时间戳。`ref_commit`→`peel_to_commit` **递归**剥离 tag→tag→…→commit：每步先用 `ClientStorage::get_object_type` 读对象**实际**存储类型再做 typed-load（绝不依赖标签声明的 `type` 行，避免把 mismatched 字节交给假定类型的 `from_bytes` 解析器），并用 `MAX_TAG_PEEL_DEPTH` 限深防环。并列项按 refname 升序兜底（与 Git 一致，已与 git 差分验证升/降序及并列方向）。无法加载或指向 tree/blob 的 ref 取 0。带集成测试：`test_for_each_ref_sort_by_committerdate`（分支升/降序）、`test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags`（附注标签 creatordate=tagger vs committer/authordate=剥离 commit）、`test_for_each_ref_sort_peels_nested_annotated_tags`（手工构造 tag→tag→commit 锁定递归剥离）。剩余 sort keys（`objectsize` / `*objectname` 等）仍缺。 |
 | ✅ 已实现 | 高级过滤 | `--contains` / `--no-contains`、`--merged` / `--no-merged` 均已实现（基于 `log::get_reachable_commits` 的可达性判定，`--merged` 对目标提交计算一次可达集合后逐 ref 判定）；`--points-at` 支持 direct refs、lightweight tags 和 annotated tag peeled target。带集成测试（`test_for_each_ref_contains_filter`、`test_for_each_ref_merged_filter`）。 |
-| 功能缺口 | 引用命名空间 | 原始对照：`--format` 的 shell/perl/python/tcl 引用模式；当前说明：未实现。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 输出引用模式 `--shell` / `--perl` / `--python` / `--tcl` | 互斥标志（clap `conflicts_with_all`，多选→129），`resolve_quote_style` 解析为 `QuoteStyle`；`render_format` 对**每个**插值 atom 值调 `quote_value`（字面 format 文本不引用），默认 `<oid> <refname>` 路径也分别引用两字段。引用规则与 git 源码（`sq_quote_buf`/`perl_quote_buf`/`python_quote_buf`/`tcl_quote_buf`）逐字节差分验证：shell 单引号包裹，`'` 与 `!` 各转为 `'\<c>'`（如 `'\''`、`'\!'`），换行保持物理换行；perl 单引号包裹，先 `\`→`\\` 再 `'`→`\'`，换行物理保留；python 同 perl 但额外把换行转为字面 `\n`（保持单行 Python 字面量）；tcl 双引号包裹、`\ " $ [ ] { }` 反斜杠转义 + 控制符 `\f\r\n\t\v`。带集成测试（`test_for_each_ref_quoting_styles`，含 `!` shell-escape 与多行 python `\n` 用例）。 |
 
 ## 维护要求
 

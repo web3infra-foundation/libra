@@ -7,7 +7,7 @@ List local refs with filtering and custom formatting.
 ## Synopsis
 
 ```sh
-libra for-each-ref [--heads] [--tags] [--remotes] [--all] [--format=<format>] [--sort=<key>] [--count=<n>] [--points-at=<object>] [<pattern>...]
+libra for-each-ref [--heads] [--tags] [--remotes] [--all] [--format=<format>] [--sort=<key>] [--count=<n>] [--points-at=<object>] [--shell | --perl | --python | --tcl] [<pattern>...]
 ```
 
 ## Description
@@ -67,6 +67,7 @@ The `:short`/`:iso`/`:relative` date modifiers are not yet supported.
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |
 | `--contains=<commit>` / `--no-contains=<commit>` | Keep (or exclude) refs whose tip has `<commit>` as an ancestor. |
 | `--merged=<commit>` / `--no-merged=<commit>` | Keep (or exclude) refs whose tip is reachable from `<commit>` (already merged into it). |
+| `--shell` / `--perl` / `--python` / `--tcl` | Quote each interpolated field as a string literal of the named language so the output can be `eval`-ed/sourced. Mutually exclusive. |
 | `--exclude=<pattern>` | Do not list refs matching `<pattern>` (repeatable; applied after the positional include patterns). |
 | `<pattern>...` | Keep refs whose full name matches, contains, or ends with the pattern. |
 
@@ -83,7 +84,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, `version:refname`, and the date keys `committerdate` / `authordate` / `creatordate` (each reversible with a `-` prefix). Deferred Git features include the full atom language, the remaining sort keys (e.g. `objectsize`, `*objectname`), and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, `version:refname`, and the date keys `committerdate` / `authordate` / `creatordate` (each reversible with a `-` prefix). The output quoting modes `--shell`, `--perl`, `--python`, and `--tcl` (mutually exclusive) are supported: each interpolated field is wrapped as a string literal of that language (the literal text between atoms, and the default `<oid> <refname>` separators, are left unquoted). Deferred Git features include the full atom language and the remaining sort keys (e.g. `objectsize`, `*objectname`). Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

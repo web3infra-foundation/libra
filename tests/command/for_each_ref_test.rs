@@ -1337,3 +1337,142 @@ async fn test_for_each_ref_sort_peels_nested_annotated_tags() {
         "creatordate uses the outer tag's tagger date, not the peeled commit"
     );
 }
+
+#[test]
+fn test_for_each_ref_quoting_styles() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // A commit whose subject contains a single quote, to exercise escaping.
+    std::fs::write(p.join("q.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "q.txt"], p), "add q");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "it's a test", "--no-verify"], p),
+        "commit q",
+    );
+
+    let line = |args: &[&str]| -> String {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "for-each-ref quoting");
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    };
+
+    // --shell quotes each interpolated field; literal format text (the space)
+    // stays unquoted.
+    assert_eq!(
+        line(&[
+            "for-each-ref",
+            "--shell",
+            "--format=%(refname:short) %(objecttype)",
+            "refs/heads/main",
+        ]),
+        "'main' 'commit'"
+    );
+    // A single quote in the value escapes as the classic '\'' sequence.
+    assert_eq!(
+        line(&[
+            "for-each-ref",
+            "--shell",
+            "--format=%(contents:subject)",
+            "refs/heads/main",
+        ]),
+        "'it'\\''s a test'"
+    );
+    // --tcl wraps in double quotes.
+    assert_eq!(
+        line(&[
+            "for-each-ref",
+            "--tcl",
+            "--format=%(refname)",
+            "refs/heads/main",
+        ]),
+        "\"refs/heads/main\""
+    );
+    // --perl single-quotes (backslash/quote escaped); refname has none here.
+    assert_eq!(
+        line(&[
+            "for-each-ref",
+            "--perl",
+            "--format=%(refname)",
+            "refs/heads/main",
+        ]),
+        "'refs/heads/main'"
+    );
+    // The default format (no --format) quotes its two fields independently.
+    let def = line(&["for-each-ref", "--shell", "refs/heads/main"]);
+    assert!(
+        def.starts_with('\'') && def.ends_with("' 'refs/heads/main'"),
+        "default fields quoted: {def}"
+    );
+
+    // Shell also escapes `!` (git's sq_quote_buf): `!` → `'\!'`.
+    std::fs::write(p.join("b.txt"), "y\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.txt"], p), "add b");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "bang! here", "--no-verify"], p),
+        "commit bang",
+    );
+    assert_eq!(
+        line(&[
+            "for-each-ref",
+            "--shell",
+            "--format=%(contents:subject)",
+            "refs/heads/main",
+        ]),
+        "'bang'\\!' here'"
+    );
+
+    // A multi-line commit message: `%(contents)` then spans physical newlines.
+    std::fs::write(p.join("c.txt"), "z\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "c.txt"], p), "add c");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ml subject\nml body", "--no-verify"], p),
+        "commit ml",
+    );
+    // Python converts each newline to a literal `\n`, keeping a single-line
+    // Python string literal.
+    let py = String::from_utf8_lossy(
+        &run_libra_command(
+            &[
+                "for-each-ref",
+                "--python",
+                "--format=%(contents)",
+                "refs/heads/main",
+            ],
+            p,
+        )
+        .stdout,
+    )
+    .trim_end()
+    .to_string();
+    assert!(
+        !py.contains('\n') && py.contains("\\n") && py.contains("ml subject"),
+        "python escapes the newline to \\n: {py:?}"
+    );
+    // Perl leaves the newline physical (output spans multiple lines).
+    let perl = String::from_utf8_lossy(
+        &run_libra_command(
+            &[
+                "for-each-ref",
+                "--perl",
+                "--format=%(contents)",
+                "refs/heads/main",
+            ],
+            p,
+        )
+        .stdout,
+    )
+    .to_string();
+    assert!(
+        perl.contains("ml subject\nml body"),
+        "perl keeps the newline physical: {perl:?}"
+    );
+
+    // Two quoting styles are mutually exclusive (clap usage error, exit 129).
+    let conflict = run_libra_command(
+        &["for-each-ref", "--shell", "--tcl", "--format=%(refname)"],
+        p,
+    );
+    assert_eq!(conflict.status.code(), Some(129));
+}

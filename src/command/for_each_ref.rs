@@ -35,6 +35,7 @@ EXAMPLES:
     libra for-each-ref --sort=refname   Sort by ref name
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
+    libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
     libra for-each-ref --no-merged=main List refs not yet merged into main
@@ -98,6 +99,22 @@ pub struct ForEachRefArgs {
     /// positional include patterns).
     #[clap(long = "exclude", value_name = "PATTERN")]
     pub exclude: Vec<String>,
+
+    /// Quote each interpolated field for `eval` in `sh` (single-quote escaping).
+    #[clap(long = "shell", conflicts_with_all = ["perl", "python", "tcl"])]
+    pub shell: bool,
+
+    /// Quote each interpolated field as a Perl string literal.
+    #[clap(long = "perl", conflicts_with_all = ["python", "tcl"])]
+    pub perl: bool,
+
+    /// Quote each interpolated field as a Python string literal.
+    #[clap(long = "python", conflicts_with_all = ["tcl"])]
+    pub python: bool,
+
+    /// Quote each interpolated field as a Tcl string literal.
+    #[clap(long = "tcl")]
+    pub tcl: bool,
 
     /// Refname patterns to match
     #[clap(value_name = "PATTERN")]
@@ -677,6 +694,104 @@ fn sort_entries(entries: &mut [RefEntry], sort: Option<&str>) -> CliResult<()> {
     Ok(())
 }
 
+/// Output quoting style (`--shell` / `--perl` / `--python` / `--tcl`): each
+/// interpolated field value is wrapped as a string literal of the target
+/// language so the output can be `eval`-ed/sourced. Literal text in the format
+/// (and the default `<oid> <refname>` separators) is left unquoted.
+#[derive(Clone, Copy)]
+enum QuoteStyle {
+    Shell,
+    Perl,
+    Python,
+    Tcl,
+}
+
+/// Resolve the active quoting style from the mutually-exclusive flags (clap
+/// already rejects more than one).
+fn resolve_quote_style(args: &ForEachRefArgs) -> Option<QuoteStyle> {
+    if args.shell {
+        Some(QuoteStyle::Shell)
+    } else if args.perl {
+        Some(QuoteStyle::Perl)
+    } else if args.python {
+        Some(QuoteStyle::Python)
+    } else if args.tcl {
+        Some(QuoteStyle::Tcl)
+    } else {
+        None
+    }
+}
+
+/// Quote `value` as a string literal in the given style, matching `git
+/// for-each-ref`'s `--shell`/`--perl`/`--python`/`--tcl` output.
+fn quote_value(value: &str, style: QuoteStyle) -> String {
+    match style {
+        // Single-quote; both `'` and `!` close the quote, emit a backslash-escaped
+        // char, and reopen (e.g. `'` → `'\''`, `!` → `'\!'`), matching git's
+        // `sq_quote_buf`. Other bytes (incl. newlines) are kept verbatim.
+        QuoteStyle::Shell => {
+            let mut out = String::with_capacity(value.len() + 2);
+            out.push('\'');
+            for ch in value.chars() {
+                if ch == '\'' || ch == '!' {
+                    out.push_str("'\\");
+                    out.push(ch);
+                    out.push('\'');
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            out
+        }
+        // Single-quote; escape backslash first, then the single-quote (git's
+        // `perl_quote_buf`). Newlines stay literal.
+        QuoteStyle::Perl => {
+            format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+        }
+        // Like Perl, but also convert a newline to a literal `\n` so the result
+        // stays a single-line Python literal (git's `python_quote_buf`).
+        QuoteStyle::Python => {
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n");
+            format!("'{escaped}'")
+        }
+        // Double-quote; backslash-escape the Tcl specials and name the control
+        // characters, matching Git's `tcl_quote_buf`.
+        QuoteStyle::Tcl => {
+            let mut out = String::with_capacity(value.len() + 2);
+            out.push('"');
+            for ch in value.chars() {
+                match ch {
+                    '[' | ']' | '{' | '}' | '$' | '\\' | '"' => {
+                        out.push('\\');
+                        out.push(ch);
+                    }
+                    '\u{c}' => out.push_str("\\f"),
+                    '\r' => out.push_str("\\r"),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\u{b}' => out.push_str("\\v"),
+                    _ => out.push(ch),
+                }
+            }
+            out.push('"');
+            out
+        }
+    }
+}
+
+/// Push an interpolated field value, quoting it when a `--shell`/etc. style is
+/// active (literal format text bypasses this and is pushed directly).
+fn push_field(out: &mut String, value: &str, quote: Option<QuoteStyle>) {
+    match quote {
+        Some(style) => out.push_str(&quote_value(value, style)),
+        None => out.push_str(value),
+    }
+}
+
 fn render_output(
     entries: &[RefEntry],
     args: &ForEachRefArgs,
@@ -692,11 +807,20 @@ fn render_output(
         return Ok(());
     }
 
+    let quote = resolve_quote_style(args);
     for entry in entries {
         if let Some(format) = &args.format {
             println!(
                 "{}",
-                render_format(format, entry, head_refname, upstreams, pushes)?
+                render_format(format, entry, head_refname, upstreams, pushes, quote)?
+            );
+        } else if let Some(style) = quote {
+            // The default format is the two fields `<objectname> <refname>`; each
+            // is quoted independently, the separating space is literal.
+            println!(
+                "{} {}",
+                quote_value(&entry.objectname, style),
+                quote_value(&entry.refname, style)
             );
         } else {
             println!("{} {}", entry.objectname, entry.refname);
@@ -711,6 +835,7 @@ fn render_format(
     head_refname: Option<&str>,
     upstreams: &HashMap<String, String>,
     pushes: &HashMap<String, String>,
+    quote: Option<QuoteStyle>,
 ) -> CliResult<String> {
     // `:short` modifiers: the short ref name (namespace prefix stripped) and the
     // 7-char abbreviated object id. Substituted before the bare atoms (the
@@ -799,16 +924,22 @@ fn render_format(
         // Parameterized atoms (`%(refname:lstrip=N)` / `%(refname:rstrip=N)` and
         // `%(objectname:short=N)`) are handled first; everything else is an exact
         // atom-name match.
+        // Each interpolated field value is quoted (when a `--shell`/etc. style is
+        // active); the literal format text between atoms is pushed verbatim above.
         if let Some(value) = refname_strip_atom(token, &entry.refname) {
-            out.push_str(&value);
+            push_field(&mut out, &value, quote);
         } else if let Some(n) = token
             .strip_prefix("objectname:short=")
             .and_then(|s| s.parse::<usize>().ok())
         {
-            out.push_str(&entry.objectname.chars().take(n).collect::<String>());
+            push_field(
+                &mut out,
+                &entry.objectname.chars().take(n).collect::<String>(),
+                quote,
+            );
         } else {
             match atoms.iter().find(|(name, _)| *name == token) {
-                Some((_, value)) => out.push_str(value),
+                Some((_, value)) => push_field(&mut out, value, quote),
                 None => return Err(unsupported_atom_error()),
             }
         }
