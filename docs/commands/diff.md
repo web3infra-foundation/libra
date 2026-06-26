@@ -17,7 +17,7 @@ libra diff [--algorithm <name>] [--output <file>]
 
 `libra diff` shows changes between different states of the repository. By default it compares the index against the working tree (unstaged changes). With `--staged`, it compares HEAD against the index (staged changes). With `--old` and `--new`, it compares two arbitrary commits.
 
-The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--shortstat`, `--summary`). A status-only check is possible with `-s`/`--no-patch` and `--exit-code`, and `-z`/`--null` makes the name/numstat outputs NUL-terminated for safe scripting.
+The diff engine supports multiple algorithms (histogram by default, with myers and myersMinimal as alternatives). Output can be directed to a file with `--output`, and several summary formats are available (`--name-only`, `--name-status`, `--numstat`, `--stat`, `--shortstat`, `--summary`). A status-only check is possible with `-s`/`--no-patch` and `--exit-code`, and `-z`/`--null` makes the name/numstat outputs NUL-terminated for safe scripting. `--word-diff[=<mode>]` re-renders the patch at word granularity (matching Git's structure; like all Libra diffs, the exact word grouping can differ from Git on ambiguous changes, and hunk headers keep Libra's unified-diff format).
 
 Pathspec arguments filter the diff to only show changes in matching files or directories.
 
@@ -33,6 +33,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Output file | | `--output <FILENAME>` | Write human-readable output to a file instead of stdout. Ignored in `--json` mode. |
 | Name only | | `--name-only` | Show only the names of changed files. |
 | Name status | | `--name-status` | Show changed file names with a status letter (A/D/M). |
+| Word diff | | `--word-diff[=<mode>]` | Re-render the patch at word granularity. MODE is `plain` (default; removed words `[-…-]`, added `{+…+}`), `color` (highlight in a terminal, no brackets), `porcelain` (one token per line, `-`/`+`/` ` prefixes, `~` for newlines), or `none` (regular patch). Words are whitespace-delimited. Must be written as `--word-diff` or `--word-diff=<mode>`. |
 | Numstat | | `--numstat` | Show insertion/deletion counts in a machine-friendly tab-separated format. |
 | Stat | | `--stat` | Show a diffstat summary with +/- bar graph. |
 | Context lines | `-U<n>` | `--unified=<n>` | Number of context lines around each change in the patch (default 3). Changes only the surrounding context, not the `+`/`-` lines, so `--stat`/`--name-only`/`--numstat` counts are unaffected; the `--json` hunk ranges and line arrays follow `<n>`. |
@@ -231,9 +232,9 @@ Git supports both `--staged` and `--cached` as synonyms. This duplication serves
 
 Allowing `--new` without `--old` would create an ambiguous comparison (new compared to what?). Requiring `--old` when `--new` is specified makes the comparison explicit and predictable. For the common case of comparing against HEAD, use `--staged` instead.
 
-### Why no `--word-diff` or `--color-words`?
+### `--word-diff` and `--color-words`
 
-These Git options provide alternative diff presentations that are useful for prose but rarely needed for code. Libra focuses on the unified diff format that is universally understood by tools and AI agents. Word-level diffing can be added as a future enhancement if demand warrants it.
+`--word-diff[=<mode>]` is supported (see the option above): it re-renders the patch at word granularity in `plain` (default), `color`, `porcelain`, or `none` mode, with whitespace-delimited words. The shorthand `--color-words` and a custom `--word-diff-regex` are not yet implemented.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -257,7 +258,7 @@ These Git options provide alternative diff presentations that are useful for pro
 | Whitespace check | `--check` (trailing-ws / space-before-tab) | `--check` | N/A |
 | Reverse diff | `-R` / `--reverse` | `-R` | N/A |
 | Treat as text | `-a` / `--text` (no-op; always shown) | `-a` / `--text` | N/A |
-| Word diff | Not supported | `--word-diff` / `--color-words` | N/A |
+| Word diff | `--word-diff[=<mode>]` (no `--color-words`/`--word-diff-regex`) | `--word-diff` / `--color-words` | N/A |
 | Binary diff (binary patch) | Not supported | `--binary` | N/A |
 | Context lines | `-U<n>` / `--unified=<n>` (default 3) | `-U<n>` / `--unified=<n>` | `--context <n>` |
 | Ignore whitespace | `-w` / `--ignore-all-space` | `-w` / `--ignore-all-space` | N/A |

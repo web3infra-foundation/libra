@@ -45,6 +45,7 @@ EXAMPLES:
     libra diff --old HEAD~1 --new HEAD      Compare two revisions
     libra diff --stat src/                  Show diff statistics under src/
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
+    libra diff --word-diff                   Word-level diff ([-removed-]{+added+} inline)
     libra diff -U0                          Patch with no surrounding context (default is 3)
     libra diff -w                           Ignore whitespace-only changes
     libra diff -b                           Ignore changes in the amount of whitespace
@@ -96,6 +97,15 @@ pub struct DiffArgs {
     /// Show changed file names with status
     #[clap(long)]
     pub name_status: bool,
+
+    /// Show a word diff instead of a line patch. MODE is `plain` (the default
+    /// when given with no value; removed words wrapped in `[-…-]`, added in
+    /// `{+…+}`), `color` (highlight with color instead of brackets, in a
+    /// terminal), `porcelain` (machine format: one token per line, `-`/`+`/` `
+    /// prefixes, `~` for newlines), or `none` (disable). Words are
+    /// whitespace-delimited.
+    #[clap(long = "word-diff", value_name = "MODE", num_args = 0..=1, require_equals = true, default_missing_value = "plain")]
+    pub word_diff: Option<String>,
 
     /// Show insertion/deletion counts in a machine-friendly format
     #[clap(long)]
@@ -347,7 +357,14 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     emit_worktree_scan_progress(&args, output);
     let mut result = run_diff(&args).await.map_err(CliError::from)?;
     apply_relative_filter(&args, &mut result);
+    apply_word_diff(&args, &mut result, output, io::stdout().is_terminal())?;
     render_diff_output(&args, &result, output)
+}
+
+/// Whether `--word-diff` is set to a rendering mode (i.e. not `none`/absent), in
+/// which case the diff body is already fully rendered and must not be re-colored.
+fn word_diff_active(args: &DiffArgs) -> bool {
+    matches!(args.word_diff.as_deref(), Some(mode) if mode != "none")
 }
 
 /// Apply `--relative[=<path>]`: keep only files under the directory prefix and strip
@@ -383,6 +400,327 @@ fn apply_relative_filter(args: &DiffArgs, result: &mut DiffOutput) {
     result.files_changed = result.files.len();
     result.total_insertions = result.files.iter().map(|file| file.insertions).sum();
     result.total_deletions = result.files.iter().map(|file| file.deletions).sum();
+}
+
+/// Word-diff rendering mode (`--word-diff=<MODE>`), excluding `none` (which
+/// disables the transform entirely).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordDiffMode {
+    Plain,
+    Color,
+    Porcelain,
+}
+
+/// Resolve a `--word-diff` value to a mode, or `None` for `none` (no transform).
+fn resolve_word_diff_mode(value: &str) -> CliResult<Option<WordDiffMode>> {
+    match value {
+        "none" => Ok(None),
+        "plain" => Ok(Some(WordDiffMode::Plain)),
+        "color" => Ok(Some(WordDiffMode::Color)),
+        "porcelain" => Ok(Some(WordDiffMode::Porcelain)),
+        other => Err(CliError::command_usage(format!(
+            "invalid --word-diff mode '{other}' (expected plain, color, porcelain, or none)"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)),
+    }
+}
+
+/// Apply `--word-diff`: rewrite each file's unified diff body into word-diff
+/// form (the headers/`@@` lines are kept; each hunk's old side vs new side is
+/// re-diffed at word granularity). `none`/absent is a no-op.
+fn apply_word_diff(
+    args: &DiffArgs,
+    result: &mut DiffOutput,
+    output: &OutputConfig,
+    color: bool,
+) -> CliResult<()> {
+    let Some(value) = &args.word_diff else {
+        return Ok(());
+    };
+    // Resolve (and validate) the mode even when another output mode wins, so an
+    // invalid `--word-diff=<bad>` is still reported.
+    let Some(mode) = resolve_word_diff_mode(value)? else {
+        return Ok(());
+    };
+    // Word-diff only rewrites the textual patch body. Summary/check/JSON paths
+    // read `raw_diff` (or the per-file stats) differently — e.g. `--check`
+    // scans `raw_diff` for added-line whitespace errors — so leave it untouched
+    // for them (matching Git, where those modes ignore `--word-diff`). A
+    // status-only `--quiet` with no `--output` emits no patch, so skip the
+    // (potentially large) transform; `--quiet --output <file>` still writes the
+    // file and so must run it.
+    if args.check
+        || args.name_only
+        || args.name_status
+        || args.numstat
+        || args.stat
+        || args.shortstat
+        || args.summary
+        || args.no_patch
+        || output.is_json()
+        || (output.quiet && args.output.is_none())
+    {
+        return Ok(());
+    }
+    for file in &mut result.files {
+        file.raw_diff = word_diff_transform(&file.raw_diff, mode, color);
+    }
+    Ok(())
+}
+
+/// Rewrite one file's unified diff text into the chosen word-diff mode. Header
+/// lines (`diff --git`, `index`, `---`, `+++`, `@@`) are preserved; each hunk's
+/// body is reconstructed into its old side (context + removed lines) and new
+/// side (context + added lines), word-diffed, and re-rendered.
+fn word_diff_transform(raw_diff: &str, mode: WordDiffMode, color: bool) -> String {
+    let lines: Vec<&str> = raw_diff.lines().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.starts_with("@@") {
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+        // Hunk header: keep it, then collect the body up to the next hunk/EOF.
+        out.push_str(line);
+        out.push('\n');
+        i += 1;
+        let mut old_lines: Vec<&str> = Vec::new();
+        let mut new_lines: Vec<&str> = Vec::new();
+        while i < lines.len() && !lines[i].starts_with("@@") {
+            let body = lines[i];
+            match body.as_bytes().first() {
+                Some(b' ') => {
+                    let content = &body[1..];
+                    old_lines.push(content);
+                    new_lines.push(content);
+                }
+                Some(b'-') => old_lines.push(&body[1..]),
+                Some(b'+') => new_lines.push(&body[1..]),
+                // "\ No newline at end of file" and any stray line: leave out of
+                // the word diff (its presence does not change words).
+                _ => {}
+            }
+            i += 1;
+        }
+        // Append the trailing newline that each hunk line carried in the source
+        // (the common case — files ending in a newline), so the final line break
+        // is word-diffed too (e.g. porcelain's closing `~`).
+        let with_trailing = |lines: &[&str]| -> String {
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", lines.join("\n"))
+            }
+        };
+        let old_side = with_trailing(&old_lines);
+        let new_side = with_trailing(&new_lines);
+        out.push_str(&render_word_diff(&old_side, &new_side, mode, color));
+    }
+    out
+}
+
+/// Split text into word-diff tokens: a single newline, a run of non-newline
+/// whitespace, or a run of non-whitespace (a "word"). Matches Git's default
+/// whitespace-delimited tokenization (`--word-diff-regex` is not supported).
+fn word_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some(&(start, c)) = chars.peek() {
+        if c == '\n' {
+            tokens.push(&text[start..start + 1]);
+            chars.next();
+        } else if c.is_whitespace() {
+            let mut end = start + c.len_utf8();
+            chars.next();
+            while let Some(&(idx, ch)) = chars.peek() {
+                if ch == '\n' || !ch.is_whitespace() {
+                    break;
+                }
+                end = idx + ch.len_utf8();
+                chars.next();
+            }
+            tokens.push(&text[start..end]);
+        } else {
+            let mut end = start + c.len_utf8();
+            chars.next();
+            while let Some(&(idx, ch)) = chars.peek() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                end = idx + ch.len_utf8();
+                chars.next();
+            }
+            tokens.push(&text[start..end]);
+        }
+    }
+    tokens
+}
+
+/// Whether a token is "delimiter" whitespace: a non-newline run made entirely of
+/// whitespace. Newlines are hard line boundaries, never trimmed.
+fn is_delimiter_whitespace(token: &str) -> bool {
+    token != "\n" && token.chars().all(char::is_whitespace)
+}
+
+/// Normalize a token-level change list so that whitespace behaves as a delimiter
+/// (matching Git): within each run of consecutive same-tag changed words,
+/// leading/trailing delimiter-whitespace is re-tagged `Equal` for inserts (it
+/// stays a plain separator) and dropped for deletes (deleted spacing is not
+/// shown), while whitespace *inside* a multi-word run stays in the marker.
+/// Newlines bound runs and are left untouched.
+fn normalize_word_changes(changes: Vec<(ChangeTag, &str)>) -> Vec<(ChangeTag, &str)> {
+    let mut out: Vec<(ChangeTag, &str)> = Vec::with_capacity(changes.len());
+    let mut i = 0;
+    while i < changes.len() {
+        let (tag, token) = changes[i];
+        if tag == ChangeTag::Equal || token == "\n" {
+            out.push(changes[i]);
+            i += 1;
+            continue;
+        }
+        // Collect a maximal run of this changed tag, stopping at a newline.
+        let run_tag = tag;
+        let start = i;
+        while i < changes.len() && changes[i].0 == run_tag && changes[i].1 != "\n" {
+            i += 1;
+        }
+        let run = &changes[start..i];
+        let first_word = run.iter().position(|(_, t)| !is_delimiter_whitespace(t));
+        let keep_boundary = run_tag == ChangeTag::Insert;
+        match first_word {
+            // Whole run is delimiter whitespace: keep (as Equal) for inserts,
+            // drop for deletes.
+            None => {
+                if keep_boundary {
+                    out.extend(run.iter().map(|&(_, t)| (ChangeTag::Equal, t)));
+                }
+            }
+            Some(first) => {
+                let last = run
+                    .iter()
+                    .rposition(|(_, t)| !is_delimiter_whitespace(t))
+                    .unwrap();
+                if keep_boundary {
+                    out.extend(run[..first].iter().map(|&(_, t)| (ChangeTag::Equal, t)));
+                }
+                out.extend_from_slice(&run[first..=last]);
+                if keep_boundary {
+                    out.extend(run[last + 1..].iter().map(|&(_, t)| (ChangeTag::Equal, t)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Word-diff `old` vs `new` and render the body in the chosen mode (ending with
+/// a trailing newline). Newlines always break lines and close any open marker.
+fn render_word_diff(old: &str, new: &str, mode: WordDiffMode, color: bool) -> String {
+    let old_toks = word_tokens(old);
+    let new_toks = word_tokens(new);
+    let diff = TextDiff::from_slices(&old_toks, &new_toks);
+    let changes: Vec<(ChangeTag, &str)> = normalize_word_changes(
+        diff.iter_all_changes()
+            .map(|change| (change.tag(), change.value()))
+            .collect(),
+    );
+
+    if mode == WordDiffMode::Porcelain {
+        return render_word_porcelain(&changes);
+    }
+
+    // Plain / color: emit a running line per output line; removed-word runs are
+    // wrapped `[-…-]` and added runs `{+…+}` (or colored, bracket-less, when
+    // `color`). A newline token closes any open marker and breaks the line.
+    let mut out = String::new();
+    let mut run: Vec<&str> = Vec::new();
+    let mut run_tag = ChangeTag::Equal;
+    let flush = |out: &mut String, run: &mut Vec<&str>, tag: ChangeTag| {
+        if run.is_empty() {
+            return;
+        }
+        let text = run.concat();
+        match tag {
+            ChangeTag::Equal => out.push_str(&text),
+            ChangeTag::Delete => {
+                if color {
+                    out.push_str(&text.red().to_string());
+                } else {
+                    out.push_str("[-");
+                    out.push_str(&text);
+                    out.push_str("-]");
+                }
+            }
+            ChangeTag::Insert => {
+                if color {
+                    out.push_str(&text.green().to_string());
+                } else {
+                    out.push_str("{+");
+                    out.push_str(&text);
+                    out.push_str("+}");
+                }
+            }
+        }
+        run.clear();
+    };
+    for &(tag, token) in &changes {
+        if token == "\n" {
+            flush(&mut out, &mut run, run_tag);
+            out.push('\n');
+            continue;
+        }
+        if tag != run_tag {
+            flush(&mut out, &mut run, run_tag);
+            run_tag = tag;
+        }
+        run.push(token);
+    }
+    flush(&mut out, &mut run, run_tag);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Render the porcelain word-diff body: consecutive same-tag tokens become one
+/// line prefixed by ` ` (context), `-` (removed), or `+` (added); each newline
+/// becomes a `~` line.
+fn render_word_porcelain(changes: &[(ChangeTag, &str)]) -> String {
+    let mut out = String::new();
+    let mut run: Vec<&str> = Vec::new();
+    let mut run_tag = ChangeTag::Equal;
+    let flush = |out: &mut String, run: &mut Vec<&str>, tag: ChangeTag| {
+        if run.is_empty() {
+            return;
+        }
+        let prefix = match tag {
+            ChangeTag::Equal => ' ',
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+        };
+        out.push(prefix);
+        out.push_str(&run.concat());
+        out.push('\n');
+        run.clear();
+    };
+    for &(tag, token) in changes {
+        if token == "\n" {
+            flush(&mut out, &mut run, run_tag);
+            out.push_str("~\n");
+            continue;
+        }
+        if tag != run_tag {
+            flush(&mut out, &mut run, run_tag);
+            run_tag = tag;
+        }
+        run.push(token);
+    }
+    flush(&mut out, &mut run, run_tag);
+    out
 }
 
 /// Strip the relative directory prefix from the path-bearing lines of a single file's
@@ -1192,6 +1530,7 @@ fn render_diff_output(
         || args.stat
         || args.shortstat
         || args.summary
+        || word_diff_active(args)
     {
         rendered
     } else {
@@ -1925,6 +2264,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         output: None,
         name_only: false,
         name_status: false,
+        word_diff: None,
         numstat: false,
         stat: false,
         unified: None,

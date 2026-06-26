@@ -1925,3 +1925,125 @@ fn test_diff_relative_strips_large_file_marker() {
         "no residual sub/ in marker: {text}"
     );
 }
+
+/// `diff --word-diff` re-renders the patch at word granularity: `plain`
+/// (default) wraps removed words in `[-…-]` and added in `{+…+}`, `porcelain`
+/// emits one token per line, and `none` is a regular line patch.
+#[test]
+fn test_diff_word_diff_modes() {
+    use std::fs;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    fs::write(p.join("w.txt"), "alpha beta gamma\n").expect("write w");
+    assert_cli_success(&run_libra_command(&["add", "w.txt"], p), "add w");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "w1", "--no-verify"], p),
+        "commit w1",
+    );
+    // A single-word substitution is unambiguous, so it matches git exactly.
+    fs::write(p.join("w.txt"), "alpha BETA gamma\n").expect("modify w");
+
+    let body = |args: &[&str]| -> String {
+        let mut full = vec!["diff"];
+        full.extend_from_slice(args);
+        full.push("w.txt");
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "diff word-diff");
+        let s = String::from_utf8_lossy(&out.stdout).into_owned();
+        // Keep from the first hunk header onward (skip the file headers).
+        match s.find("@@") {
+            Some(i) => s[i..].to_string(),
+            None => s,
+        }
+    };
+
+    // plain (default): the changed word is bracketed inline; the rest is plain.
+    let plain = body(&["--word-diff"]);
+    assert!(
+        plain.contains("alpha [-beta-]{+BETA+} gamma"),
+        "plain word-diff: {plain}"
+    );
+    // `--word-diff=plain` is identical to the default.
+    assert_eq!(plain, body(&["--word-diff=plain"]));
+
+    // porcelain: one token per line with ` `/`-`/`+` prefixes and `~` newlines.
+    let porcelain = body(&["--word-diff=porcelain"]);
+    assert!(
+        porcelain.contains("\n-beta\n"),
+        "porcelain removed: {porcelain}"
+    );
+    assert!(
+        porcelain.contains("\n+BETA\n"),
+        "porcelain added: {porcelain}"
+    );
+    assert!(
+        porcelain.contains("\n~\n") || porcelain.ends_with("~\n"),
+        "porcelain newline marker: {porcelain}"
+    );
+    assert!(
+        !porcelain.contains("[-"),
+        "porcelain has no brackets: {porcelain}"
+    );
+
+    // none: a regular line patch (no word markers).
+    let none = body(&["--word-diff=none"]);
+    assert!(
+        none.contains("-alpha beta gamma"),
+        "none removed line: {none}"
+    );
+    assert!(
+        none.contains("+alpha BETA gamma"),
+        "none added line: {none}"
+    );
+    assert!(!none.contains("[-"), "none has no word markers: {none}");
+
+    // Whitespace is a delimiter: an inserted word keeps the surrounding spaces
+    // outside the markers (Git renders `a {+c+} b`, not `a {+c +}b`).
+    fs::write(p.join("ws.txt"), "a b\n").expect("write ws");
+    assert_cli_success(&run_libra_command(&["add", "ws.txt"], p), "add ws");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ws1", "--no-verify"], p),
+        "commit ws1",
+    );
+    fs::write(p.join("ws.txt"), "a c b\n").expect("modify ws");
+    let ws = run_libra_command(&["diff", "--word-diff", "ws.txt"], p);
+    assert_cli_success(&ws, "diff --word-diff ws");
+    assert!(
+        String::from_utf8_lossy(&ws.stdout).contains("a {+c+} b"),
+        "delimiter spaces stay outside the marker: {}",
+        String::from_utf8_lossy(&ws.stdout)
+    );
+
+    // An invalid mode is a usage error.
+    let bad = run_libra_command(&["diff", "--word-diff=bogus", "w.txt"], p);
+    assert_eq!(
+        bad.status.code(),
+        Some(129),
+        "invalid --word-diff mode: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // `--check` ignores `--word-diff` and still scans the real patch for
+    // whitespace errors (so word-diff cannot mask a `--check` failure).
+    fs::write(p.join("bad.txt"), "ok\n").expect("write bad");
+    assert_cli_success(&run_libra_command(&["add", "bad.txt"], p), "add bad");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "b1", "--no-verify"], p),
+        "commit b1",
+    );
+    fs::write(p.join("bad.txt"), "ok\ntrailing   \n").expect("trailing ws");
+    assert_cli_success(&run_libra_command(&["add", "bad.txt"], p), "stage bad");
+    let check = run_libra_command(
+        &["diff", "--check", "--word-diff", "--cached", "bad.txt"],
+        p,
+    );
+    assert_eq!(
+        check.status.code(),
+        Some(2),
+        "--check --word-diff still flags whitespace errors: {} / {}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
