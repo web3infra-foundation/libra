@@ -51,7 +51,8 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | No external diff | | `--no-ext-diff` | Disallow external diff drivers. Accepted no-op: Libra has no external diff drivers and always uses its built-in engine. (The external diff tool itself — `--ext-diff` / `diff.external` — is not supported.) |
 | No moved-line color | | `--no-color-moved` | Do not color moved lines differently. Accepted no-op: Libra's diff never detects or colors moved lines. (Git's `--color-moved` is not supported.) |
 | No renames | | `--no-renames` | Turn off rename detection. Accepted no-op: Libra's diff never detects renames (a rename shows as delete + create). (Git's `--renames`/`-M` is not supported.) |
-| No relative | | `--no-relative` | Show repo-root-relative paths, not cwd-relative. Accepted no-op: Libra's diff always shows repo-root-relative paths. (Git's `--relative` is not supported.) |
+| Relative | | `--relative[=<path>]` | Restrict the diff to a directory and show paths relative to it: with a value, `<path>` is resolved from the current directory; bare `--relative` uses the current directory. Files outside the directory are excluded and the prefix is stripped from displayed paths (also in `--stat` and JSON). |
+| No relative | | `--no-relative` | Show full repo-root-relative paths. This is Libra's default; accepted for Git parity and takes precedence over `--relative`. |
 | No indent heuristic | | `--no-indent-heuristic` | Disable the indent heuristic for hunk boundaries. Accepted no-op: Libra's diff does not apply Git's indent heuristic. (Git's `--indent-heuristic` is not supported.) |
 | No textconv | | `--no-textconv` | Do not run a textconv filter to make binary files diffable. Accepted no-op: Libra's diff has no textconv filters and always diffs raw content. (Git's `--textconv` is not supported.) |
 | JSON | | `--json` | Emit structured JSON output. |

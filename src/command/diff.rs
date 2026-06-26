@@ -206,10 +206,22 @@ pub struct DiffArgs {
     pub no_renames: bool,
 
     /// Show paths relative to the repository root, not the current directory.
-    /// Accepted for Git parity and is a no-op: Libra's diff always shows
-    /// repo-root-relative paths. (Git's `--relative[=<path>]` is not exposed.)
+    /// This is Libra's default; the flag is accepted for Git parity and takes
+    /// precedence over `--relative` (when both are given, relative output is disabled).
     #[clap(long = "no-relative")]
     pub no_relative: bool,
+
+    /// Restrict the diff to a directory and show paths relative to it. With a value,
+    /// `--relative=<path>` uses `<path>` (resolved from the current directory); bare
+    /// `--relative` uses the current directory. Paths outside the directory are
+    /// excluded and the directory prefix is stripped from displayed paths.
+    #[clap(
+        long = "relative",
+        value_name = "PATH",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub relative: Option<Option<String>>,
 
     /// Disable the indent heuristic for hunk boundaries. Accepted for Git parity
     /// and is a no-op: Libra's diff does not apply Git's indent heuristic.
@@ -333,8 +345,96 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     normalize_diff_range(&mut args).await;
     validate_diff_algorithm(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
-    let result = run_diff(&args).await.map_err(CliError::from)?;
+    let mut result = run_diff(&args).await.map_err(CliError::from)?;
+    apply_relative_filter(&args, &mut result);
     render_diff_output(&args, &result, output)
+}
+
+/// Apply `--relative[=<path>]`: keep only files under the directory prefix and strip
+/// that prefix from every displayed path (the file path, the patch's
+/// `diff --git`/`---`/`+++`/`rename|copy from|to` lines, and — via `path` — `--stat`,
+/// JSON, and create/delete mode summaries). `--no-relative` and a cwd at the repo
+/// root are no-ops.
+fn apply_relative_filter(args: &DiffArgs, result: &mut DiffOutput) {
+    if args.no_relative {
+        return;
+    }
+    let raw_prefix = match &args.relative {
+        None => return,
+        Some(Some(path)) => util::to_workdir_path(path),
+        Some(None) => util::to_workdir_path("."),
+    };
+    // Normalize to a repo-root-relative directory with no surrounding slashes; a cwd
+    // at the repo root (`.`/empty) means "no restriction".
+    let prefix = raw_prefix.to_string_lossy().replace('\\', "/");
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() || prefix == "." {
+        return;
+    }
+    let strip = format!("{prefix}/");
+
+    result.files.retain(|file| file.path.starts_with(&strip));
+    for file in &mut result.files {
+        let full = file.path.clone();
+        let stripped = full[strip.len()..].to_string();
+        file.raw_diff = strip_relative_prefix_in_diff(&file.raw_diff, &strip, &full, &stripped);
+        file.path = stripped;
+    }
+    result.files_changed = result.files.len();
+    result.total_insertions = result.files.iter().map(|file| file.insertions).sum();
+    result.total_deletions = result.files.iter().map(|file| file.deletions).sum();
+}
+
+/// Strip the relative directory prefix from the path-bearing lines of a single file's
+/// unified diff text, leaving hunk/content lines untouched.
+///
+/// `diff --git`/`---`/`+++` lines use EXACT replacement of the known full path (`full`
+/// → `stripped`) rather than splitting on ` b/`, so a path that itself contains a
+/// space and a `b/` fragment is not corrupted. `rename`/`copy from|to` lines (Libra's
+/// diff does not currently emit them, since it reports no renames) carry a single
+/// path, so a prefix strip is unambiguous.
+fn strip_relative_prefix_in_diff(
+    raw_diff: &str,
+    strip: &str,
+    full: &str,
+    stripped: &str,
+) -> String {
+    let had_trailing_newline = raw_diff.ends_with('\n');
+    let mut lines: Vec<String> = raw_diff
+        .lines()
+        .map(|line| strip_relative_prefix_in_line(line, strip, full, stripped))
+        .collect();
+    if had_trailing_newline {
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
+fn strip_relative_prefix_in_line(line: &str, strip: &str, full: &str, stripped: &str) -> String {
+    if line.starts_with("diff --git ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+        || line.starts_with("<LargeFile>")
+    {
+        // Exact replacement of the `a/<full>`/`b/<full>` path positions, plus the
+        // `<LargeFile><full>:…</LargeFile>` marker emitted for over-large files.
+        return line
+            .replace(&format!("a/{full}"), &format!("a/{stripped}"))
+            .replace(&format!("b/{full}"), &format!("b/{stripped}"))
+            .replace(
+                &format!("<LargeFile>{full}"),
+                &format!("<LargeFile>{stripped}"),
+            );
+    }
+    for keyword in ["rename from ", "rename to ", "copy from ", "copy to "] {
+        if let Some(path) = line.strip_prefix(keyword) {
+            return match path.strip_prefix(strip) {
+                Some(remainder) => format!("{keyword}{remainder}"),
+                None => line.to_string(),
+            };
+        }
+    }
+    line.to_string()
 }
 
 /// `diff A..B`: when no `--old`/`--new`/`--staged` is supplied and the first
@@ -1844,6 +1944,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         no_color_moved: false,
         no_renames: false,
         no_relative: false,
+        relative: None,
         no_indent_heuristic: false,
         no_textconv: false,
     };

@@ -1245,9 +1245,11 @@ fn diff_rename_relative_indent_noop_flags_are_accepted() {
     let plain = run_libra_command(&["diff", "--cached"], p);
     assert_cli_success(&plain, "diff --cached");
     let plain_out = String::from_utf8_lossy(&plain.stdout);
-    // `--no-renames`/`--no-relative`/`--no-indent-heuristic` are accepted no-ops:
-    // Libra's diff never detects renames, always shows repo-root-relative paths,
-    // and applies no indent heuristic, so output is unchanged.
+    // `--no-renames`/`--no-relative`/`--no-indent-heuristic` are accepted no-ops when
+    // given ALONE: Libra's diff never detects renames, defaults to repo-root-relative
+    // paths, and applies no indent heuristic, so output is unchanged. (`--no-relative`
+    // is only consequential when combined with `--relative`, which it overrides —
+    // covered by `test_diff_relative_filters_and_strips_prefix`.)
     for flag in ["--no-renames", "--no-relative", "--no-indent-heuristic"] {
         let out = run_libra_command(&["diff", "--cached", flag], p);
         assert_cli_success(&out, &format!("diff --cached {flag}"));
@@ -1778,5 +1780,148 @@ fn test_diff_ignore_blank_lines_modification_with_header_like_content_is_dropped
     assert!(
         names.trim().is_empty(),
         "and does not appear in --name-only:\n{names}"
+    );
+}
+
+/// `--relative[=<path>]` restricts the diff to a directory and strips that prefix
+/// from displayed paths (matching Git), while `--no-relative` keeps full paths.
+#[test]
+#[serial]
+fn test_diff_relative_filters_and_strips_prefix() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::create_dir_all(p.join("sub/deep")).unwrap();
+    fs::create_dir_all(p.join("other")).unwrap();
+    fs::write(p.join("sub/f.txt"), "a\n").unwrap();
+    fs::write(p.join("sub/deep/g.txt"), "x\n").unwrap();
+    fs::write(p.join("other/h.txt"), "o\n").unwrap();
+    fs::write(p.join("root.txt"), "r\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "."], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("sub/f.txt"), "a\nb\n").unwrap();
+    fs::write(p.join("sub/deep/g.txt"), "x\ny\n").unwrap();
+    fs::write(p.join("other/h.txt"), "o\np\n").unwrap();
+    fs::write(p.join("root.txt"), "r\ns\n").unwrap();
+
+    // --relative=sub: only sub/ files, prefix stripped, no `sub/` and no other/root.
+    let rel = run_libra_command(&["diff", "--relative=sub"], p);
+    assert_cli_success(&rel, "diff --relative=sub");
+    let out = String::from_utf8_lossy(&rel.stdout);
+    assert!(
+        out.contains("diff --git a/f.txt b/f.txt"),
+        "stripped f.txt: {out}"
+    );
+    assert!(
+        out.contains("diff --git a/deep/g.txt b/deep/g.txt"),
+        "stripped deep/g.txt: {out}"
+    );
+    assert!(
+        !out.contains("sub/"),
+        "the sub/ prefix is stripped everywhere: {out}"
+    );
+    assert!(
+        !out.contains("other/h.txt"),
+        "files outside sub/ are excluded: {out}"
+    );
+    assert!(!out.contains("root.txt"), "root files are excluded: {out}");
+
+    // --relative=sub/deep: only the nested file, stripped to its basename.
+    let deep = run_libra_command(&["diff", "--relative=sub/deep"], p);
+    assert_cli_success(&deep, "diff --relative=sub/deep");
+    let deep_out = String::from_utf8_lossy(&deep.stdout);
+    assert!(
+        deep_out.contains("diff --git a/g.txt b/g.txt"),
+        "deep stripped: {deep_out}"
+    );
+    assert!(
+        !deep_out.contains("f.txt"),
+        "only sub/deep is included: {deep_out}"
+    );
+
+    // --no-relative keeps full repo-root-relative paths.
+    let no_rel = run_libra_command(&["diff", "--no-relative"], p);
+    assert_cli_success(&no_rel, "diff --no-relative");
+    let no_rel_out = String::from_utf8_lossy(&no_rel.stdout);
+    assert!(
+        no_rel_out.contains("a/sub/f.txt") && no_rel_out.contains("a/other/h.txt"),
+        "no-relative shows full paths: {no_rel_out}"
+    );
+
+    // --no-relative overrides an earlier --relative (no clap conflict, full paths).
+    let both = run_libra_command(&["diff", "--relative=sub", "--no-relative"], p);
+    assert_cli_success(&both, "diff --relative=sub --no-relative");
+    assert!(
+        String::from_utf8_lossy(&both.stdout).contains("a/sub/f.txt"),
+        "--no-relative overrides --relative: {}",
+        String::from_utf8_lossy(&both.stdout)
+    );
+}
+
+/// `--relative` strips the prefix from BOTH `a/` and `b/` path positions even when the
+/// filename contains a space (exact-path replacement, not a ` b/` split), so the
+/// `diff --git`/`---`/`+++` headers stay consistent.
+#[test]
+#[serial]
+fn test_diff_relative_strips_space_containing_path() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::create_dir_all(p.join("sub")).unwrap();
+    fs::write(p.join("sub/a b.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "."], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("sub/a b.txt"), "x\ny\n").unwrap();
+
+    let out = run_libra_command(&["diff", "--relative=sub"], p);
+    assert_cli_success(&out, "diff --relative=sub (space path)");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("diff --git a/a b.txt b/a b.txt"),
+        "both path positions stripped without corruption: {text}"
+    );
+    assert!(text.contains("--- a/a b.txt"), "--- stripped: {text}");
+    assert!(text.contains("+++ b/a b.txt"), "+++ stripped: {text}");
+    assert!(!text.contains("sub/"), "no residual sub/ prefix: {text}");
+}
+
+/// `--relative` also strips the prefix from the `<LargeFile>` marker emitted for
+/// over-large files, so the patch output is consistent with `file.path`/`--stat`.
+#[test]
+#[serial]
+fn test_diff_relative_strips_large_file_marker() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::create_dir_all(p.join("sub")).unwrap();
+    // > MAX_DIFF_LINES (10k) across both sides triggers the large-file marker.
+    let base: String = (0..7000).map(|i| format!("{i}\n")).collect();
+    fs::write(p.join("sub/big.txt"), &base).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "."], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("sub/big.txt"), format!("{base}EXTRA\n")).unwrap();
+
+    let out = run_libra_command(&["diff", "--relative=sub"], p);
+    assert_cli_success(&out, "diff --relative=sub (large file)");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("<LargeFile>big.txt:"),
+        "large-file marker prefix stripped: {text}"
+    );
+    assert!(
+        !text.contains("sub/big.txt"),
+        "no residual sub/ in marker: {text}"
     );
 }
