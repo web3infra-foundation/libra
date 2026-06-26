@@ -1067,3 +1067,118 @@ fn recipient_headers_to_and_cc() {
         "cover letter carries To:"
     );
 }
+
+// ---------------------------------------------------------------------------
+// From-header rewriting (--from)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn from_header_rewrites_author() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // A second commit authored by someone other than the committer.
+    fs::write(p.join("x.txt"), "x\n").unwrap();
+    run_libra_command(&["add", "x.txt"], p);
+    run_libra_command(
+        &[
+            "commit",
+            "-m",
+            "feature",
+            "--author",
+            "Author A <a@x.com>",
+            "--no-verify",
+        ],
+        p,
+    );
+
+    // --from differs from the author: the From: header is rewritten and the
+    // original author is preserved as an in-body From: line.
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--from=Bot <bot@x.com>",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --from");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("From: Bot <bot@x.com>\n"),
+        "From: header rewritten: {stdout}"
+    );
+    let header_from = stdout.find("From: Bot <bot@x.com>").expect("header From");
+    let inbody_from = stdout
+        .find("From: Author A <a@x.com>")
+        .expect("in-body From");
+    assert!(
+        header_from < inbody_from,
+        "in-body From follows header From"
+    );
+    let body_sep = stdout.find("\n\n").expect("headers/body separator");
+    assert!(
+        body_sep < inbody_from,
+        "in-body From sits in the body section: {stdout}"
+    );
+
+    // --from equal to the author adds no in-body From (only the header).
+    let same = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "HEAD~1..HEAD",
+            "--from=Author A <a@x.com>",
+        ],
+        p,
+    );
+    assert_cli_success(&same, "format-patch --from same author");
+    let same_out = String::from_utf8_lossy(&same.stdout);
+    assert_eq!(
+        same_out.matches("From: Author A <a@x.com>").count(),
+        1,
+        "no in-body From when --from equals the author: {same_out}"
+    );
+
+    // Bare `--from` (no value) uses the committer's configured identity. With
+    // `require_equals`, the following `HEAD~1..HEAD` is the revision-range
+    // positional, NOT the --from value — so this must succeed (no ambiguity).
+    let bare = run_libra_command(&["format-patch", "--from", "--stdout", "HEAD~1..HEAD"], p);
+    assert_cli_success(&bare, "format-patch bare --from");
+    let bare_out = String::from_utf8_lossy(&bare.stdout);
+    // create_committed_repo_via_cli configures user.name/email = Test User.
+    assert!(
+        bare_out.contains("From: Test User <test@example.com>\n"),
+        "bare --from uses the committer identity: {bare_out}"
+    );
+    // The committer differs from the author, so the in-body From is preserved.
+    assert!(
+        bare_out.contains("From: Author A <a@x.com>"),
+        "bare --from keeps the in-body author: {bare_out}"
+    );
+
+    // The cover letter also carries the rewritten From: identity. Write to a
+    // directory and read the cover-letter file directly so the assertion is
+    // scoped to the cover letter (not a patch mail, which also has this From:).
+    let cover_dir = tempdir().unwrap();
+    let cover = run_libra_command(
+        &[
+            "format-patch",
+            "-n",
+            "-o",
+            cover_dir.path().to_str().unwrap(),
+            "HEAD~1..HEAD",
+            "--cover-letter",
+            "--from=Bot <bot@x.com>",
+        ],
+        p,
+    );
+    assert_cli_success(&cover, "format-patch --cover-letter --from");
+    let cover_text = fs::read_to_string(cover_dir.path().join("0000-cover-letter.patch"))
+        .expect("cover-letter file");
+    assert!(
+        cover_text.contains("From: Bot <bot@x.com>\n"),
+        "cover letter carries the --from identity (not a blank From:): {cover_text}"
+    );
+}

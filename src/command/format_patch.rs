@@ -52,6 +52,9 @@ Examples:
   # Add recipient headers (To: and Cc:, repeatable)
   libra format-patch --to reviewer@example.com --cc list@example.com origin/main..
 
+  # Rewrite the From: header (original author kept in-body for git am)
+  libra format-patch --from='Maintainer <maint@example.com>' origin/main..
+
   # Custom filename suffix (0001-subject.txt instead of .patch)
   libra format-patch --suffix=.txt HEAD~2..HEAD
 
@@ -133,6 +136,13 @@ pub struct FormatPatchArgs {
     /// simply omits the `Cc:` header (there is no config list to reset).
     #[arg(long = "no-cc")]
     pub no_cc: bool,
+
+    /// Use IDENT in the `From:` header (instead of the commit author). With no
+    /// value, the committer's configured identity is used. When the identity
+    /// differs from the commit author, the original author is preserved as an
+    /// in-body `From:` line so `git am` can restore it.
+    #[arg(long = "from", value_name = "IDENT", num_args = 0..=1, require_equals = true)]
+    pub from: Option<Option<String>>,
 
     /// Mark the patch series as version N (changes "[PATCH]" to "[PATCH vN]").
     #[arg(short = 'v', long = "reroll-count", value_name = "N")]
@@ -306,6 +316,9 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
     // 4. Build thread Message-ID (used for --thread / --in-reply-to)
     let thread_id = build_thread_id(&args, &commits);
 
+    // Resolve the `--from` identity once (shared across all patches).
+    let from_identity = resolve_from_identity(&args).await?;
+
     // 5. Determine numbering
     let total = commits.len();
     let start_num = args.start_number;
@@ -313,7 +326,7 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
     // 6. Generate cover letter if requested
     let mut records = Vec::new();
     if args.cover_letter {
-        let cover_body = format_cover_letter(&args, &commits)?;
+        let cover_body = format_cover_letter(&args, &commits, from_identity.as_ref())?;
         let path = write_patch_file(&args, &out_dir, 0, total, start_num, "", &cover_body)?;
         if !output.quiet {
             eprintln!("{}", path.display());
@@ -329,8 +342,16 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
     // 7. Iterate commits and generate patches
     for (idx, commit) in commits.iter().enumerate() {
         let patch_num = start_num + idx;
-        let patch_body =
-            format_patch_body(&args, commit, patch_num, total, start_num, &thread_id).await?;
+        let patch_body = format_patch_body(
+            &args,
+            commit,
+            patch_num,
+            total,
+            start_num,
+            &thread_id,
+            from_identity.as_ref(),
+        )
+        .await?;
         let slug = patch_slug(commit, &args);
         if !output.quiet {
             let path = write_patch_file(
@@ -493,6 +514,7 @@ async fn format_patch_body(
     total: usize,
     start_num: usize,
     thread_id: &Option<String>,
+    from_identity: Option<&(String, String)>,
 ) -> Result<String, CliError> {
     let mut out = String::new();
 
@@ -512,10 +534,23 @@ async fn format_patch_body(
     ));
 
     // ---- From: ----
+    // The header shows the `--from` identity when given (else the commit
+    // author). If it differs from the author, the original author is preserved
+    // as an in-body `From:` line (added after the headers, below).
     let author_name = sanitize_header_value(commit.author.name.trim());
-    let author_name = encode_email_header(&author_name, args.encode_email_headers);
     let author_email = sanitize_header_value(commit.author.email.trim());
-    out.push_str(&format!("From: {author_name} <{author_email}>\n"));
+    let (header_name, header_email) = match from_identity {
+        Some((name, email)) => (
+            sanitize_header_value(name.trim()),
+            sanitize_header_value(email.trim()),
+        ),
+        None => (author_name.clone(), author_email.clone()),
+    };
+    let in_body_from = from_identity
+        .map(|_| header_name != author_name || header_email != author_email)
+        .unwrap_or(false);
+    let header_name_enc = encode_email_header(&header_name, args.encode_email_headers);
+    out.push_str(&format!("From: {header_name_enc} <{header_email}>\n"));
 
     // ---- Date: (RFC 2822) ----
     out.push_str(&format!("Date: {}\n", ts.to_rfc2822()));
@@ -558,6 +593,12 @@ async fn format_patch_body(
 
     // ---- Blank line: headers -> body ----
     out.push('\n');
+
+    // ---- In-body `From:` (preserve the original author when `--from` rewrote
+    // the header), so `git am` can restore authorship ----
+    if in_body_from {
+        out.push_str(&format!("From: {author_name} <{author_email}>\n\n"));
+    }
 
     // ---- Commit message body ----
     let body = raw_msg
@@ -666,7 +707,11 @@ fn push_threading_headers(
 
 /// Generate a cover-letter template (named `0000-cover-letter<suffix>`, or `0`
 /// under `--numbered-files`).
-fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<String, CliError> {
+fn format_cover_letter(
+    args: &FormatPatchArgs,
+    commits: &[Commit],
+    from_identity: Option<&(String, String)>,
+) -> Result<String, CliError> {
     let now = Utc::now();
 
     let mut out = String::new();
@@ -683,7 +728,19 @@ fn format_cover_letter(args: &FormatPatchArgs, commits: &[Commit]) -> Result<Str
         .unwrap_or_default();
     let prefix = format!("{}{}", sanitize_header_value(&args.subject_prefix), version);
 
-    out.push_str("From: \n");
+    // `From:` shows the `--from` identity when given (the cover letter has no
+    // author of its own, so the template's `From:` is otherwise left blank).
+    match from_identity {
+        Some((name, email)) => {
+            let name = encode_email_header(
+                &sanitize_header_value(name.trim()),
+                args.encode_email_headers,
+            );
+            let email = sanitize_header_value(email.trim());
+            out.push_str(&format!("From: {name} <{email}>\n"));
+        }
+        None => out.push_str("From: \n"),
+    }
     out.push_str(&format!("Date: {}\n", now.to_rfc2822()));
     out.push_str(&format!(
         "Subject: [{prefix} 0/{total}] *** SUBJECT HERE ***\n",
@@ -1052,6 +1109,33 @@ fn encode_email_header(value: &str, enable: bool) -> String {
         .map(|w| format!("{PREFIX}{w}{SUFFIX}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Parse a `Name <email>` identity into `(name, email)`; a string without
+/// angle brackets is treated as a bare name with an empty email.
+fn parse_from_ident(ident: &str) -> (String, String) {
+    if let (Some(lt), Some(gt)) = (ident.find('<'), ident.rfind('>'))
+        && lt < gt
+    {
+        return (
+            ident[..lt].trim().to_string(),
+            ident[lt + 1..gt].trim().to_string(),
+        );
+    }
+    (ident.trim().to_string(), String::new())
+}
+
+/// Resolve the `--from` identity: `--from=<ident>` is parsed; bare `--from`
+/// uses the committer's configured identity; absent returns `None` (the commit
+/// author is used unchanged).
+async fn resolve_from_identity(
+    args: &FormatPatchArgs,
+) -> Result<Option<(String, String)>, FormatPatchError> {
+    match &args.from {
+        None => Ok(None),
+        Some(Some(ident)) => Ok(Some(parse_from_ident(ident))),
+        Some(None) => Ok(Some(resolve_signoff_identity().await?)),
+    }
 }
 
 /// Resolve the Signed-off-by identity from `user.name` / `user.email` config.
