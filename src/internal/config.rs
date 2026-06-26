@@ -326,6 +326,49 @@ impl ConfigKv {
         Ok(rows.iter().map(ConfigKvEntry::from_model).collect())
     }
 
+    /// Resolve a config variable whose **name** is matched case-insensitively,
+    /// matching Git semantics (config variable names are case-insensitive; the
+    /// subsection between dots is *not*). `prefix` is the case-sensitive
+    /// `section[.subsection].` part (including the trailing dot) and `variable`
+    /// is the variable name in any case; among rows whose key equals
+    /// `<prefix><variable>` (variable compared ASCII-case-insensitively) the
+    /// highest-`id` (most recently inserted) match is returned.
+    ///
+    /// In normal use a logical variable has exactly **one** row — `set` updates
+    /// it in place — so the case folding is what matters: a value written under
+    /// either the camelCase spelling (`pushRemote`) or the lowercase form
+    /// emitted by `git config --list` / imports (`pushremote`) resolves to that
+    /// single value. The only case the `id` ordering disambiguates is the config
+    /// *anomaly* where two distinct case-variant rows coexist (Libra stores keys
+    /// case-sensitively, so this is possible when a variable is written under two
+    /// different spellings, but never when one spelling is used consistently or
+    /// via Git imports); there the result is deterministic (most recently inserted
+    /// spelling) but not a true cross-spelling last-write, which the `config_kv`
+    /// schema (no write-order column) cannot represent.
+    pub async fn get_var_case_insensitive_with_conn<C: ConnectionTrait>(
+        db: &C,
+        prefix: &str,
+        variable: &str,
+    ) -> Result<Option<ConfigKvEntry>> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(prefix))
+            // Newest first so the first case-insensitive match is the most
+            // recently inserted variant (see doc note on the anomaly case).
+            .order_by_desc(config_kv::Column::Id)
+            .all(db)
+            .await
+            .context("failed to query config_kv for case-insensitive variable")?;
+        Ok(rows
+            .iter()
+            .find(|row| {
+                row.key
+                    .strip_prefix(prefix)
+                    .map(|var| var.eq_ignore_ascii_case(variable))
+                    .unwrap_or(false)
+            })
+            .map(ConfigKvEntry::from_model))
+    }
+
     /// Get all entries whose key matches a regex pattern.
     ///
     /// Boundary conditions:
@@ -429,6 +472,15 @@ impl ConfigKv {
     pub async fn get_by_prefix(prefix: &str) -> Result<Vec<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
         Self::get_by_prefix_with_conn(&db, prefix).await
+    }
+
+    /// Pool-acquiring counterpart of [`Self::get_var_case_insensitive_with_conn`].
+    pub async fn get_var_case_insensitive(
+        prefix: &str,
+        variable: &str,
+    ) -> Result<Option<ConfigKvEntry>> {
+        let db = get_db_conn_instance().await;
+        Self::get_var_case_insensitive_with_conn(&db, prefix, variable).await
     }
 
     // ── Type helpers ─────────────────────────────────────────────────────

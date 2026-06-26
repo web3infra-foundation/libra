@@ -124,7 +124,16 @@ pub async fn execute_safe(args: ForEachRefArgs, output: &OutputConfig) -> CliRes
     };
     // Resolve each branch's upstream tracking ref for `%(upstream)`.
     let upstreams = resolve_upstreams(&result).await;
-    render_output(&result, &args, output, head_refname.as_deref(), &upstreams)?;
+    // Resolve each branch's push tracking ref for `%(push)`.
+    let pushes = resolve_pushes(&result).await;
+    render_output(
+        &result,
+        &args,
+        output,
+        head_refname.as_deref(),
+        &upstreams,
+        &pushes,
+    )?;
     Ok(())
 }
 
@@ -154,6 +163,59 @@ async fn resolve_upstreams(entries: &[RefEntry]) -> HashMap<String, String> {
             map.insert(
                 entry.refname.clone(),
                 format!("refs/remotes/{remote}/{merge_short}"),
+            );
+        }
+    }
+    map
+}
+
+/// Resolve a Git config variable case-insensitively in its variable name (the
+/// segment after `prefix`) — Git config variable names are case-insensitive, so
+/// both the documented camelCase spelling (e.g. `pushRemote`) and the lowercase
+/// form emitted by `git config --list` / imports (`pushremote`) resolve to the
+/// same logical variable. See [`ConfigKv::get_var_case_insensitive`] for the
+/// single-row-vs-anomaly semantics.
+async fn config_var(prefix: &str, variable: &str) -> Option<String> {
+    ConfigKv::get_var_case_insensitive(prefix, variable)
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
+}
+
+/// Map each `refs/heads/<branch>` entry to its push tracking ref for `%(push)`.
+/// The push remote follows Git's precedence — `branch.<name>.pushRemote`, then
+/// `remote.pushDefault`, then `branch.<name>.remote` — combined with
+/// `branch.<name>.merge` to form `refs/remotes/<push-remote>/<branch>`. Like
+/// `resolve_upstreams`, this is a config-derived computation (the standard refspec);
+/// it does not check that the tracking ref exists and does not model custom refspecs.
+async fn resolve_pushes(entries: &[RefEntry]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let push_default = config_var("remote.", "pushDefault").await;
+    for entry in entries {
+        let Some(branch) = entry.refname.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let mut push_remote = config_var(&format!("branch.{branch}."), "pushRemote")
+            .await
+            .or_else(|| push_default.clone());
+        if push_remote.is_none() {
+            push_remote = ConfigKv::get(&format!("branch.{branch}.remote"))
+                .await
+                .ok()
+                .flatten()
+                .map(|e| e.value);
+        }
+        let merge = ConfigKv::get(&format!("branch.{branch}.merge"))
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
+        if let (Some(push_remote), Some(merge)) = (push_remote, merge) {
+            let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+            map.insert(
+                entry.refname.clone(),
+                format!("refs/remotes/{push_remote}/{merge_short}"),
             );
         }
     }
@@ -507,6 +569,7 @@ fn render_output(
     output: &OutputConfig,
     head_refname: Option<&str>,
     upstreams: &HashMap<String, String>,
+    pushes: &HashMap<String, String>,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("for-each-ref", &entries.to_vec(), output);
@@ -517,7 +580,10 @@ fn render_output(
 
     for entry in entries {
         if let Some(format) = &args.format {
-            println!("{}", render_format(format, entry, head_refname, upstreams)?);
+            println!(
+                "{}",
+                render_format(format, entry, head_refname, upstreams, pushes)?
+            );
         } else {
             println!("{} {}", entry.objectname, entry.refname);
         }
@@ -530,6 +596,7 @@ fn render_format(
     entry: &RefEntry,
     head_refname: Option<&str>,
     upstreams: &HashMap<String, String>,
+    pushes: &HashMap<String, String>,
 ) -> CliResult<String> {
     // `:short` modifiers: the short ref name (namespace prefix stripped) and the
     // 7-char abbreviated object id. Substituted before the bare atoms (the
@@ -549,6 +616,10 @@ fn render_format(
         .map(String::as_str)
         .unwrap_or("");
     let upstream_short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
+    // `%(push)`: the push-tracking ref (empty when none); `:short` strips the
+    // `refs/remotes/` prefix.
+    let push = pushes.get(&entry.refname).map(String::as_str).unwrap_or("");
+    let push_short = push.strip_prefix("refs/remotes/").unwrap_or(push);
     // Commit-field atoms (`%(subject)`, author/committer name+email) require
     // loading the ref's object. Load it once, only when at least one such atom
     // is present, to avoid extra object reads.
@@ -576,10 +647,12 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 22] = [
+    let atoms: [(&str, &str); 24] = [
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
+        ("push:short", push_short),
+        ("push", push),
         ("subject", fields.subject.as_str()),
         ("contents:subject", fields.subject.as_str()),
         ("contents:body", fields.body.as_str()),

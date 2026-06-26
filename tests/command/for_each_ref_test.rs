@@ -593,6 +593,102 @@ async fn test_for_each_ref_upstream_atom() {
 
 #[tokio::test]
 #[serial]
+async fn test_for_each_ref_push_atom() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+
+    // Read main's `%(push)` / `%(push:short)` line.
+    let push_line = || -> String {
+        let out = run_libra_command(
+            &[
+                "for-each-ref",
+                "--heads",
+                "--format=%(refname:short)|%(push)|%(push:short)",
+            ],
+            p,
+        );
+        assert_cli_success(&out, "for-each-ref %(push)");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|line| line.starts_with("main|"))
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // With no remote config, %(push) is empty.
+    assert_eq!(push_line(), "main||", "no remote config → empty push");
+
+    // With only branch.main.remote, the push ref equals the upstream ref.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.remote", "origin"], p),
+        "branch.main.remote",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.merge", "refs/heads/main"], p),
+        "branch.main.merge",
+    );
+    assert_eq!(
+        push_line(),
+        "main|refs/remotes/origin/main|origin/main",
+        "push falls back to branch remote"
+    );
+
+    // With BOTH remote.pushDefault and branch.main.pushRemote set, pushRemote wins
+    // (pins the full pushRemote > pushDefault > remote order).
+    assert_cli_success(
+        &run_libra_command(&["config", "remote.pushDefault", "pdef"], p),
+        "remote.pushDefault",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.pushRemote", "fork"], p),
+        "branch.main.pushRemote",
+    );
+    assert_eq!(
+        push_line(),
+        "main|refs/remotes/fork/main|fork/main",
+        "pushRemote overrides both pushDefault and remote"
+    );
+
+    // With pushRemote unset, remote.pushDefault applies (over branch.main.remote).
+    assert_cli_success(
+        &run_libra_command(&["config", "--unset", "branch.main.pushRemote"], p),
+        "unset pushRemote",
+    );
+    assert_eq!(
+        push_line(),
+        "main|refs/remotes/pdef/main|pdef/main",
+        "pushDefault applies before branch remote"
+    );
+
+    // The lowercase Git-config variable form (`pushremote`) is honored too.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.pushremote", "lower"], p),
+        "branch.main.pushremote (lowercase)",
+    );
+    assert_eq!(
+        push_line(),
+        "main|refs/remotes/lower/main|lower/main",
+        "lowercase pushremote variable is honored"
+    );
+
+    // Variable names are case-insensitive. In the (anomalous) case where two
+    // case-variant rows coexist, resolution is deterministic: the most recently
+    // inserted variant wins. Inserting a fresh camelCase row now takes
+    // precedence over the earlier lowercase value.
+    assert_cli_success(
+        &run_libra_command(&["config", "branch.main.pushRemote", "camel2"], p),
+        "branch.main.pushRemote (re-set, newest)",
+    );
+    assert_eq!(
+        push_line(),
+        "main|refs/remotes/camel2/main|camel2/main",
+        "most recently inserted case variant wins"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_for_each_ref_subject_atom() {
     let temp = tempdir().unwrap();
     setup_repo_with_commit(&temp).await; // commits with subject "initial"
