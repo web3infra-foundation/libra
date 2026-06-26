@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching`、`--untracked`（worktree 搜索额外纳入未跟踪、非忽略文件）已支持；`--no-index` 仍未公开。
+- 兼容级别：`partial`。tracked/index/tree search 与常用匹配/count/list/line flags 已支持；`-A`/`-B`/`-C` 上下文行、`-E`/`-G` 正则别名（`-P` 拒绝 129）、`-a`/`-I` 二进制控制、`--heading`/`--break`、`-z`/`--null`、`-m`/`--max-count`、`-o`/`--only-matching`、`--untracked`（worktree 搜索额外纳入未跟踪、非忽略文件）、`--no-index`（无仓库、递归遍历文件系统、不套用 ignore）已支持。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -39,7 +39,8 @@ flowchart TD
 - 2026-04-05 `45291721`（`feat(grep): add git-like grep support (#336)`）：基础实现节点：add git-like grep support (#336)；当前实现的主要轮廓可追溯到该提交。
 - 2026-06-05 `01997f50`（`feat(grep): add --untracked to also search untracked, non-ignored files`）：曾添加 `--untracked`，但被 `900c062`（`Update integration`）回退（[[goal_loop_work_vanished]] 模式）。
 - 2026-06-26 (#160)：重新落地 `--untracked`。`get_search_files` 新增分支 → `get_working_tree_files_with_untracked`（tracked ∪ `list_workdir_files()` 的未跟踪-非忽略，按路径排序，`blob_hash: None` 从磁盘读取）；`conflicts_with = "cached"`；`--tree` 同用时运行期报错。
-- 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：功能演进：add --no-index to search the filesystem without a repository；但该 `--no-index` 标志随后被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无此参数。
+- 2026-06-05 `0e22f00d`（`feat(grep): add --no-index to search the filesystem without a repository`）：曾添加 `--no-index`，但被 `900c062`（`Update integration`）回退（[[goal_loop_work_vanished]] 模式）。
+- 2026-06-26 (#161)：重新落地 `--no-index`。新增 `get_no_index_files`（`walkdir` 递归 + `pathdiff` 显示路径 + `SearchFile.read_override` 绝对路径读取）；`SearchFile` 新增 `read_override: Option<PathBuf>`；`execute_safe` 在 `no_index` 时跳过 `require_repo`；`cli.rs` 对 `Grep{no_index}` 用 `CommandPreflight::none()`（绕过 hash-kind preflight，仓库外可用）；`no_index` 字段设为 `pub` 以便 preflight 读取。`conflicts_with_all=[cached,untracked,tree]`。
 - 2026-06-05 `e3bfe11`（`feat(grep): add -A/-B/-C context lines with group separators`）：曾添加 `-A`/`-B`/`-C` 上下文行与分组分隔符；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「上下文行」一行）。
 - 2026-06-05 `2d471be`（`feat(grep): add --heading/--no-heading, --break, and -z/--null output formats`）：曾添加 `--heading`/`--no-heading`、`--break` 与 `-z`/`--null` 输出格式；该批改动一度被 `900c062`（`Update integration`）回退，现已重新实现并补齐集成测试（见「当前状态」与缺口表中标记为「✅ 已实现」的三行）。
 - 2026-06-05 `e8151a5`（`feat(grep): add -a/--text and -I binary-file handling`）：曾添加 `-a`/`--text` 与 `-I` 二进制文件处理；但该批改动同样被 `900c062`（`Update integration`）回退，当前 HEAD 的 `GrepArgs` 已无这些参数（参见缺口表「强制文本搜索」「忽略二进制文件」两行）。
@@ -65,7 +66,7 @@ flowchart TD
 | 兼容差异项 | 显示函数 | 原始对照：不支持；相关参数/替代：-p / --show-function；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 最大深度 | 原始对照：不支持；相关参数/替代：--max-depth；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | ✅ 已实现 | 搜索未跟踪文件 | `--untracked` 已重新落地（#160，原 `01997f50` 被 `900c062` 回退）：worktree 搜索时除 tracked 外，还纳入 `util::list_workdir_files()` 返回的未跟踪、非忽略文件（`get_working_tree_files_with_untracked`：tracked ∪ 未跟踪-非忽略，按路径排序，均从磁盘读取）。与 `--cached` 冲突（clap 129），与 `--tree` 同用为运行期 usage 错误（LBR-CLI-002）。与 git 差分验证（tracked+untracked，排除 ignored）。带集成测试 `test_grep_untracked_searches_untracked_non_ignored_files`。 |
-| 兼容差异项 | 无仓库文件系统搜索 | 原始对照：不支持；相关参数/替代：--no-index；当前说明：`0e22f00d` 曾添加，已被 `900c062` 回退，当前 `GrepArgs` 无此参数。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 无仓库文件系统搜索 | `--no-index` 已重新落地（#161，原 `0e22f00d` 被 `900c062` 回退）：`get_no_index_files` 用 `walkdir` 从给定路径（或 cwd）递归遍历，纳入每个常规文件（**不**套用 ignore，与 git 一致；跳过 `.git`/`.libra` 目录与符号链接），显示路径相对 cwd（`pathdiff`），内容经 `SearchFile.read_override`（绝对路径）读取。`cli.rs` preflight 对 `Grep{no_index}` 返回 `CommandPreflight::none()`、`execute_safe` 跳过 `require_repo`，故仓库外可用。`conflicts_with_all = [cached, untracked, tree]`。与 git 差分验证（仓库外递归、路径参数、仓库内含 ignored）。带集成测试 `test_grep_no_index_searches_filesystem_without_repository`、`test_grep_no_index_searches_ignored_files_inside_repo`。 |
 | ✅ 已实现 | 文件名分组标题 `--heading`/`--no-heading` | 已重新实现：`--heading` 把文件名作为独立标题行打印，匹配行去掉每行文件名前缀；`--no-heading` 为默认。带集成测试（`test_grep_heading_groups_matches_under_file_name`）。 |
 | ✅ 已实现 | 文件分组空行 `--break`/`--no-break` | 已实现：`--break` 在不同文件的匹配之间插入空行（保留每行前缀，与 Git 一致）；`--no-break` 为默认。带集成测试（`test_grep_break_inserts_blank_line_between_files`）。 |
 | ✅ 已实现 | NUL 分隔输出 `-z`/`--null` | 已重新实现：所有字段分隔符（文件名、行号）改为 NUL，行仍以换行结束；`-lz`/`-Lz` 用 NUL 终止文件名且不输出换行，`-cz` 输出 `path\0count`。带集成测试（`test_grep_null_separates_fields_with_nul_byte`）。 |

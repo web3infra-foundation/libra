@@ -43,6 +43,7 @@ libra grep -f <file> [-- <pathspec>...]
 | Tree | | `--tree <REVISION>` | 在指定修订或提交树中搜索，而不是工作树。 |
 | Cached | | `--cached` | 在索引（暂存区）中搜索，而不是工作树。 |
 | Untracked | | `--untracked` | 除已跟踪文件外，还搜索工作树中未跟踪、非忽略的文件。不能与 `--cached` 或 `--tree` 同用。 |
+| No index | | `--no-index` | 直接搜索文件系统（给定路径或当前目录），不使用仓库或索引。可在仓库外使用，递归遍历每个文件（包括被忽略的，跳过 `.git`/`.libra`），显示相对当前目录的路径。不能与 `--cached`、`--untracked` 或 `--tree` 同用。 |
 
 ### 选项细节
 

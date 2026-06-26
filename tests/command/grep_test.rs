@@ -146,6 +146,89 @@ async fn test_grep_untracked_searches_untracked_non_ignored_files() {
     assert_eq!(report.error_code, "LBR-CLI-002");
 }
 
+#[test]
+#[serial]
+fn test_grep_no_index_searches_filesystem_without_repository() {
+    // `--no-index` works with no `.libra` present and greps the filesystem recursively.
+    let dir = tempdir().expect("failed to create temp dir");
+    let p = dir.path();
+    fs::write(p.join("a.txt"), "needle x\n").expect("write a");
+    fs::create_dir(p.join("d")).expect("mkdir d");
+    fs::write(p.join("d").join("b.txt"), "needle y\n").expect("write b");
+
+    let output = run_libra_command(&["--json=compact", "grep", "--no-index", "needle"], p);
+    assert_cli_success(&output, "grep --no-index without a repository");
+    let json = parse_json_stdout(&output);
+    let paths: Vec<String> = json["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("path").to_string())
+        .collect();
+    assert!(
+        paths.iter().any(|path| path == "a.txt"),
+        "a.txt searched: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path == "d/b.txt"),
+        "nested d/b.txt searched recursively: {paths:?}"
+    );
+
+    // A path argument restricts the walk to that subtree.
+    let scoped = run_libra_command(&["--json=compact", "grep", "--no-index", "needle", "d"], p);
+    assert_cli_success(&scoped, "grep --no-index d");
+    let scoped_paths: Vec<String> = parse_json_stdout(&scoped)["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("path").to_string())
+        .collect();
+    assert_eq!(
+        scoped_paths,
+        vec!["d/b.txt".to_string()],
+        "scoped to d/: {scoped_paths:?}"
+    );
+
+    // --no-index conflicts with --cached (clap, exit 129).
+    let conflict = run_libra_command(&["grep", "--no-index", "--cached", "needle"], p);
+    assert_eq!(conflict.status.code(), Some(129));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_grep_no_index_searches_ignored_files_inside_repo() {
+    // Inside a repository, `--no-index` searches every file, including ignored ones
+    // (it does not honor ignore rules), unlike a normal grep.
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("tracked.txt", "needle tracked\n").expect("write tracked");
+    add_and_commit("add tracked", vec!["tracked.txt".to_string()]).await;
+    fs::write(".libraignore", "ignored.txt\n").expect("write ignore");
+    fs::write("ignored.txt", "needle ignored\n").expect("write ignored");
+
+    let output = run_libra_command(
+        &["--json=compact", "grep", "--no-index", "needle"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep --no-index inside repo");
+    let paths: Vec<String> = parse_json_stdout(&output)["data"]["matches"]
+        .as_array()
+        .expect("matches array")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("path").to_string())
+        .collect();
+    assert!(
+        paths.iter().any(|path| path == "tracked.txt"),
+        "tracked searched: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path == "ignored.txt"),
+        "ignored file IS searched under --no-index: {paths:?}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_grep_after_context_marks_context_lines() {

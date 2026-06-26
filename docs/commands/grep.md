@@ -43,6 +43,7 @@ When stdout is a terminal, output is sent through a pager. In JSON mode, structu
 | Tree | | `--tree <REVISION>` | Search in the specified revision or commit tree instead of the working tree. |
 | Cached | | `--cached` | Search in the index (staging area) instead of the working tree. |
 | Untracked | | `--untracked` | In addition to tracked files, also search untracked, non-ignored files in the working tree. Cannot be combined with `--cached` or `--tree`. |
+| No index | | `--no-index` | Search the filesystem directly (the given paths, or the current directory) without a repository or index. Works outside a repository, recurses every file including ignored ones (skipping `.git`/`.libra`), and shows paths relative to the current directory. Cannot be combined with `--cached`, `--untracked`, or `--tree`. |
 | Heading | | `--heading` / `--no-heading` | Print each file name once as a heading above its matches instead of prefixing every line. `--no-heading` is the default. |
 | Break | | `--break` / `--no-break` | Print an empty line between matches from different files. `--no-break` is the default. |
 | Null | `-z` | `--null` | Output a NUL byte after the file name (and line number) instead of `:`, for machine consumption. |

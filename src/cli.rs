@@ -992,6 +992,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
             )),
             Err(_) => Ok(CommandPreflight::sha1_without_repo()),
         },
+        // `grep --no-index` searches the filesystem directly and works outside a
+        // repository, so it needs no storage/hash-kind preflight.
+        Commands::Grep(args) if args.no_index => Ok(CommandPreflight::none()),
         Commands::Archive(args) if args.list => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
