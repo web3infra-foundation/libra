@@ -422,6 +422,7 @@ EXAMPLES:
     libra bisect good                          Mark the current HEAD as good
     libra bisect skip                          Skip the current commit and continue
     libra bisect view                          Show current state and remaining candidates
+    libra bisect visualize                     Alias for 'view' (text state; Libra has no gitk GUI)
     libra bisect run cargo test                Auto-bisect by running a test command
     libra bisect run cargo test -- --ignored   Forward flags to the test command
     libra bisect log                           Print full session log

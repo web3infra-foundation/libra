@@ -942,3 +942,37 @@ fn bisect_first_parent_shrinks_candidate_set() {
         "first-parent must shrink the candidate set: first_parent={first_parent}, full={full}"
     );
 }
+
+/// `bisect visualize` is Git's alias for `bisect view`; both must dispatch to
+/// the same handler (identical exit code and output). Exercised through the
+/// real clap parser via the binary.
+#[test]
+fn bisect_visualize_aliases_view() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+
+    // With no active bisect, both forms hit the same handler and fail the same.
+    let view = run_libra_command(&["bisect", "view"], temp.path());
+    let visualize = run_libra_command(&["bisect", "visualize"], temp.path());
+
+    assert_eq!(
+        view.status.code(),
+        visualize.status.code(),
+        "view and visualize must share an exit code"
+    );
+    assert_eq!(
+        view.stdout, visualize.stdout,
+        "view and visualize must produce identical stdout"
+    );
+    assert_eq!(
+        view.stderr, visualize.stderr,
+        "view and visualize must produce identical stderr"
+    );
+
+    // `--help` advertises the alias.
+    let help = run_libra_command(&["bisect", "--help"], temp.path());
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("visualize"),
+        "bisect --help lists the visualize alias"
+    );
+}

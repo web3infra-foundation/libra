@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` 与 `start --first-parent`（候选枚举仅沿首父历史）supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred
+- 兼容级别：`partial`。`start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view`（含 git 别名 `visualize`）与 `start --first-parent`（候选枚举仅沿首父历史）supported; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) deferred
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -47,7 +47,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/bisect.md`。
 - Synopsis：`libra bisect start [<bad>] [--good <commit>] [--first-parent]`。
-- 公开参数/子命令包括：`start [<bad>] [-g, --good <good>] [--first-parent]`、`bad [<rev>]`、`good [<rev>]`、`reset [<rev>]`、`skip [<rev>]`、`log`、`run <cmd>...`、`view`。`--first-parent` 持久化到 `bisect_state.first_parent` 列（带 `ALTER TABLE` 迁移），`get_testable_commits` 在 BFS 时仅入队 `parent_commit_ids.first()`（good 祖先集合仍用全祖先，因为某提交若是 good 的任意祖先即为 good）。
+- 公开参数/子命令包括：`start [<bad>] [-g, --good <good>] [--first-parent]`、`bad [<rev>]`、`good [<rev>]`、`reset [<rev>]`、`skip [<rev>]`、`log`、`run <cmd>...`、`view`（`visible_alias = "visualize"`——git 的 `visualize` 在 Libra 里是 `view` 的别名，显示文本状态而非 gitk GUI，终端原生的有意差异）。`--first-parent` 持久化到 `bisect_state.first_parent` 列（带 `ALTER TABLE` 迁移），`get_testable_commits` 在 BFS 时仅入队 `parent_commit_ids.first()`（good 祖先集合仍用全祖先，因为某提交若是 good 的任意祖先即为 good）。
 
 
 ## 还未实现的功能
@@ -57,7 +57,7 @@ flowchart TD
 | 兼容矩阵说明 | `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` 支持; `replay` (see [docs/development/commands/_compatibility.md#d6-bisect-replay](docs/development/commands/_compatibility.md#d6-bisect-replay)) / `terms` (see [docs/development/commands/_compatibility.md#d7-bisect-terms](docs/development/commands/_compatibility.md#d7-bisect-terms)) 延后 | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 | 兼容差异项 | Custom terms | 原始对照：不支持 (延后 — see compatibility/declined.md D7)；相关参数/替代：bisect terms / --term-old / --term-new；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Replay session | 原始对照：不支持 (延后 — see compatibility/declined.md D6)；相关参数/替代：bisect replay <logfile>；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | Visualize (GUI) | 原始对照：不支持；相关参数/替代：bisect visualize；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现（有意差异） | `bisect visualize` | `visualize` 作为 `view` 的 clap `visible_alias`：两者路由到同一 `run_bisect_view` 处理器，输出文本状态（HEAD/good/bad/current/remaining + 候选）。Libra 无 gitk，故不启动 GUI（git 的 `visualize` 启 gitk/log）——这是终端原生的有意差异。带集成测试（`bisect_visualize_aliases_view`：与 `view` 退出码/输出一致，`--help` 列出别名）。 |
 | ✅ 已实现 | First-parent only `--first-parent` | `bisect start --first-parent` 将候选枚举限制在首父历史：状态持久化到 `bisect_state.first_parent`（列 + 迁移），`get_testable_commits` 仅沿 `parent_commit_ids.first()` 走，使合并入的侧分支不贡献可测提交。带集成测试（合并历史下候选集严格小于全父模式）。 |
 
 ## 维护要求

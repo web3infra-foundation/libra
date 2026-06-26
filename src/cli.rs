@@ -590,7 +590,10 @@ pub enum Bisect {
         )]
         cmd: Vec<String>,
     },
-    #[command(about = "Show the current bisect state and remaining candidates")]
+    #[command(
+        about = "Show the current bisect state and remaining candidates",
+        visible_alias = "visualize"
+    )]
     View,
 }
 

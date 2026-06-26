@@ -155,12 +155,13 @@ libra bisect run cargo test -- --ignored
 libra bisect run bash -c 'cargo build && ./target/debug/repro'
 ```
 
-### Subcommand: `view`
+### Subcommand: `view` (alias: `visualize`)
 
-Show the current bisect state — good / bad boundaries, current HEAD, remaining candidates, and any skipped commits.
+Show the current bisect state — good / bad boundaries, current HEAD, remaining candidates, and any skipped commits. `visualize` is an alias for `view`: where Git's `bisect visualize` launches a GUI (gitk) or pager, Libra is terminal-native and prints the same text state summary.
 
 ```bash
 libra bisect view
+libra bisect visualize   # alias for view
 ```
 
 If no bisect is in progress, returns a fatal error (`NOT_IN_BISECT`).
@@ -348,10 +349,10 @@ Sometimes the user wants to end the bisect session but go to a different commit 
 | Skip | `bisect skip [<rev>]` | `bisect skip [<rev>...]` | N/A |
 | Show log | `bisect log` | `bisect log` | N/A |
 | Automated run | `bisect run <cmd> [<args>...]` | `bisect run <script>` | N/A |
-| Show current state | `bisect view` | `bisect visualize` (GUI / log) | N/A |
+| Show current state | `bisect view` / `bisect visualize` | `bisect visualize` (GUI / log) | N/A |
 | Custom terms | Not supported (deferred — see compatibility/declined.md D7) | `bisect terms` / `--term-old` / `--term-new` | N/A |
 | Replay session | Not supported (deferred — see compatibility/declined.md D6) | `bisect replay <logfile>` | N/A |
-| Visualize (GUI) | Not supported | `bisect visualize` | N/A |
+| Visualize (GUI) | `bisect visualize` (alias for `view`; prints the text state, no GUI) | `bisect visualize` | N/A |
 | First-parent only | `bisect start --first-parent` | `--first-parent` | N/A |
 | Multiple good commits | Via repeated `bisect good` | Positional args to `start` | N/A |
 | State storage | SQLite (`bisect_state` table) | Flat files (`.git/BISECT_*`) | N/A |
