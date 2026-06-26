@@ -1653,3 +1653,145 @@ fn test_for_each_ref_deref_objectname_atom_and_sort() {
         "descending: annotated tag sorts first"
     );
 }
+
+#[test]
+fn test_for_each_ref_deref_objecttype_and_objectsize_atoms() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated", "atag"], p),
+        "annotated tag",
+    );
+    assert_cli_success(&run_libra_command(&["tag", "lw"], p), "lightweight tag");
+
+    let field = |reff: &str, fmt: &str| -> String {
+        let out = run_libra_command(&["for-each-ref", reff, &format!("--format={fmt}")], p);
+        assert_cli_success(&out, "for-each-ref field");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // The annotated tag dereferences to the commit: its *objecttype is `commit`
+    // and its *objectsize equals the commit's own objectsize.
+    assert_eq!(
+        field("refs/tags/atag", "%(*objecttype)"),
+        "commit",
+        "annotated tag dereferences to a commit"
+    );
+    let commit_size = field("refs/heads/main", "%(objectsize)");
+    assert!(!commit_size.is_empty(), "commit objectsize is present");
+    assert_eq!(
+        field("refs/tags/atag", "%(*objectsize)"),
+        commit_size,
+        "*objectsize is the dereferenced commit's size"
+    );
+
+    // Non-tag refs (branch, lightweight tag) have empty *objecttype/*objectsize.
+    for reff in ["refs/heads/main", "refs/tags/lw"] {
+        assert_eq!(
+            field(reff, "%(*objecttype)"),
+            "",
+            "{reff} has no dereferenced type"
+        );
+        assert_eq!(
+            field(reff, "%(*objectsize)"),
+            "",
+            "{reff} has no dereferenced size"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_deref_size_errors_on_broken_tag_chain() {
+    use libra::internal::{db::get_db_conn_instance, model::reference};
+    use sea_orm::{ActiveModelTrait, Set};
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    // Craft a nested tag chain outer(tag) -> inner(tag) -> c1(commit), then
+    // DELETE the inner tag object so the chain cannot be peeled.
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let c1 = Head::current_commit().await.expect("HEAD commit");
+    let tagger = Signature {
+        signature_type: SignatureType::Tagger,
+        name: "t".to_string(),
+        email: "t@t".to_string(),
+        timestamp: 1,
+        timezone: "+0000".to_string(),
+    };
+    let inner = GitTag::new(
+        c1,
+        ObjectType::Commit,
+        "inner".to_string(),
+        tagger.clone(),
+        "inner".to_string(),
+    );
+    save_object(&inner, &inner.id).expect("save inner tag");
+    let outer = GitTag::new(
+        inner.id,
+        ObjectType::Tag,
+        "outer".to_string(),
+        tagger,
+        "outer".to_string(),
+    );
+    save_object(&outer, &outer.id).expect("save outer tag");
+
+    let db = get_db_conn_instance().await;
+    reference::ActiveModel {
+        name: Set(Some("refs/tags/outer".to_string())),
+        kind: Set(reference::ConfigKind::Tag),
+        commit: Set(Some(outer.id.to_string())),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("register refs/tags/outer");
+
+    // Remove the intermediate tag object: outer still loads (so the ref lists as
+    // a tag), but peeling it must read `inner`, which is now gone.
+    std::fs::remove_file(super::loose_object_path(p, &inner.id.to_string()))
+        .expect("remove inner tag object");
+
+    // `%(*objectsize)` must surface the read failure (naming the ref), NOT render
+    // empty like a non-tag ref.
+    let out = run_libra_command(
+        &["for-each-ref", "refs/tags/outer", "--format=%(*objectsize)"],
+        p,
+    );
+    assert!(
+        !out.status.success(),
+        "%(*objectsize) must error on a broken tag chain, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refs/tags/outer"),
+        "the error names the ref: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

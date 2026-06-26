@@ -37,6 +37,7 @@ EXAMPLES:
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
     libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
     libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
+    libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -351,7 +352,7 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
     } else if let Some(reverse) = sort.and_then(parse_objectsize_sort_key) {
         sort_entries_by_objectsize(&mut entries, reverse)?;
     } else if let Some(reverse) = sort.and_then(parse_deref_objectname_sort_key) {
-        sort_entries_by_deref_objectname(&mut entries, reverse);
+        sort_entries_by_deref_objectname(&mut entries, reverse)?;
     } else {
         sort_entries(&mut entries, sort)?;
     }
@@ -668,8 +669,11 @@ fn parse_deref_objectname_sort_key(sort: &str) -> Option<bool> {
 /// Sort entries by `*objectname` (the object an annotated tag dereferences to,
 /// empty for non-tag refs); ties break by refname ascending, matching Git's
 /// final ordering key. Empty values sort together (lexicographically first).
-fn sort_entries_by_deref_objectname(entries: &mut [RefEntry], reverse: bool) {
-    let derefs: Vec<String> = entries.iter().map(ref_deref_objectname).collect();
+fn sort_entries_by_deref_objectname(entries: &mut [RefEntry], reverse: bool) -> CliResult<()> {
+    let mut derefs: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        derefs.push(ref_deref_objectname(entry)?);
+    }
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by(|&a, &b| {
         let primary = derefs[a].cmp(&derefs[b]);
@@ -678,6 +682,7 @@ fn sort_entries_by_deref_objectname(entries: &mut [RefEntry], reverse: bool) {
     });
     let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
     entries.clone_from_slice(&reordered);
+    Ok(())
 }
 
 /// Sort entries by a date key. The timestamp for each ref is resolved by loading
@@ -762,33 +767,101 @@ fn peel_to_commit(start: ObjectHash) -> Option<Commit> {
 /// string for non-tag refs). Only annotated tags dereference; the value is the
 /// tag's recorded target object id, following nested tags via the tag objects'
 /// own `object_type`/`object_hash` (no need to read the target object itself,
-/// matching Git, which reports the recorded id).
-fn ref_deref_objectname(entry: &RefEntry) -> String {
+/// matching Git, which reports the recorded id). A tag whose chain cannot be
+/// resolved is a corruption and is surfaced as an error rather than rendered
+/// empty (which would be indistinguishable from a legitimate non-tag ref).
+fn ref_deref_objectname(entry: &RefEntry) -> CliResult<String> {
+    Ok(ref_deref_target(entry)?
+        .map(|(hash, _)| hash.to_string())
+        .unwrap_or_default())
+}
+
+/// Git's `%(*objecttype)`: the type of the object an annotated tag dereferences
+/// to (empty for non-tag refs). Read from the tag's recorded `object_type` (the
+/// final non-tag tag in a nested chain), so no target read is needed.
+fn ref_deref_objecttype(entry: &RefEntry) -> CliResult<String> {
+    Ok(ref_deref_target(entry)?
+        .map(|(_, object_type)| object_type_name(object_type).to_string())
+        .unwrap_or_default())
+}
+
+/// Git's `%(*objectsize)`: the byte size of the object an annotated tag
+/// dereferences to (`None` → empty for non-tag refs). Unlike `*objecttype`, the
+/// size is not recorded in the tag, so the dereferenced object is read; a
+/// missing/unreadable target is surfaced as an error rather than a silent 0.
+fn ref_deref_objectsize(entry: &RefEntry) -> CliResult<Option<i64>> {
+    let Some((target, _)) = ref_deref_target(entry)? else {
+        return Ok(None);
+    };
+    let data = util::objects_storage().get(&target).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read the object {target} dereferenced from ref '{}': {source}",
+            entry.refname
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    Ok(Some(data.len() as i64))
+}
+
+/// Shared helper for the `*`-dereference atoms: for an annotated-tag ref,
+/// `Ok(Some((target object id, target type)))`; `Ok(None)` for any non-tag ref
+/// (branches, lightweight tags), matching Git, whose `*` atoms are empty unless
+/// the ref points at a tag object. A tag ref whose chain cannot be peeled (a
+/// missing/corrupt object id, or an unreadable intermediate tag) returns `Err`
+/// so the failure is surfaced rather than silently collapsing to the non-tag
+/// empty case.
+fn ref_deref_target(entry: &RefEntry) -> CliResult<Option<(ObjectHash, ObjectType)>> {
     if entry.objecttype != "tag" {
-        return String::new();
+        return Ok(None);
     }
-    ObjectHash::from_str(&entry.objectname)
-        .ok()
-        .and_then(peel_tag_to_target)
-        .map(|hash| hash.to_string())
-        .unwrap_or_default()
+    let start = ObjectHash::from_str(&entry.objectname).map_err(|source| {
+        CliError::fatal(format!(
+            "ref '{}' has an invalid object id '{}': {source}",
+            entry.refname, entry.objectname
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    Ok(Some(peel_tag_to_target(start, &entry.refname)?))
 }
 
 /// Follow an annotated-tag object to the first non-tag object it points at,
-/// returning that object's id. Uses each tag's recorded `object_type`/
+/// returning that object's id and type. Uses each tag's recorded `object_type`/
 /// `object_hash` (not the target's stored type) and is bounded by
-/// [`MAX_TAG_PEEL_DEPTH`].
-fn peel_tag_to_target(tag_hash: ObjectHash) -> Option<ObjectHash> {
+/// [`MAX_TAG_PEEL_DEPTH`]. An unreadable tag in the chain, or a chain deeper than
+/// the bound (e.g. a cycle), is surfaced as an error.
+fn peel_tag_to_target(tag_hash: ObjectHash, refname: &str) -> CliResult<(ObjectHash, ObjectType)> {
     let mut current = tag_hash;
     for _ in 0..=MAX_TAG_PEEL_DEPTH {
-        let tag = load_object::<GitTag>(&current).ok()?;
+        let tag = load_object::<GitTag>(&current).map_err(|source| {
+            CliError::fatal(format!(
+                "failed to read tag object {current} while dereferencing ref '{refname}': {source}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         if tag.object_type == ObjectType::Tag {
             current = tag.object_hash;
         } else {
-            return Some(tag.object_hash);
+            return Ok((tag.object_hash, tag.object_type));
         }
     }
-    None
+    Err(CliError::fatal(format!(
+        "ref '{refname}' has a tag chain deeper than {MAX_TAG_PEEL_DEPTH} (possible cycle)"
+    ))
+    .with_stable_code(StableErrorCode::RepoCorrupt))
+}
+
+/// The Git object-type name for an [`ObjectType`], matching the strings used for
+/// `%(objecttype)`. A tag only ever dereferences to one of the four canonical
+/// loose object types; any other (pack-internal delta) variant is not a valid
+/// stored object type and degrades to an empty string.
+fn object_type_name(object_type: ObjectType) -> &'static str {
+    match object_type {
+        ObjectType::Commit => "commit",
+        ObjectType::Tree => "tree",
+        ObjectType::Blob => "blob",
+        ObjectType::Tag => "tag",
+        _ => "",
+    }
 }
 
 fn sort_entries(entries: &mut [RefEntry], sort: Option<&str>) -> CliResult<()> {
@@ -973,11 +1046,25 @@ fn render_format(
     // `%(*objectname)` / `%(*objectname:short)`: the object an annotated tag
     // dereferences to (empty for non-tag refs); computed lazily.
     let deref_objectname = if format.contains("%(*objectname") {
-        ref_deref_objectname(entry)
+        ref_deref_objectname(entry)?
     } else {
         String::new()
     };
     let deref_objectname_short: String = deref_objectname.chars().take(7).collect();
+    // `%(*objecttype)` / `%(*objectsize)`: the type / byte size of the object an
+    // annotated tag dereferences to (empty for non-tag refs); computed lazily.
+    let deref_objecttype = if format.contains("%(*objecttype)") {
+        ref_deref_objecttype(entry)?
+    } else {
+        String::new()
+    };
+    let deref_objectsize = if format.contains("%(*objectsize)") {
+        ref_deref_objectsize(entry)?
+            .map(|size| size.to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     // `%(HEAD)`: `*` for the currently checked-out branch, a space otherwise.
     let head_marker = if head_refname == Some(entry.refname.as_str()) {
         "*"
@@ -1022,10 +1109,12 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 27] = [
+    let atoms: [(&str, &str); 29] = [
         ("objectsize", objectsize.as_str()),
         ("*objectname:short", deref_objectname_short.as_str()),
         ("*objectname", deref_objectname.as_str()),
+        ("*objecttype", deref_objecttype.as_str()),
+        ("*objectsize", deref_objectsize.as_str()),
         ("HEAD", head_marker),
         ("upstream:short", upstream_short),
         ("upstream", upstream),
