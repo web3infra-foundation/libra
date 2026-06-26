@@ -122,6 +122,21 @@ currently rejects `--bare` explicitly.
 libra clone --bare git@github.com:user/repo.git
 ```
 
+### `-l, --local` / `--no-local`
+
+Accepted for Git compatibility and effectively no-ops. Git's `-l`/`--local` asks
+for local optimizations (copy/hardlink instead of the transport) when the source
+is on the local filesystem, and `--no-local` forces the transport to avoid
+hardlinks. Libra **never hardlinks** objects — it always copies — and how it
+reads a local-path source is determined by the source type, not by these flags:
+a local Libra repository is read directly, while a local Git repository is
+fetched via `git-upload-pack`. So both flags are accepted with no effect on the
+result. The two override each other; the last one given wins.
+
+```bash
+libra clone -l /path/to/source /path/to/dest
+```
+
 ### `--depth <N>`
 
 Create a shallow clone with history truncated to the specified number of commits.

@@ -87,6 +87,14 @@ libra clone --single-branch --no-single-branch git@github.com:user/repo.git
 libra clone --bare git@github.com:user/repo.git
 ```
 
+### `-l, --local` / `--no-local`
+
+为 Git 兼容而接受，实质为 no-op。当源位于本地文件系统时，Git 的 `-l`/`--local` 请求本地优化（用复制/硬链接代替传输），`--no-local` 则强制走传输以避免硬链接。Libra **从不硬链接**对象——始终复制——且其读取本地路径源的方式由源类型决定、与这两个 flag 无关：本地 Libra 仓库直接读取对象，本地 Git 仓库经 `git-upload-pack` 获取。故两者均按 no-op 接受、不影响结果。两者互相覆盖，最后出现者生效。
+
+```bash
+libra clone -l /path/to/source /path/to/dest
+```
+
 ### `--depth <N>`
 
 创建浅克隆，将历史截断到指定提交数。`N` 必须是正整数。

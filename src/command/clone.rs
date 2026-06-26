@@ -147,6 +147,21 @@ pub struct CloneArgs {
     /// standard clones; libra+cloud clones always use `origin`.
     #[clap(short = 'o', long = "origin", value_name = "NAME")]
     pub origin: Option<String>,
+
+    /// Request local optimizations for a filesystem source (Git's `-l`/`--local`
+    /// copies/hardlinks instead of using the transport). Accepted for
+    /// compatibility and is a no-op: Libra never hardlinks (it always copies),
+    /// and how it reads a local-path source is determined by the source type
+    /// (a local Libra repo is read directly; a local Git repo is fetched via
+    /// git-upload-pack), not by this flag.
+    #[clap(short = 'l', long, overrides_with = "no_local")]
+    pub local: bool,
+
+    /// Force the regular transport even for a local source (Git's `--no-local`,
+    /// which avoids hardlinks). Accepted for compatibility and is a no-op:
+    /// Libra never hardlinks objects, so there is nothing to disable.
+    #[clap(long = "no-local", overrides_with = "local")]
+    pub no_local: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -3508,6 +3523,8 @@ mod tests {
         CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3721,6 +3738,8 @@ mod tests {
         let args = CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3812,6 +3831,8 @@ mod tests {
         let args = CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3891,6 +3912,8 @@ mod tests {
         let args = CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -3960,6 +3983,8 @@ mod tests {
         let args = CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4026,6 +4051,8 @@ mod tests {
         let args = CloneArgs {
             no_single_branch: false,
             origin: None,
+            local: false,
+            no_local: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),

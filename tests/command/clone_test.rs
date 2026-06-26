@@ -183,6 +183,8 @@ async fn test_clone_branch() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -220,6 +222,8 @@ async fn test_clone_bare_repository() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -272,6 +276,8 @@ async fn test_clone_branch_single_branch() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -308,6 +314,8 @@ async fn test_clone_default_branch() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -344,6 +352,8 @@ async fn test_clone_default_branch_single_branch() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -382,6 +392,8 @@ async fn test_clone_to_existing_empty_dir() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -423,6 +435,8 @@ async fn test_clone_to_existing_dir() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -460,6 +474,8 @@ async fn test_clone_to_dir_with_existing_file_name() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -496,6 +512,8 @@ async fn test_clone_with_depth() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -532,6 +550,8 @@ async fn test_clone_with_depth_and_branch() {
     command::clone::execute(CloneArgs {
         no_single_branch: false,
         origin: None,
+        local: false,
+        no_local: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -741,4 +761,70 @@ fn origin_flag_names_the_remote() {
             "no destination is created for invalid -o name {bad_name:?}"
         );
     }
+}
+
+/// `--local` / `--no-local` / `-l` are accepted for Git compatibility and are
+/// effectively no-ops: Libra's clone of a local-path source already reads its
+/// objects directly. Cloning a local source succeeds with any of them.
+#[test]
+#[serial]
+fn test_clone_local_flag_accepted_for_local_source() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    fs::write(sp.join("f.txt"), "hello\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], sp).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], sp)
+            .status
+            .success(),
+        "commit"
+    );
+    let source_str = sp.to_str().unwrap();
+
+    let dest_root = tempdir().expect("dest root");
+    // Each flag form clones the local source successfully and gets the commit.
+    for (idx, flag) in ["--local", "--no-local", "-l"].iter().enumerate() {
+        let dest = dest_root.path().join(format!("clone{idx}"));
+        let dest_str = dest.to_str().unwrap();
+        let out = run_libra_command(&["clone", flag, source_str, dest_str], dest_root.path());
+        assert!(
+            out.status.success(),
+            "clone {flag} should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dest.join(".libra").exists(), "{flag}: clone created a repo");
+        let log = run_libra_command(&["log", "--oneline"], &dest);
+        assert!(
+            String::from_utf8_lossy(&log.stdout).contains("c1"),
+            "{flag}: cloned history present"
+        );
+    }
+
+    // `--local --no-local` (mutually overriding) is accepted, last one wins.
+    let dest = dest_root.path().join("clone-both");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--local",
+            "--no-local",
+            source_str,
+            dest.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "clone --local --no-local should succeed"
+    );
 }
