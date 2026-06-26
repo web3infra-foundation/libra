@@ -62,7 +62,7 @@ The `:short`/`:iso`/`:relative` date modifiers are not yet supported.
 | `--remotes` | List remote-tracking refs under `refs/remotes/`. |
 | `--all` | List all supported ref namespaces. This is the default when no namespace flag is given. |
 | `--format=<format>` | Render simple atoms. Supported atoms: `%(refname)`, `%(refname:short)`, `%(refname:lstrip=N)`, `%(refname:rstrip=N)`, `%(objectname)`, `%(objectname:short)` (7-char), `%(objectname:short=N)`, `%(objecttype)`, `%(HEAD)`, `%(upstream)`, `%(upstream:short)`, `%(push)`, `%(push:short)`, `%(subject)`, `%(contents)`, `%(contents:subject)`, `%(body)`, `%(contents:body)`, `%(authorname)`, `%(authoremail)`, `%(committername)`, `%(committeremail)`, `%(taggername)`, `%(taggeremail)`, `%(authordate)`, `%(committerdate)`, `%(taggerdate)`. |
-| `--sort=<key>` | Sort by `refname`, `objectname`, or `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`). Prefix any key with `-` to reverse. |
+| `--sort=<key>` | Sort by `refname`, `objectname`, `version:refname` (alias `v:refname`; orders embedded numbers numerically, so `v1.9` precedes `v1.10`), or a date key — `committerdate`, `authordate`, or `creatordate`. Date keys peel annotated tags to the commit; `creatordate` uses an annotated tag's own tagger date. Prefix any key with `-` to reverse. |
 | `--count=<n>` | Limit output to at most `n` refs after filtering and sorting. |
 | `--points-at=<object>` | Keep refs that point at the object. Annotated tags also match their peeled target. |
 | `--contains=<commit>` / `--no-contains=<commit>` | Keep (or exclude) refs whose tip has `<commit>` as an ancestor. |
@@ -83,7 +83,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, and `version:refname` (each reversible with a `-` prefix). Deferred Git features include the full atom language, the remaining sort keys (e.g. `*objectname`, date keys), and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, `version:refname`, and the date keys `committerdate` / `authordate` / `creatordate` (each reversible with a `-` prefix). Deferred Git features include the full atom language, the remaining sort keys (e.g. `objectsize`, `*objectname`), and shell/perl/python/tcl quoting modes. Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

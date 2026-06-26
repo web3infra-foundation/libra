@@ -1017,3 +1017,323 @@ fn test_for_each_ref_exclude_filter() {
         "non-matching refs kept: {ex_s}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_sort_by_committerdate() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    // c1 on main, then branch `older` at c1.
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    assert_cli_success(&run_libra_command(&["branch", "older"], p), "branch older");
+
+    // Ensure c2's committer timestamp is at least one whole second later than
+    // c1's, so the date ordering is unambiguous (commit timestamps are
+    // second-granularity).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    std::fs::write("a.txt", "2\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c2".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    assert_cli_success(&run_libra_command(&["branch", "newer"], p), "branch newer");
+
+    let heads = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["for-each-ref", "--heads", "--format=%(refname:short)"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "for-each-ref date sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // Ascending: `older` (c1) first; `main` and `newer` (both c2) tie-break by
+    // refname ascending.
+    assert_eq!(
+        heads(&["--sort=committerdate"]),
+        vec!["older".to_string(), "main".to_string(), "newer".to_string()],
+    );
+    // Descending reverses the date order; the c2 tie still breaks by refname.
+    assert_eq!(
+        heads(&["--sort=-committerdate"]),
+        vec!["main".to_string(), "newer".to_string(), "older".to_string()],
+    );
+    // authordate and creatordate (on commits) order the same as committerdate here.
+    assert_eq!(
+        heads(&["--sort=authordate"]),
+        vec!["older".to_string(), "main".to_string(), "newer".to_string()],
+    );
+    assert_eq!(
+        heads(&["--sort=creatordate"]),
+        vec!["older".to_string(), "main".to_string(), "newer".to_string()],
+    );
+
+    // An unknown sort key is still rejected.
+    let bad = run_libra_command(&["for-each-ref", "--sort=bogus"], p);
+    assert_eq!(bad.status.code(), Some(129));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_sort_creatordate_uses_tagger_date_for_annotated_tags() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "user.name", "T"], p),
+        "user.name",
+    );
+    assert_cli_success(
+        &run_libra_command(&["config", "user.email", "t@t"], p),
+        "user.email",
+    );
+
+    // c1, remember its hash, and branch `bbb` at it.
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    let c1 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    assert_cli_success(&run_libra_command(&["branch", "bbb"], p), "branch bbb");
+
+    // c2 strictly later, on main.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    std::fs::write("a.txt", "2\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c2".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    // Strictly later still, create an ANNOTATED tag pointing back at c1 (detach
+    // HEAD to c1 first, since `libra tag` tags HEAD). Its tagger date is now the
+    // latest timestamp, while it peels to c1 (the earliest commit).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_cli_success(&run_libra_command(&["checkout", &c1], p), "detach to c1");
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated aaa", "aaa"], p),
+        "annotated tag aaa",
+    );
+
+    let order = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["for-each-ref", "--format=%(refname:short)"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "for-each-ref date sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // committerdate / authordate PEEL the annotated tag to its commit (c1, the
+    // earliest), so `aaa` sorts with the c1-era refs — `bbb`(c1) then `aaa`(→c1,
+    // tie broken by full refname refs/heads/bbb < refs/tags/aaa), then `main`(c2).
+    let by_committer = order(&["--sort=committerdate"]);
+    assert_eq!(
+        by_committer,
+        vec!["bbb".to_string(), "aaa".to_string(), "main".to_string()],
+        "committerdate peels the tag to c1"
+    );
+    assert_eq!(
+        order(&["--sort=authordate"]),
+        by_committer,
+        "authordate also peels the tag to c1 (commits set author == committer)"
+    );
+
+    // creatordate uses the annotated tag's OWN tagger date (the latest), so `aaa`
+    // sorts last instead — distinguishing it from committerdate.
+    assert_eq!(
+        order(&["--sort=creatordate"]),
+        vec!["bbb".to_string(), "main".to_string(), "aaa".to_string()],
+        "creatordate uses the tag's tagger date"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_sort_peels_nested_annotated_tags() {
+    use libra::{
+        command::for_each_ref::MAX_TAG_PEEL_DEPTH,
+        internal::{db::get_db_conn_instance, model::reference},
+    };
+    use sea_orm::{ActiveModelTrait, Set};
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    // A single real commit c1; `main` and `bbb` both point at it.
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    assert_cli_success(&run_libra_command(&["branch", "bbb"], p), "branch bbb");
+
+    // Craft a NESTED annotated-tag chain (libra's `tag` cannot produce tag→tag)
+    // of exactly MAX_TAG_PEEL_DEPTH levels, ending at c1:
+    //   outer == t[N-1] (tag) -> t[N-2] (tag) -> ... -> t[0] (tag) -> c1 (commit)
+    // This exercises the deepest chain `peel_to_commit` must still resolve (a
+    // one-level peel — or an off-by-one bound — leaves `outer` at timestamp 0).
+    // The crafted tagger timestamp is 1 (earliest possible) while c1's commit
+    // date is "now" (latest), so committerdate/authordate must peel `outer` all
+    // the way to c1 (sorting it with the c1-era refs), whereas creatordate uses
+    // `outer`'s own tagger date (1) and sorts it first.
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let c1 = Head::current_commit().await.expect("HEAD commit");
+    let tagger = || Signature {
+        signature_type: SignatureType::Tagger,
+        name: "t".to_string(),
+        email: "t@t".to_string(),
+        timestamp: 1,
+        timezone: "+0000".to_string(),
+    };
+    let mut target = c1;
+    let mut target_type = ObjectType::Commit;
+    for i in 0..MAX_TAG_PEEL_DEPTH {
+        let tag = GitTag::new(
+            target,
+            target_type,
+            format!("t{i}"),
+            tagger(),
+            format!("t{i}"),
+        );
+        save_object(&tag, &tag.id).expect("save nested tag object");
+        target = tag.id;
+        target_type = ObjectType::Tag;
+    }
+    // `target` is the outermost tag; peeling it requires MAX_TAG_PEEL_DEPTH
+    // dereferences to reach c1.
+    let db = get_db_conn_instance().await;
+    reference::ActiveModel {
+        name: Set(Some("refs/tags/outer".to_string())),
+        kind: Set(reference::ConfigKind::Tag),
+        commit: Set(Some(target.to_string())),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("register refs/tags/outer");
+
+    let order = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["for-each-ref", "--format=%(refname:short)"];
+        full.extend_from_slice(args);
+        let out = run_libra_command(&full, p);
+        assert_cli_success(&out, "for-each-ref nested date sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // committerdate/authordate peel outer -> inner -> c1, so `outer` sorts at
+    // c1's (latest) date with `bbb`/`main` (all c1, tie broken by full refname:
+    // refs/heads/bbb < refs/heads/main < refs/tags/outer).
+    let expected_peeled = vec!["bbb".to_string(), "main".to_string(), "outer".to_string()];
+    assert_eq!(
+        order(&["--sort=committerdate"]),
+        expected_peeled,
+        "committerdate peels the nested tag all the way to c1"
+    );
+    assert_eq!(
+        order(&["--sort=authordate"]),
+        expected_peeled,
+        "authordate likewise peels the nested tag to c1"
+    );
+    // creatordate uses `outer`'s own tagger date (1, the earliest), so it leads.
+    assert_eq!(
+        order(&["--sort=creatordate"]),
+        vec!["outer".to_string(), "bbb".to_string(), "main".to_string()],
+        "creatordate uses the outer tag's tagger date, not the peeled commit"
+    );
+}

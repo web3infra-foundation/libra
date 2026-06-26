@@ -5,7 +5,7 @@ use std::{collections::HashMap, str::FromStr};
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{commit::Commit, tag::Tag as GitTag},
+    internal::object::{commit::Commit, tag::Tag as GitTag, types::ObjectType},
 };
 use serde::Serialize;
 
@@ -34,6 +34,7 @@ EXAMPLES:
     libra for-each-ref --format='%(refname:short) %(objectname:short)'  Short ref/object forms
     libra for-each-ref --sort=refname   Sort by ref name
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
+    libra for-each-ref --sort=-committerdate    Most recently committed refs first
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
     libra for-each-ref --no-merged=main List refs not yet merged into main
@@ -63,8 +64,9 @@ pub struct ForEachRefArgs {
     #[clap(long, value_name = "FORMAT")]
     pub format: Option<String>,
 
-    /// Sort output by key: `refname`, `objectname`, or `version:refname`
-    /// (alias `v:refname`); prefix with `-` to reverse.
+    /// Sort output by key: `refname`, `objectname`, `version:refname`
+    /// (alias `v:refname`), or the date keys `committerdate` / `authordate` /
+    /// `creatordate`; prefix with `-` to reverse.
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -318,7 +320,13 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
         });
     }
 
-    sort_entries(&mut entries, _args.sort.as_deref())?;
+    // Date-based sort keys (`committerdate` / `authordate` / `creatordate`)
+    // resolve each ref's timestamp by loading its object (peeling tags), so they
+    // are handled separately; all other keys go through the plain key sorter.
+    match _args.sort.as_deref().and_then(parse_date_sort_key) {
+        Some((date_key, reverse)) => sort_entries_by_date(&mut entries, date_key, reverse),
+        None => sort_entries(&mut entries, _args.sort.as_deref())?,
+    }
     if let Some(count) = _args.count {
         entries.truncate(count);
     }
@@ -537,6 +545,112 @@ fn branch_error(source: crate::internal::branch::BranchStoreError) -> CliError {
 
 fn matches_ref_pattern(refname: &str, pattern: &str) -> bool {
     refname == pattern || refname.ends_with(pattern) || refname.contains(pattern)
+}
+
+/// A date-based `--sort` key. `committerdate`/`authordate` use the (peeled)
+/// commit's committer/author date; `creatordate` uses the annotated tag's
+/// tagger date, falling back to the commit's committer date for everything else
+/// (commits and lightweight tags), matching Git.
+#[derive(Clone, Copy)]
+enum DateSortKey {
+    Committer,
+    Author,
+    Creator,
+}
+
+/// Recognise a date-based sort key, returning the key and whether a leading `-`
+/// requested a reversed (descending) order. Non-date keys return `None` so they
+/// fall through to [`sort_entries`].
+fn parse_date_sort_key(sort: &str) -> Option<(DateSortKey, bool)> {
+    let (reverse, name) = match sort.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, sort),
+    };
+    let key = match name {
+        "committerdate" => DateSortKey::Committer,
+        "authordate" => DateSortKey::Author,
+        "creatordate" => DateSortKey::Creator,
+        _ => return None,
+    };
+    Some((key, reverse))
+}
+
+/// Sort entries by a date key. The timestamp for each ref is resolved by loading
+/// its object (peeling annotated tags to their commit); ties break by refname
+/// ascending, matching Git's final ordering key.
+fn sort_entries_by_date(entries: &mut [RefEntry], key: DateSortKey, reverse: bool) {
+    let mut times: Vec<i64> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        times.push(ref_sort_timestamp(entry, key));
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let primary = times[a].cmp(&times[b]);
+        let primary = if reverse { primary.reverse() } else { primary };
+        primary.then_with(|| entries[a].refname.cmp(&entries[b].refname))
+    });
+    let reordered: Vec<RefEntry> = order.into_iter().map(|i| entries[i].clone()).collect();
+    entries.clone_from_slice(&reordered);
+}
+
+/// Resolve the timestamp a ref contributes for a date sort key (`0` when the
+/// object cannot be loaded or carries no such date — e.g. a tag pointing at a
+/// tree/blob).
+fn ref_sort_timestamp(entry: &RefEntry, key: DateSortKey) -> i64 {
+    // `creatordate` of an annotated tag is its OWN tagger date (not the peeled
+    // commit's). `entry.objecttype` is the object's actual type, determined when
+    // the ref was listed, so loading it as a tag here is sound.
+    if matches!(key, DateSortKey::Creator) && entry.objecttype == "tag" {
+        return ObjectHash::from_str(&entry.objectname)
+            .ok()
+            .and_then(|hash| load_object::<GitTag>(&hash).ok())
+            .map(|tag| tag.tagger.timestamp as i64)
+            .unwrap_or(0);
+    }
+    match ref_commit(entry) {
+        Some(commit) => match key {
+            DateSortKey::Author => commit.author.timestamp as i64,
+            // Committer and creatordate (for commits / lightweight tags).
+            _ => commit.committer.timestamp as i64,
+        },
+        None => 0,
+    }
+}
+
+/// Maximum number of annotated-tag dereferences when peeling to a commit (the
+/// terminal commit itself does not count against this); guards against tag
+/// cycles and pathological chains.
+pub const MAX_TAG_PEEL_DEPTH: usize = 16;
+
+/// Resolve the commit a ref ultimately points to, dereferencing annotated tags
+/// (tag → tag → … → commit). Returns `None` when the chain resolves to a
+/// tree/blob or cannot be loaded.
+fn ref_commit(entry: &RefEntry) -> Option<Commit> {
+    let hash = ObjectHash::from_str(&entry.objectname).ok()?;
+    peel_to_commit(hash)
+}
+
+/// Peel an object to the commit it ultimately names, following annotated-tag
+/// targets. The object database's **actual** stored type is consulted (via
+/// `get_object_type`) before every typed load — never a tag's declared `type`
+/// line — so a corrupt or mismatched object is never handed to a typed parser
+/// that assumes the wrong kind (the `from_bytes` parsers are not defensive
+/// against the wrong object type). Allows up to [`MAX_TAG_PEEL_DEPTH`] tag
+/// dereferences plus the terminal commit (so a chain of exactly that many tags
+/// still resolves) before giving up; returns `None` for a chain ending at a
+/// tree/blob or an unreadable object.
+fn peel_to_commit(start: ObjectHash) -> Option<Commit> {
+    let storage = util::objects_storage();
+    let mut current = start;
+    // `..=` so the terminal commit can be checked after the deepest allowed tag.
+    for _ in 0..=MAX_TAG_PEEL_DEPTH {
+        match storage.get_object_type(&current).ok()? {
+            ObjectType::Commit => return load_object::<Commit>(&current).ok(),
+            ObjectType::Tag => current = load_object::<GitTag>(&current).ok()?.object_hash,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn sort_entries(entries: &mut [RefEntry], sort: Option<&str>) -> CliResult<()> {
