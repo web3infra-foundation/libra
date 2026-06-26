@@ -58,6 +58,17 @@ Date atoms use Git's default format (`Day Mon DD HH:MM:SS YYYY +ZZZZ`) and, like
 `libra log`, render in UTC (`+0000`) rather than the commit's original timezone.
 The `:short`/`:iso`/`:relative` date modifiers are not yet supported.
 
+The `%(align:<width>[,<position>])` … `%(end)` block pads everything it encloses
+to `<width>` display columns. `<position>` is `left` (the default), `right`, or
+`middle`; width and position may be given positionally in either order
+(`%(align:10,right)` or `%(align:right,10)`) or as `width=`/`position=`
+key/value pairs. Content already at or beyond the width is left unchanged (no
+truncation), and align blocks may nest. Under `--shell`/`--perl`/`--python`/`--tcl`,
+the block's contents render unquoted and the whole padded block is quoted once
+as a single string literal (matching Git: only the topmost align block is
+quoted; nested blocks and block literals do not quote separately). The
+`%(if)`/`%(then)`/`%(else)` conditional atoms are not yet supported.
+
 ## Options
 
 | Option | Description |
@@ -89,7 +100,7 @@ libra --json for-each-ref --remotes
 
 ## Compatibility
 
-Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, `version:refname`, the date keys `committerdate` / `authordate` / `creatordate`, `objectsize` (the ref object's byte size — also available as the `%(objectsize)` atom), and the dereference keys `*objectname` / `*objecttype` / `*objectsize` (an annotated tag's dereferenced object id / type / byte size — also available as the `%(*objectname)` / `%(*objectname:short)` / `%(*objecttype)` / `%(*objectsize)` atoms; empty for non-tag refs, which sort first), each reversible with a `-` prefix. The output quoting modes `--shell`, `--perl`, `--python`, and `--tcl` (mutually exclusive) are supported: each interpolated field is wrapped as a string literal of that language (the literal text between atoms, and the default `<oid> <refname>` separators, are left unquoted). Deferred Git features include the rest of the full atom language (e.g. `%(align)`, `%(if)`/`%(then)`). Git flat-file ref storage parity is intentionally not applicable to Libra.
+Compatibility tier is `partial`. `--contains` / `--no-contains` are supported (filter refs whose tip has, or does not have, the given commit as an ancestor), as are `--merged` / `--no-merged` (filter refs whose tip is, or is not, reachable from the given commit) and `--exclude` (drop refs matching the given pattern, applied after the positional include patterns). Supported sort keys are `refname`, `objectname`, `version:refname`, the date keys `committerdate` / `authordate` / `creatordate`, `objectsize` (the ref object's byte size — also available as the `%(objectsize)` atom), and the dereference keys `*objectname` / `*objecttype` / `*objectsize` (an annotated tag's dereferenced object id / type / byte size — also available as the `%(*objectname)` / `%(*objectname:short)` / `%(*objecttype)` / `%(*objectsize)` atoms; empty for non-tag refs, which sort first), each reversible with a `-` prefix. The output quoting modes `--shell`, `--perl`, `--python`, and `--tcl` (mutually exclusive) are supported: each interpolated field is wrapped as a string literal of that language (the literal text between atoms, and the default `<oid> <refname>` separators, are left unquoted). The `%(align:<width>[,<position>])` … `%(end)` block pads its rendered contents to a column width (`position` is `left` (default), `right`, or `middle`; content wider than the width is not truncated; blocks may nest). Deferred Git features include the rest of the full atom language (e.g. the `%(if)`/`%(then)`/`%(else)` conditionals). Git flat-file ref storage parity is intentionally not applicable to Libra.
 
 ## Structured Output
 

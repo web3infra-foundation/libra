@@ -1841,3 +1841,112 @@ fn test_for_each_ref_sort_by_deref_objecttype_and_objectsize() {
         );
     }
 }
+
+#[test]
+fn test_for_each_ref_align_atom_pads_to_width() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `main` already exists; add a short and a long branch to exercise padding
+    // and the no-truncation rule.
+    assert_cli_success(&run_libra_command(&["branch", "ab"], p), "branch ab");
+    assert_cli_success(
+        &run_libra_command(&["branch", "longbranchname"], p),
+        "branch long",
+    );
+
+    let render = |fmt: &str, reff: &str| -> String {
+        let out = run_libra_command(&["for-each-ref", &format!("--format={fmt}"), reff], p);
+        assert_cli_success(&out, "for-each-ref align");
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string()
+    };
+
+    // left (default), right, middle padding of a 2-char ref to width 6.
+    assert_eq!(
+        render("[%(align:6,left)%(refname:short)%(end)]", "refs/heads/ab"),
+        "[ab    ]"
+    );
+    assert_eq!(
+        render("[%(align:6,right)%(refname:short)%(end)]", "refs/heads/ab"),
+        "[    ab]"
+    );
+    assert_eq!(
+        render("[%(align:6,middle)%(refname:short)%(end)]", "refs/heads/ab"),
+        "[  ab  ]"
+    );
+    // width-only defaults to left.
+    assert_eq!(
+        render("[%(align:4)%(refname:short)%(end)]", "refs/heads/ab"),
+        "[ab  ]"
+    );
+    // key=value form.
+    assert_eq!(
+        render(
+            "[%(align:width=6,position=right)%(refname:short)%(end)]",
+            "refs/heads/ab"
+        ),
+        "[    ab]"
+    );
+    // middle with odd padding biases the extra space to the right (ab → width 5).
+    assert_eq!(
+        render("[%(align:5,middle)%(refname:short)%(end)]", "refs/heads/ab"),
+        "[ ab  ]"
+    );
+    // Content wider than the width is not truncated.
+    assert_eq!(
+        render(
+            "[%(align:4,left)%(refname:short)%(end)]",
+            "refs/heads/longbranchname"
+        ),
+        "[longbranchname]"
+    );
+
+    // `%(align)` without a matching `%(end)` is a usage error.
+    let no_end = run_libra_command(
+        &[
+            "for-each-ref",
+            "--format=%(align:5)%(refname)",
+            "refs/heads/ab",
+        ],
+        p,
+    );
+    assert_eq!(
+        no_end.status.code(),
+        Some(129),
+        "align without %(end) is a usage error: {}",
+        String::from_utf8_lossy(&no_end.stderr)
+    );
+
+    // An invalid align spec (no width) is a usage error.
+    let bad = run_libra_command(
+        &[
+            "for-each-ref",
+            "--format=%(align:left)%(refname)%(end)",
+            "refs/heads/ab",
+        ],
+        p,
+    );
+    assert_eq!(bad.status.code(), Some(129), "align without a width errors");
+
+    // Under `--shell` (and the other quote modes) the contents of an align block
+    // render raw and the whole padded block is quoted once — matching Git, which
+    // quotes only the topmost align block (not per-atom, not the block literals
+    // separately). `ab` right-aligned to width 6 → `    ab` → `'    ab'`.
+    let shell = run_libra_command(
+        &[
+            "for-each-ref",
+            "--shell",
+            "--format=[%(align:6,right)%(refname:short)%(end)]",
+            "refs/heads/ab",
+        ],
+        p,
+    );
+    assert_cli_success(&shell, "for-each-ref --shell align");
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout).trim_end_matches('\n'),
+        "['    ab']"
+    );
+}

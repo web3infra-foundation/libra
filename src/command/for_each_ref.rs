@@ -39,6 +39,7 @@ EXAMPLES:
     libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
     libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
     libra for-each-ref --tags --sort=*objectsize  Sort tags by their dereferenced target's size
+    libra for-each-ref --format='%(align:20,left)%(refname:short)%(end)%(objectname:short)'  Pad the ref name to a 20-column field
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -1205,15 +1206,67 @@ fn render_format(
         ("objectname", entry.objectname.as_str()),
         ("objecttype", entry.objecttype.as_str()),
     ];
-    let mut out = String::with_capacity(format.len());
-    let mut rest = format;
+    render_fragment(format, &atoms, entry, quote)
+}
+
+/// Column position for a `%(align)` block.
+#[derive(Debug, Clone, Copy)]
+enum AlignPosition {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Render a format fragment by substituting atoms, handling `%(align:…)`…
+/// `%(end)` blocks (which pad their rendered contents to a column width). Called
+/// recursively for the contents of each align block (so nested alignment and
+/// inner atoms both work).
+fn render_fragment(
+    fragment: &str,
+    atoms: &[(&str, &str)],
+    entry: &RefEntry,
+    quote: Option<QuoteStyle>,
+) -> CliResult<String> {
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
     while let Some(pos) = rest.find("%(") {
         out.push_str(&rest[..pos]);
         let after = &rest[pos..];
-        let Some(end) = after.find(')') else {
+        let Some(close) = after.find(')') else {
             return Err(unsupported_atom_error());
         };
-        let token = &after[2..end];
+        let token = &after[2..close];
+        // Everything after this token's closing `)`.
+        let body = &after[close + 1..];
+
+        // `%(align:<width>[,<position>])` … `%(end)`: render the enclosed
+        // fragment, then pad it to `width` columns (no truncation when it is
+        // already wider), matching Git's alignment atom.
+        if let Some(spec) = token.strip_prefix("align:") {
+            let (width, position) = parse_align_spec(spec)?;
+            let Some((end_start, after_end)) = find_matching_align_end(body) else {
+                return Err(align_missing_end_error());
+            };
+            // The block's contents render WITHOUT per-field quoting (pass `None`),
+            // so inner atoms, literal text, and any nested align block are all
+            // raw; the whole padded block is then quoted once at the active level.
+            // This matches Git, where under `--shell`/`--perl`/`--python`/`--tcl`
+            // only the topmost align block is quoted as a single string literal —
+            // nested align blocks and block literals do not quote separately.
+            let inner = render_fragment(&body[..end_start], atoms, entry, None)?;
+            let padded = pad_aligned(&inner, width, position);
+            push_field(&mut out, &padded, quote);
+            rest = &body[after_end..];
+            continue;
+        }
+        // `%(align)` without a spec, or a stray `%(end)`, are usage errors.
+        if token == "align" {
+            return Err(align_missing_width_error());
+        }
+        if token == "end" {
+            return Err(align_missing_end_error());
+        }
+
         // Parameterized atoms (`%(refname:lstrip=N)` / `%(refname:rstrip=N)` and
         // `%(objectname:short=N)`) are handled first; everything else is an exact
         // atom-name match.
@@ -1236,10 +1289,111 @@ fn render_format(
                 None => return Err(unsupported_atom_error()),
             }
         }
-        rest = &after[end + 1..];
+        rest = body;
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Parse a `%(align:…)` spec into `(width, position)`. Tokens are
+/// comma-separated and order-independent: a bare number or `width=<n>` sets the
+/// width (required), and `left`/`right`/`middle` or `position=<p>` sets the
+/// position (default `left`).
+fn parse_align_spec(spec: &str) -> CliResult<(usize, AlignPosition)> {
+    let mut width: Option<usize> = None;
+    let mut position = AlignPosition::Left;
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(w) = part.strip_prefix("width=") {
+            width = Some(w.parse().map_err(|_| align_spec_error(spec))?);
+        } else if let Some(p) = part.strip_prefix("position=") {
+            position = parse_align_position(p).ok_or_else(|| align_spec_error(spec))?;
+        } else if let Ok(w) = part.parse::<usize>() {
+            width = Some(w);
+        } else if let Some(p) = parse_align_position(part) {
+            position = p;
+        } else {
+            return Err(align_spec_error(spec));
+        }
+    }
+    let width = width.ok_or_else(|| align_spec_error(spec))?;
+    Ok((width, position))
+}
+
+fn parse_align_position(value: &str) -> Option<AlignPosition> {
+    match value {
+        "left" => Some(AlignPosition::Left),
+        "right" => Some(AlignPosition::Right),
+        "middle" => Some(AlignPosition::Middle),
+        _ => None,
+    }
+}
+
+/// Find the `%(end)` that closes the current `%(align)` block within `s`,
+/// accounting for nested align blocks. Returns the byte range of the `%(end)`
+/// token (`(start, after)`), or `None` when it is missing.
+fn find_matching_align_end(s: &str) -> Option<(usize, usize)> {
+    let mut depth = 1usize;
+    let mut i = 0;
+    while let Some(rel) = s[i..].find("%(") {
+        let at = i + rel;
+        let after = &s[at + 2..];
+        let close = after.find(')')?;
+        let token = &after[..close];
+        let token_end = at + 2 + close + 1;
+        if token == "end" {
+            depth -= 1;
+            if depth == 0 {
+                return Some((at, token_end));
+            }
+        } else if token == "align" || token.starts_with("align:") {
+            depth += 1;
+        }
+        i = token_end;
+    }
+    None
+}
+
+/// Pad `content` to `width` display columns at the given position. Content that
+/// already meets or exceeds the width is returned unchanged (Git does not
+/// truncate). Width is measured in Unicode display columns.
+fn pad_aligned(content: &str, width: usize, position: AlignPosition) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let content_width = UnicodeWidthStr::width(content);
+    if content_width >= width {
+        return content.to_string();
+    }
+    let pad = width - content_width;
+    match position {
+        AlignPosition::Left => format!("{content}{}", " ".repeat(pad)),
+        AlignPosition::Right => format!("{}{content}", " ".repeat(pad)),
+        AlignPosition::Middle => {
+            // Odd padding biases the extra space to the right, matching Git.
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{content}{}", " ".repeat(left), " ".repeat(right))
+        }
+    }
+}
+
+fn align_spec_error(spec: &str) -> CliError {
+    CliError::command_usage(format!(
+        "invalid %(align) spec '{spec}' (expected a width and optional left/right/middle position)"
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn align_missing_width_error() -> CliError {
+    CliError::command_usage("%(align) requires a width, e.g. %(align:20,left)")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn align_missing_end_error() -> CliError {
+    CliError::command_usage("format: %(end) atom missing for %(align)")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
 }
 
 fn unsupported_atom_error() -> CliError {
