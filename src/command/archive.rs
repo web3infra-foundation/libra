@@ -20,6 +20,7 @@ use git_internal::{
 
 use crate::{
     command::load_object,
+    internal::log::date_parser::parse_date,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
@@ -35,6 +36,7 @@ EXAMPLES:
     libra archive -v -o project.tar HEAD   List archived paths on stderr
     libra archive --add-file=NOTES.txt -o release.tar HEAD   Include an untracked file
     libra archive --format=tar.gz --compression-level=9 -o max.tgz HEAD   Max compression
+    libra archive --mtime='2026-01-01 00:00:00 +0000' -o stamped.tar HEAD   Set entry mtime
     libra archive --list";
 
 /// Supported archive output formats.
@@ -117,6 +119,13 @@ pub struct ArchiveArgs {
     /// (bzip2 has no level 0, so 0 is treated as 1 there.)
     #[arg(long = "compression-level", value_name = "LEVEL", value_parser = clap::value_parser!(u32).range(0..=9))]
     pub compression_level: Option<u32>,
+
+    /// Set the modification time of all archive entries, like `git archive
+    /// --mtime`. Accepts the same date formats as `--since`/`--until`
+    /// (`YYYY-MM-DD`, RFC 3339, `"N days ago"`, a Unix timestamp). Without it,
+    /// the archived commit's committer time is used.
+    #[arg(long = "mtime", value_name = "TIME")]
+    pub mtime: Option<String>,
 }
 
 /// Where an archive entry's bytes come from.
@@ -317,7 +326,9 @@ fn filter_entries_by_pathspecs(
 }
 
 /// Resolve a tree-ish string to the archiveable entries from that commit tree.
-async fn resolve_entries(treeish: &str) -> Result<Vec<ArchiveEntry>, CliError> {
+/// Resolve a tree-ish to its archive entries and the committer timestamp of the
+/// commit it names (used as the default archive-entry mtime, matching Git).
+async fn resolve_entries(treeish: &str) -> Result<(Vec<ArchiveEntry>, i64), CliError> {
     let commit_hash = util::get_commit_base(treeish).await.map_err(|error| {
         CliError::fatal(format!("failed to resolve '{treeish}': {error}"))
             .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -327,6 +338,7 @@ async fn resolve_entries(treeish: &str) -> Result<Vec<ArchiveEntry>, CliError> {
         CliError::fatal(format!("failed to load commit {commit_hash}: {error}"))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
+    let committer_time = commit.committer.timestamp as i64;
 
     let tree: Tree = load_object(&commit.tree_id).map_err(|error| {
         CliError::fatal(format!(
@@ -338,7 +350,7 @@ async fn resolve_entries(treeish: &str) -> Result<Vec<ArchiveEntry>, CliError> {
 
     let mut entries = Vec::new();
     collect_tree_entries(&tree, Path::new(""), &mut entries)?;
-    Ok(entries)
+    Ok((entries, committer_time))
 }
 
 /// Validate a user-supplied archive prefix before it is joined with file paths.
@@ -423,11 +435,14 @@ fn configure_tar_symlink_header(
     Ok(())
 }
 
-/// Write a tar archive of the given entries to `writer`.
+/// Write a tar archive of the given entries to `writer`. All entries share the
+/// `mtime` (Unix seconds); a negative value (a pre-1970 `--mtime`) clamps to 0,
+/// the earliest a tar header can represent.
 fn write_tar_archive<W: Write>(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     writer: W,
+    mtime: i64,
 ) -> Result<(), CliError> {
     let mut builder = tar::Builder::new(writer);
 
@@ -447,7 +462,7 @@ fn write_tar_archive<W: Write>(
         })?;
         header.set_size(data.len() as u64);
         header.set_mode(mode);
-        header.set_mtime(0);
+        header.set_mtime(mtime.max(0) as u64);
         header.set_entry_type(entry_type);
         header.set_cksum();
 
@@ -486,11 +501,12 @@ fn write_tar_gz_archive<W: Write>(
     prefix: Option<&Path>,
     writer: W,
     level: Option<u32>,
+    mtime: i64,
 ) -> Result<(), CliError> {
     // flate2 accepts levels 0-9 (0 = no compression); default is 6.
     let compression = level.map(Compression::new).unwrap_or_default();
     let gz = GzEncoder::new(writer, compression);
-    write_tar_archive(entries, prefix, gz)
+    write_tar_archive(entries, prefix, gz, mtime)
 }
 
 /// Write a bzip2-compressed tar archive.
@@ -499,13 +515,14 @@ fn write_tar_bz2_archive<W: Write>(
     prefix: Option<&Path>,
     writer: W,
     level: Option<u32>,
+    mtime: i64,
 ) -> Result<(), CliError> {
     // bzip2 levels are 1-9 (no "store" level), so a requested 0 maps to 1.
     let compression = level
         .map(|l| bzip2::Compression::new(l.clamp(1, 9)))
         .unwrap_or_default();
     let bz = BzEncoder::new(writer, compression);
-    write_tar_archive(entries, prefix, bz)
+    write_tar_archive(entries, prefix, bz, mtime)
 }
 
 /// Determine external Unix attributes for a zip entry.
@@ -517,17 +534,36 @@ fn zip_unix_mode(mode: &TreeItemMode) -> u32 {
     }
 }
 
+/// Convert a Unix timestamp to a zip [`DateTime`]. The MS-DOS-based zip time
+/// format only spans 1980-2107, so an out-of-range value (e.g. a pre-1980
+/// `--mtime`) falls back to the zip epoch (1980-01-01).
+fn zip_datetime(mtime: i64) -> zip::DateTime {
+    use chrono::{DateTime, Datelike, Timelike, Utc};
+    let dt = DateTime::<Utc>::from_timestamp(mtime, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    zip::DateTime::from_date_and_time(
+        dt.year() as u16,
+        dt.month() as u8,
+        dt.day() as u8,
+        dt.hour() as u8,
+        dt.minute() as u8,
+        dt.second() as u8,
+    )
+    .unwrap_or_default()
+}
+
 /// Write a zip archive of the given entries to `writer`.
 fn write_zip_archive<W: Write + Seek>(
     entries: &[ArchiveEntry],
     prefix: Option<&Path>,
     writer: W,
     level: Option<u32>,
+    mtime: i64,
 ) -> Result<(), CliError> {
     let mut archive = zip::ZipWriter::new(writer);
     let options = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(level.map(|l| l as i32));
+        .compression_level(level.map(|l| l as i32))
+        .last_modified_time(zip_datetime(mtime));
 
     for entry in entries {
         let archive_path = apply_prefix(prefix, &entry.path);
@@ -546,7 +582,8 @@ fn write_zip_archive<W: Write + Seek>(
         if entry.mode == TreeItemMode::Link {
             let symlink_options = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored)
-                .unix_permissions(0o120777);
+                .unix_permissions(0o120777)
+                .last_modified_time(zip_datetime(mtime));
             archive.start_file(path, symlink_options).map_err(|error| {
                 CliError::fatal(format!(
                     "failed to add symlink '{}': {error}",
@@ -613,13 +650,14 @@ fn write_zip_output(
     prefix: Option<&Path>,
     output: Option<&str>,
     level: Option<u32>,
+    mtime: i64,
 ) -> Result<(), CliError> {
     if let Some(path) = output {
-        return write_zip_archive(entries, prefix, create_output_file(path)?, level);
+        return write_zip_archive(entries, prefix, create_output_file(path)?, level, mtime);
     }
 
     let mut buffer = Cursor::new(Vec::new());
-    write_zip_archive(entries, prefix, &mut buffer, level)?;
+    write_zip_archive(entries, prefix, &mut buffer, level, mtime)?;
 
     let mut stdout = std::io::stdout();
     stdout.write_all(&buffer.into_inner()).map_err(|error| {
@@ -639,22 +677,23 @@ fn create_archive(
     prefix: Option<&Path>,
     output: Option<&str>,
     level: Option<u32>,
+    mtime: i64,
 ) -> Result<(), CliError> {
     match format {
         ArchiveFormat::Tar => {
             // Plain tar is uncompressed; the level is not applicable.
             let writer = open_output(output)?;
-            write_tar_archive(entries, prefix, writer)
+            write_tar_archive(entries, prefix, writer, mtime)
         }
         ArchiveFormat::TarGz => {
             let writer = open_output(output)?;
-            write_tar_gz_archive(entries, prefix, writer, level)
+            write_tar_gz_archive(entries, prefix, writer, level, mtime)
         }
         ArchiveFormat::TarBz2 => {
             let writer = open_output(output)?;
-            write_tar_bz2_archive(entries, prefix, writer, level)
+            write_tar_bz2_archive(entries, prefix, writer, level, mtime)
         }
-        ArchiveFormat::Zip => write_zip_output(entries, prefix, output, level),
+        ArchiveFormat::Zip => write_zip_output(entries, prefix, output, level, mtime),
     }
 }
 
@@ -679,7 +718,19 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
     })?;
     let prefix = validate_prefix(args.prefix.as_deref())?;
     let treeish = args.treeish.as_deref().unwrap_or("HEAD");
-    let mut entries = filter_entries_by_pathspecs(resolve_entries(treeish).await?, &args.paths)?;
+    let (resolved_entries, committer_time) = resolve_entries(treeish).await?;
+    let mut entries = filter_entries_by_pathspecs(resolved_entries, &args.paths)?;
+
+    // Archive-entry modification time: `--mtime` when given (same date formats as
+    // `--since`/`--until`), otherwise the archived commit's committer time
+    // (matching Git, which uses epoch 0 only as a last resort, not by default).
+    let mtime = match args.mtime.as_deref() {
+        Some(spec) => parse_date(spec).map_err(|error| {
+            CliError::command_usage(format!("invalid --mtime value '{spec}': {error}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?,
+        None => committer_time,
+    };
 
     // `--add-file=<file>` appends untracked working-tree files (not subject to
     // the pathspec filter), so an archive can include them alongside — or even
@@ -711,6 +762,7 @@ pub async fn execute_safe(args: ArchiveArgs, _output: &OutputConfig) -> CliResul
         prefix.as_deref(),
         args.output.as_deref(),
         args.compression_level,
+        mtime,
     )
 }
 
@@ -913,7 +965,7 @@ mod tests {
     fn write_tar_archive_accepts_empty_entries_for_writer_helper() {
         let mut buf = Vec::new();
 
-        write_tar_archive(&[], None, &mut buf).expect("empty tar should finalize");
+        write_tar_archive(&[], None, &mut buf, 0).expect("empty tar should finalize");
 
         assert!(!buf.is_empty());
     }
@@ -985,7 +1037,7 @@ mod tests {
     fn write_tar_gz_archive_accepts_empty_entries() {
         let mut buf = Vec::new();
 
-        write_tar_gz_archive(&[], None, &mut buf, None).expect("empty tar.gz should finalize");
+        write_tar_gz_archive(&[], None, &mut buf, None, 0).expect("empty tar.gz should finalize");
 
         assert!(buf.starts_with(&[0x1f, 0x8b]));
     }
@@ -994,7 +1046,7 @@ mod tests {
     fn write_tar_bz2_archive_accepts_empty_entries() {
         let mut buf = Vec::new();
 
-        write_tar_bz2_archive(&[], None, &mut buf, None).expect("empty tar.bz2 should finalize");
+        write_tar_bz2_archive(&[], None, &mut buf, None, 0).expect("empty tar.bz2 should finalize");
 
         assert!(buf.starts_with(b"BZh"));
     }
@@ -1010,7 +1062,7 @@ mod tests {
     fn write_zip_archive_accepts_empty_entries() {
         let mut buf = Cursor::new(Vec::new());
 
-        write_zip_archive(&[], None, &mut buf, None).expect("empty zip should finalize");
+        write_zip_archive(&[], None, &mut buf, None, 0).expect("empty zip should finalize");
 
         assert!(buf.into_inner().starts_with(b"PK"));
     }

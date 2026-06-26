@@ -764,3 +764,121 @@ fn archive_compression_level_affects_output() {
     assert_cli_success(&z, "zip with --compression-level");
     assert!(is_zip(&z.stdout), "zip output is valid");
 }
+
+/// Parse the modification time (octal) from the first tar header in `data`.
+/// The ustar/gnu `mtime` field is 12 bytes at offset 136.
+fn first_tar_entry_mtime(data: &[u8]) -> u64 {
+    assert!(data.len() >= 148, "tar data too small for a header");
+    let field = &data[136..148];
+    let digits: String = field
+        .iter()
+        .take_while(|&&b| b != 0 && b != b' ')
+        .map(|&b| b as char)
+        .collect();
+    u64::from_str_radix(digits.trim(), 8).expect("tar mtime is octal")
+}
+
+/// Decode `(year, month, day)` from the first zip local file header's MS-DOS
+/// mod-date (little-endian u16 at offset 12: bits 0-4 day, 5-8 month, 9-15
+/// year-since-1980).
+fn first_zip_entry_date(data: &[u8]) -> (u16, u16, u16) {
+    assert_eq!(
+        &data[0..4],
+        b"PK\x03\x04",
+        "zip local file header signature"
+    );
+    let dos_date = u16::from_le_bytes([data[12], data[13]]);
+    let day = dos_date & 0x1f;
+    let month = (dos_date >> 5) & 0xf;
+    let year = ((dos_date >> 9) & 0x7f) + 1980;
+    (year, month, day)
+}
+
+/// Read the committer Unix timestamp of `HEAD` via `cat-file -p`.
+fn head_committer_time(repo: &Path) -> u64 {
+    let out = run_libra_command(&["cat-file", "-p", "HEAD"], repo);
+    assert_cli_success(&out, "cat-file -p HEAD");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let committer = text
+        .lines()
+        .find(|l| l.starts_with("committer "))
+        .expect("commit has a committer line");
+    // "committer Name <email> <unixts> <tz>"
+    let fields: Vec<&str> = committer.split_whitespace().collect();
+    fields[fields.len() - 2]
+        .parse()
+        .expect("committer timestamp is numeric")
+}
+
+#[test]
+fn archive_default_mtime_uses_commit_committer_time() {
+    // Previously the mtime was hard-coded to epoch 0; it must now be exactly the
+    // archived commit's committer time, matching Git.
+    let repo = create_archive_test_repo();
+    let out = run_libra_command(&["archive", "--format=tar", "HEAD"], repo.path());
+    assert_cli_success(&out, "archive HEAD");
+    assert!(is_tar(&out.stdout), "tar output");
+    assert_eq!(
+        first_tar_entry_mtime(&out.stdout),
+        head_committer_time(repo.path()),
+        "default mtime equals the commit's committer time (not epoch 0)"
+    );
+}
+
+#[test]
+fn archive_zip_mtime_flag_sets_entry_date() {
+    // `--mtime` also drives the zip entry's MS-DOS mod-date.
+    let repo = create_archive_test_repo();
+    let out = run_libra_command(
+        &[
+            "archive",
+            "--format=zip",
+            "--mtime=2020-01-02 03:04:05 +0000",
+            "HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "zip --mtime");
+    assert!(is_zip(&out.stdout), "zip output");
+    assert_eq!(
+        first_zip_entry_date(&out.stdout),
+        (2020, 1, 2),
+        "--mtime sets the zip entry's mod-date"
+    );
+}
+
+#[test]
+fn archive_mtime_flag_overrides_entry_time() {
+    // `--mtime` sets every entry's modification time. 2020-01-02 03:04:05 UTC.
+    let repo = create_archive_test_repo();
+    let out = run_libra_command(
+        &[
+            "archive",
+            "--format=tar",
+            "--mtime=2020-01-02 03:04:05 +0000",
+            "HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&out, "archive --mtime");
+    assert_eq!(
+        first_tar_entry_mtime(&out.stdout),
+        1_577_934_245,
+        "--mtime sets the tar entry time"
+    );
+}
+
+#[test]
+fn archive_mtime_rejects_invalid_value() {
+    let repo = create_archive_test_repo();
+    let out = run_libra_command(
+        &["archive", "--format=tar", "--mtime=not-a-date", "HEAD"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "an unparseable --mtime is a usage error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
