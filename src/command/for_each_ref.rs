@@ -40,6 +40,7 @@ EXAMPLES:
     libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
     libra for-each-ref --tags --sort=*objectsize  Sort tags by their dereferenced target's size
     libra for-each-ref --format='%(align:20,left)%(refname:short)%(end)%(objectname:short)'  Pad the ref name to a 20-column field
+    libra for-each-ref --format='%(refname:short)%(if)%(HEAD)%(then) (current)%(end)'  Mark the checked-out branch conditionally
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -1244,7 +1245,7 @@ fn render_fragment(
         // already wider), matching Git's alignment atom.
         if let Some(spec) = token.strip_prefix("align:") {
             let (width, position) = parse_align_spec(spec)?;
-            let Some((end_start, after_end)) = find_matching_align_end(body) else {
+            let Some((end_start, after_end)) = find_block_end(body) else {
                 return Err(align_missing_end_error());
             };
             // The block's contents render WITHOUT per-field quoting (pass `None`),
@@ -1259,12 +1260,53 @@ fn render_fragment(
             rest = &body[after_end..];
             continue;
         }
-        // `%(align)` without a spec, or a stray `%(end)`, are usage errors.
+
+        // `%(if[:equals=<v>|:notequals=<v>])` … `%(then)` … [`%(else)` …]
+        // `%(end)`: evaluate the condition fragment (everything between
+        // `%(if…)` and `%(then)`) and emit the then- or else-branch. Plain
+        // `%(if)` is true when the rendered condition is non-empty after
+        // trimming whitespace; `equals`/`notequals` compare the raw rendered
+        // condition. Blocks nest (sharing the `%(end)` terminator with align).
+        if token == "if" || token.starts_with("if:") {
+            let cond_spec = &token[2..];
+            let Some((end_start, after_end)) = find_block_end(body) else {
+                return Err(if_missing_end_error());
+            };
+            let content = &body[..end_start];
+            let Some((then_start, then_after)) = find_if_marker(content, "then") else {
+                return Err(if_missing_then_error());
+            };
+            let condition = &content[..then_start];
+            let branches = &content[then_after..];
+            let (then_branch, else_branch) = match find_if_marker(branches, "else") {
+                Some((else_start, else_after)) => {
+                    (&branches[..else_start], &branches[else_after..])
+                }
+                None => (branches, ""),
+            };
+            // The condition renders raw (it is tested, not emitted); the chosen
+            // branch renders at the active quote level like any other output.
+            let cond_value = render_fragment(condition, atoms, entry, None)?;
+            let chosen = if eval_if_condition(cond_spec, &cond_value)? {
+                then_branch
+            } else {
+                else_branch
+            };
+            out.push_str(&render_fragment(chosen, atoms, entry, quote)?);
+            rest = &body[after_end..];
+            continue;
+        }
+
+        // `%(align)` without a spec, or block markers/terminators that are not
+        // enclosed by their opener, are usage errors.
         if token == "align" {
             return Err(align_missing_width_error());
         }
+        if token == "then" || token == "else" {
+            return Err(if_stray_marker_error(token));
+        }
         if token == "end" {
-            return Err(align_missing_end_error());
+            return Err(stray_end_error());
         }
 
         // Parameterized atoms (`%(refname:lstrip=N)` / `%(refname:rstrip=N)` and
@@ -1332,10 +1374,16 @@ fn parse_align_position(value: &str) -> Option<AlignPosition> {
     }
 }
 
-/// Find the `%(end)` that closes the current `%(align)` block within `s`,
-/// accounting for nested align blocks. Returns the byte range of the `%(end)`
+/// Whether a token opens a block that must be closed by `%(end)` (`%(align…)`
+/// or `%(if…)`).
+fn is_block_opener(token: &str) -> bool {
+    token == "align" || token.starts_with("align:") || token == "if" || token.starts_with("if:")
+}
+
+/// Find the `%(end)` that closes the current block within `s`, accounting for
+/// nested `%(align)`/`%(if)` blocks. Returns the byte range of the `%(end)`
 /// token (`(start, after)`), or `None` when it is missing.
-fn find_matching_align_end(s: &str) -> Option<(usize, usize)> {
+fn find_block_end(s: &str) -> Option<(usize, usize)> {
     let mut depth = 1usize;
     let mut i = 0;
     while let Some(rel) = s[i..].find("%(") {
@@ -1349,12 +1397,52 @@ fn find_matching_align_end(s: &str) -> Option<(usize, usize)> {
             if depth == 0 {
                 return Some((at, token_end));
             }
-        } else if token == "align" || token.starts_with("align:") {
+        } else if is_block_opener(token) {
             depth += 1;
         }
         i = token_end;
     }
     None
+}
+
+/// Find a `%(then)` / `%(else)` marker at the top level of an `%(if)` block's
+/// content (depth 0 — markers belonging to nested `%(if)` blocks are skipped).
+/// Returns the byte range of the marker token, or `None`.
+fn find_if_marker(content: &str, marker: &str) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    let mut i = 0;
+    while let Some(rel) = content[i..].find("%(") {
+        let at = i + rel;
+        let after = &content[at + 2..];
+        let close = after.find(')')?;
+        let token = &after[..close];
+        let token_end = at + 2 + close + 1;
+        if is_block_opener(token) {
+            depth += 1;
+        } else if token == "end" {
+            depth = depth.saturating_sub(1);
+        } else if token == marker && depth == 0 {
+            return Some((at, token_end));
+        }
+        i = token_end;
+    }
+    None
+}
+
+/// Evaluate an `%(if)` condition. `spec` is the text after `if` in the token:
+/// empty for a plain `%(if)` (true when `value` is non-empty after trimming),
+/// `:equals=<v>` (true when `value == v`), or `:notequals=<v>` (true when
+/// `value != v`); `equals`/`notequals` compare the raw, untrimmed value.
+fn eval_if_condition(spec: &str, value: &str) -> CliResult<bool> {
+    if spec.is_empty() {
+        Ok(!value.trim().is_empty())
+    } else if let Some(v) = spec.strip_prefix(":equals=") {
+        Ok(value == v)
+    } else if let Some(v) = spec.strip_prefix(":notequals=") {
+        Ok(value != v)
+    } else {
+        Err(if_invalid_spec_error(spec))
+    }
 }
 
 /// Pad `content` to `width` display columns at the given position. Content that
@@ -1393,6 +1481,35 @@ fn align_missing_width_error() -> CliError {
 
 fn align_missing_end_error() -> CliError {
     CliError::command_usage("format: %(end) atom missing for %(align)")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn if_missing_end_error() -> CliError {
+    CliError::command_usage("format: %(end) atom missing for %(if)")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn if_missing_then_error() -> CliError {
+    CliError::command_usage("format: %(if) atom used without a %(then) atom")
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn if_stray_marker_error(marker: &str) -> CliError {
+    CliError::command_usage(format!(
+        "format: %({marker}) atom used without a %(if) atom"
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn if_invalid_spec_error(spec: &str) -> CliError {
+    CliError::command_usage(format!(
+        "invalid %(if{spec}) condition (expected :equals=<value> or :notequals=<value>)"
+    ))
+    .with_stable_code(StableErrorCode::CliInvalidArguments)
+}
+
+fn stray_end_error() -> CliError {
+    CliError::command_usage("format: %(end) atom used without a %(align) or %(if) atom")
         .with_stable_code(StableErrorCode::CliInvalidArguments)
 }
 

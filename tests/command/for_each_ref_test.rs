@@ -1950,3 +1950,122 @@ fn test_for_each_ref_align_atom_pads_to_width() {
         "['    ab']"
     );
 }
+
+#[test]
+fn test_for_each_ref_if_then_else_conditional() {
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `main` is checked out (so `%(HEAD)` is `*`); `other` is not (so `%(HEAD)`
+    // is a single space — exercising the whitespace-trim rule). An annotated tag
+    // gives an `objecttype` of `tag` for the equals/notequals comparisons.
+    assert_cli_success(&run_libra_command(&["branch", "other"], p), "branch other");
+    assert_cli_success(
+        &run_libra_command(&["tag", "-m", "annotated", "atag"], p),
+        "annotated tag",
+    );
+
+    let render = |fmt: &str, reff: &str| -> String {
+        let out = run_libra_command(&["for-each-ref", &format!("--format={fmt}"), reff], p);
+        assert_cli_success(&out, "for-each-ref if");
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches('\n')
+            .to_string()
+    };
+
+    // Plain `%(if)`: a non-empty (after trim) condition picks the then-branch.
+    // `%(HEAD)` is `*` for the checked-out branch (truthy) and a space for the
+    // other branch (whitespace → treated as empty → else-branch).
+    assert_eq!(
+        render("%(if)%(HEAD)%(then)Y%(else)N%(end)", "refs/heads/main"),
+        "Y"
+    );
+    assert_eq!(
+        render("%(if)%(HEAD)%(then)Y%(else)N%(end)", "refs/heads/other"),
+        "N"
+    );
+    // `%(else)` is optional.
+    assert_eq!(
+        render("[%(if)%(HEAD)%(then)*%(end)]", "refs/heads/other"),
+        "[]"
+    );
+
+    // `%(if:equals=…)` / `%(if:notequals=…)` compare the raw rendered value.
+    assert_eq!(
+        render(
+            "%(if:equals=commit)%(objecttype)%(then)C%(else)NC%(end)",
+            "refs/heads/main"
+        ),
+        "C"
+    );
+    assert_eq!(
+        render(
+            "%(if:equals=commit)%(objecttype)%(then)C%(else)NC%(end)",
+            "refs/tags/atag"
+        ),
+        "NC"
+    );
+    assert_eq!(
+        render(
+            "%(if:notequals=commit)%(objecttype)%(then)NC%(else)C%(end)",
+            "refs/tags/atag"
+        ),
+        "NC"
+    );
+
+    // An `%(if)` block nests inside an `%(align)` block and shares the `%(end)`
+    // terminator; the chosen branch is what gets padded.
+    assert_eq!(
+        render(
+            "[%(align:6,left)%(if)%(HEAD)%(then)on%(else)off%(end)%(end)]",
+            "refs/heads/main"
+        ),
+        "[on    ]"
+    );
+
+    // A conditional nested inside another conditional: the inner `%(then)` /
+    // `%(end)` must not be mistaken for the outer block's markers
+    // (`find_if_marker` skips markers at depth > 0). Outer holds (HEAD = `*`),
+    // then the inner equals-check selects `commit`.
+    assert_eq!(
+        render(
+            "%(if)%(HEAD)%(then)<%(if:equals=commit)%(objecttype)%(then)C%(else)X%(end)>%(else)none%(end)",
+            "refs/heads/main"
+        ),
+        "<C>"
+    );
+    // The outer else-branch (also containing a nested conditional) is taken when
+    // the outer condition is false (HEAD = space on a non-checked-out branch).
+    assert_eq!(
+        render(
+            "%(if)%(HEAD)%(then)yes%(else)[%(if:equals=commit)%(objecttype)%(then)c%(end)]%(end)",
+            "refs/heads/other"
+        ),
+        "[c]"
+    );
+
+    // Malformed conditionals are usage errors (exit 129).
+    for fmt in [
+        "%(if)%(refname)%(end)",                 // %(if) without %(then)
+        "%(if)%(refname)%(then)x",               // %(if)/%(then) without %(end)
+        "%(then)x",                              // stray %(then)
+        "%(if)%(refname)%(else)x%(end)",         // %(else) without %(then)
+        "%(if:bogus=1)%(refname)%(then)y%(end)", // invalid condition spec
+    ] {
+        let out = run_libra_command(
+            &[
+                "for-each-ref",
+                &format!("--format={fmt}"),
+                "refs/heads/main",
+            ],
+            p,
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "malformed conditional `{fmt}` should be a usage error: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
