@@ -2764,3 +2764,118 @@ fn log_no_show_signature_flag_is_accepted_noop() {
         "log --no-show-signature matches plain log (no-op)"
     );
 }
+
+#[test]
+fn test_log_pretty_named_presets() {
+    use std::fs;
+
+    use super::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Add a commit with a subject and a body to exercise body display.
+    fs::write(p.join("x.txt"), "x").expect("write x");
+    assert_cli_success(&run_libra_command(&["add", "x.txt"], p), "add x");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "-m",
+                "feat: the subject\n\nbody text here",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "commit with body",
+    );
+
+    let run = |preset: &str| -> String {
+        let out = run_libra_command(&["log", &format!("--pretty={preset}"), "-1"], p);
+        assert_cli_success(&out, preset);
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // short: commit + Author, NO Date / NO Commit, subject only (no body).
+    let short = run("short");
+    assert!(short.contains("commit "), "short header: {short}");
+    assert!(short.contains("Author: "), "short Author: {short}");
+    assert!(!short.contains("Date:"), "short has no Date: {short}");
+    assert!(!short.contains("Commit:"), "short has no Commit: {short}");
+    assert!(
+        short.contains("    feat: the subject"),
+        "short subject: {short}"
+    );
+    assert!(
+        !short.contains("body text here"),
+        "short omits the body: {short}"
+    );
+
+    // full: Author + Commit (no Date), subject + body.
+    let full = run("full");
+    assert!(full.contains("Author: "), "full Author: {full}");
+    assert!(full.contains("Commit: "), "full Commit: {full}");
+    assert!(!full.contains("Date:"), "full has no Date: {full}");
+    assert!(
+        full.contains("    body text here"),
+        "full shows body: {full}"
+    );
+
+    // fuller: Author/AuthorDate/Commit/CommitDate (labels aligned), subject + body.
+    let fuller = run("fuller");
+    assert!(
+        fuller.contains("Author:     "),
+        "fuller Author pad: {fuller}"
+    );
+    assert!(
+        fuller.contains("AuthorDate: "),
+        "fuller AuthorDate: {fuller}"
+    );
+    assert!(
+        fuller.contains("Commit:     "),
+        "fuller Commit pad: {fuller}"
+    );
+    assert!(
+        fuller.contains("CommitDate: "),
+        "fuller CommitDate: {fuller}"
+    );
+    assert!(
+        fuller.contains("    body text here"),
+        "fuller body: {fuller}"
+    );
+
+    // reference: one-line `<hash> (<subject>, <date>)`, no header block.
+    let reference = run("reference");
+    assert!(
+        reference.contains("(feat: the subject, "),
+        "reference one-liner: {reference}"
+    );
+    assert!(
+        !reference.contains("Author:"),
+        "reference is compact: {reference}"
+    );
+    assert!(
+        !reference.contains("commit "),
+        "reference is compact: {reference}"
+    );
+
+    // raw: object headers (tree/author/committer) + indented message.
+    let raw = run("raw");
+    assert!(raw.contains("commit "), "raw header: {raw}");
+    assert!(raw.contains("\ntree "), "raw tree line: {raw}");
+    assert!(raw.contains("\nauthor "), "raw author line: {raw}");
+    assert!(raw.contains("\ncommitter "), "raw committer line: {raw}");
+    assert!(raw.contains("    feat: the subject"), "raw message: {raw}");
+
+    // medium is Git's default format: commit + Author + Date + subject + body.
+    let medium = run("medium");
+    assert!(medium.contains("Author: "), "medium Author: {medium}");
+    assert!(medium.contains("Date:   "), "medium Date line: {medium}");
+    assert!(
+        !medium.contains("Commit:"),
+        "medium has no Commit line: {medium}"
+    );
+    assert!(
+        medium.contains("    body text here"),
+        "medium shows body: {medium}"
+    );
+}

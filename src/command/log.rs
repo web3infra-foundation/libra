@@ -27,7 +27,7 @@ use crate::{
         head::Head,
         log::{
             date_parser::parse_date,
-            formatter::{CommitFormatter, FormatContext, FormatType},
+            formatter::{CommitFormatter, FormatContext, FormatType, LogPreset},
         },
         tag::{self, TagObject},
     },
@@ -44,6 +44,7 @@ const LOG_EXAMPLES: &str = "\
 EXAMPLES:
     libra log -n 5                         Show the latest 5 commits
     libra log --oneline --graph            Show a compact commit graph
+    libra log --pretty=fuller              Use a named format preset (short/full/fuller/reference/raw)
     libra log --author alice                Filter commits by author (case-insensitive substring)
     libra log --since 24h --until 1h       Time-window filter (relative or RFC3339)
     libra log --grep 'fix(' -n 20          Filter commits by message substring
@@ -1742,22 +1743,29 @@ fn commit_diff_matches_regex(commit: &Commit, regex: &regex::Regex) -> Result<bo
     Ok(false)
 }
 
-/// Interpret a `--pretty=<value>` argument. Recognizes the `oneline` preset and
-/// the `format:` / `tformat:` prefixes (which carry a custom template); `medium`
-/// (and the empty value) map to the default full format. Any other value is
-/// treated as a raw custom template, matching the prior behavior. Named presets
-/// beyond `oneline` (short/full/fuller/raw) are not yet rendered distinctly.
+/// Interpret a `--pretty=<value>` argument. Recognizes the named presets
+/// (`oneline`, `medium`, `short`, `full`, `fuller`, `reference`, `raw`) and the
+/// `format:` / `tformat:` prefixes (which carry a custom template). `medium`
+/// (and the empty value) map to the default full format — Git's default. Any
+/// other value is treated as a raw custom template, matching the prior behavior.
 pub(crate) fn parse_pretty_format(pretty: String) -> FormatType {
-    if pretty == "oneline" {
-        FormatType::Oneline
-    } else if pretty == "medium" || pretty.is_empty() {
-        FormatType::Full
-    } else if let Some(fmt) = pretty.strip_prefix("format:") {
-        FormatType::Custom(fmt.to_string())
-    } else if let Some(fmt) = pretty.strip_prefix("tformat:") {
-        FormatType::Custom(fmt.to_string())
-    } else {
-        FormatType::Custom(pretty)
+    match pretty.as_str() {
+        "oneline" => FormatType::Oneline,
+        "medium" | "" => FormatType::Full,
+        "short" => FormatType::Preset(LogPreset::Short),
+        "full" => FormatType::Preset(LogPreset::Full),
+        "fuller" => FormatType::Preset(LogPreset::Fuller),
+        "reference" => FormatType::Preset(LogPreset::Reference),
+        "raw" => FormatType::Preset(LogPreset::Raw),
+        _ => {
+            if let Some(fmt) = pretty.strip_prefix("format:") {
+                FormatType::Custom(fmt.to_string())
+            } else if let Some(fmt) = pretty.strip_prefix("tformat:") {
+                FormatType::Custom(fmt.to_string())
+            } else {
+                FormatType::Custom(pretty)
+            }
+        }
     }
 }
 

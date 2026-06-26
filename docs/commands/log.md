@@ -65,6 +65,34 @@ Show full commit hashes. Overrides `--abbrev-commit`.
 libra log --no-abbrev-commit
 ```
 
+### `--pretty=<format>` / `--format=<format>`
+
+Choose the commit display format. Accepts the named presets and the
+`format:`/`tformat:` custom-template prefixes (and a bare `%`-placeholder
+template). `--format` is Git's alias for `--pretty`.
+
+| Preset | Output |
+|---|---|
+| `oneline` | `<hash> <subject>` on one line |
+| `medium` (default) | `commit` + `Author` + `Date` + indented message |
+| `short` | `commit` + `Author` + indented subject (no date, no body) |
+| `full` | `commit` + `Author` + `Commit` + indented message (no dates) |
+| `fuller` | `commit` + `Author`/`AuthorDate` + `Commit`/`CommitDate` + message |
+| `reference` | one-line `<abbrev> (<subject>, <short-date>)` |
+| `raw` | the commit object's `tree`/`parent`/`author`/`committer` headers + indented message |
+
+The presets inherit `libra log`'s existing conventions (timestamps render in
+UTC `+0000`; `--pretty` abbreviates the hash; the stored message's
+subject/body blank line is collapsed), so they match Git's preset *structure*
+rather than being byte-identical. `libra show --pretty=<preset>` uses the same
+formats.
+
+```bash
+libra log --pretty=short
+libra log --pretty=fuller
+libra log --pretty=reference
+```
+
 ### `-p, --patch`
 
 Show the diff (patch) for each commit. Can be combined with path arguments to limit

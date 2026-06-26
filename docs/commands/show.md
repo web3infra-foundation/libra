@@ -196,8 +196,10 @@ naturally to the internal tree-walk operation that Libra already performs.
 
 `--pretty=<fmt>` and its alias `--format=<fmt>` render the commit header with the
 `oneline` preset or a `%`-placeholder template (`format:`/`tformat:`/bare), sharing
-`libra log`'s formatter. The named presets `short` / `full` / `fuller` / `raw` are
-not yet rendered distinctly. For programmatic consumers, `--json` remains the
+`libra log`'s formatter. The named presets `short`, `full`, `fuller`, `reference`,
+and `raw` are rendered distinctly (matching Git's preset structure); `medium`
+maps to the default format. (This is separate from the `--raw` diff format, which
+is not yet exposed.) For programmatic consumers, `--json` remains the
 recommended interface: it gives every field in a well-typed, type-discriminated
 schema (typed fields vs. string parsing), avoiding format-string fragility.
 

@@ -59,6 +59,28 @@ libra log --abbrev 8
 libra log --no-abbrev-commit
 ```
 
+### `--pretty=<format>` / `--format=<format>`
+
+选择提交显示格式。接受命名预设与 `format:`/`tformat:` 自定义模板前缀（及裸 `%` 占位符模板）。`--format` 是 `--pretty` 的 Git 别名。
+
+| 预设 | 输出 |
+|---|---|
+| `oneline` | 单行 `<hash> <subject>` |
+| `medium`（默认） | `commit` + `Author` + `Date` + 缩进消息 |
+| `short` | `commit` + `Author` + 缩进 subject（无 date/body） |
+| `full` | `commit` + `Author` + `Commit` + 缩进消息（无 date） |
+| `fuller` | `commit` + `Author`/`AuthorDate` + `Commit`/`CommitDate` + 消息 |
+| `reference` | 单行 `<abbrev> (<subject>, <short-date>)` |
+| `raw` | 提交对象的 `tree`/`parent`/`author`/`committer` 头 + 缩进消息 |
+
+预设继承 `libra log` 既有惯例（时间戳渲染为 UTC `+0000`；`--pretty` 缩写哈希；存储消息中 subject/body 间空行已折叠），故与 Git 预设**结构**一致而非逐字节相同。`libra show --pretty=<preset>` 使用相同格式。
+
+```bash
+libra log --pretty=short
+libra log --pretty=fuller
+libra log --pretty=reference
+```
+
 ### `-p, --patch`
 
 显示每个提交的 diff（patch）。可与路径参数组合，将 diff 限制到特定文件。

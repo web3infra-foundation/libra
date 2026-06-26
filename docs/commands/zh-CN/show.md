@@ -178,7 +178,7 @@ libra --json show HEAD              # 结构化 JSON 输出
 
 ### `--pretty` / `--format` 与结构化 JSON
 
-`--pretty=<fmt>` 及其别名 `--format=<fmt>` 以 `oneline` 预设或 `%` 占位符模板（`format:`/`tformat:`/裸模板）渲染 commit header，复用 `libra log` 的 formatter。命名预设 `short` / `full` / `fuller` / `raw` 尚未单独渲染。对程序消费者，仍推荐 `--json`：它在类型良好、按类型判别的 schema 中提供每个字段（类型化字段而非字符串解析），避免格式字符串的脆弱性。
+`--pretty=<fmt>` 及其别名 `--format=<fmt>` 以 `oneline` 预设或 `%` 占位符模板（`format:`/`tformat:`/裸模板）渲染 commit header，复用 `libra log` 的 formatter。命名预设 `short` / `full` / `fuller` / `reference` / `raw` 已单独渲染（结构对齐 Git 预设），`medium` 映射默认格式（这与尚未公开的 `--raw` diff 格式不同）。对程序消费者，仍推荐 `--json`：它在类型良好、按类型判别的 schema 中提供每个字段（类型化字段而非字符串解析），避免格式字符串的脆弱性。
 
 ### 为什么使用类型感知 JSON schema？
 
