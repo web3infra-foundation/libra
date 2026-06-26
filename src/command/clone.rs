@@ -88,6 +88,7 @@ const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
     libra clone --bare git@github.com:user/repo.git       Create bare clone\n    \
     libra clone -b develop git@github.com:user/repo.git   Clone specific branch\n    \
     libra clone --single-branch -b main <url>             Clone only one branch\n    \
+    libra clone --no-checkout <url>                       Set up the repo without checking out files\n    \
     libra clone --depth 1 <url>                           Shallow clone (latest commit only)")]
 pub struct CloneArgs {
     /// The remote repository location to clone from, usually a URL with HTTPS or SSH
@@ -133,6 +134,11 @@ pub struct CloneArgs {
     /// during the clone, matching `git clone --no-progress`.
     #[clap(long = "no-progress")]
     pub no_progress: bool,
+
+    /// Do not check out HEAD into the working tree after cloning (objects, refs
+    /// and HEAD are still set up), matching `git clone --no-checkout`.
+    #[clap(long = "no-checkout")]
+    pub no_checkout: bool,
 }
 
 const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
@@ -1434,27 +1440,31 @@ async fn clone_cloud_publish_into_destination(
 
     configure_cloud_publish_checkout(source, restore_plan, &args.remote_repo).await?;
 
-    if !output.quiet && !output.is_json() {
-        eprintln!("Checking out working copy ...");
+    // `--no-checkout`: leave the working tree unpopulated (objects/refs/HEAD are
+    // already restored above), matching `git clone --no-checkout`.
+    if !args.no_checkout {
+        if !output.quiet && !output.is_json() {
+            eprintln!("Checking out working copy ...");
+        }
+        command::restore::execute_checked_typed(RestoreArgs {
+            overlay: false,
+            no_overlay: false,
+            ours: false,
+            theirs: false,
+            ignore_unmerged: false,
+            merge: false,
+            conflict: None,
+            worktree: true,
+            staged: true,
+            source: None,
+            pathspec: vec![util::working_dir_string()],
+            pathspec_from_file: None,
+            pathspec_file_nul: false,
+            no_progress: false,
+        })
+        .await
+        .map_err(|source| CloneError::CheckoutFailed { source })?;
     }
-    command::restore::execute_checked_typed(RestoreArgs {
-        overlay: false,
-        no_overlay: false,
-        ours: false,
-        theirs: false,
-        ignore_unmerged: false,
-        merge: false,
-        conflict: None,
-        worktree: true,
-        staged: true,
-        source: None,
-        pathspec: vec![util::working_dir_string()],
-        pathspec_from_file: None,
-        pathspec_file_nul: false,
-        no_progress: false,
-    })
-    .await
-    .map_err(|source| CloneError::CheckoutFailed { source })?;
 
     let mut warnings = init_output.warnings.clone();
     warnings.extend(object_report.warnings);
@@ -2885,12 +2895,16 @@ async fn clone_into_destination(
         eprintln!("Configuring repository ...");
     }
 
-    if !args.bare && !output.quiet && !output.is_json() {
+    if !args.bare && !args.no_checkout && !output.quiet && !output.is_json() {
         eprintln!("Checking out working copy ...");
     }
 
-    let setup_result =
-        setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
+    let setup_result = setup_repository(
+        remote_config.clone(),
+        args.branch.clone(),
+        !args.bare && !args.no_checkout,
+    )
+    .await?;
 
     let mut warnings = init_output.warnings.clone();
     let mut gitignore_converted = Vec::new();
@@ -3418,6 +3432,7 @@ mod tests {
     fn cloud_clone_args_baseline() -> CloneArgs {
         CloneArgs {
             no_single_branch: false,
+            no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3629,6 +3644,7 @@ mod tests {
         let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
         let args = CloneArgs {
             no_single_branch: false,
+            no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3708,6 +3724,75 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn cloud_clone_no_checkout_skips_worktree_but_restores_refs() {
+        let parent = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let _cwd = ChangeDirGuard::new(parent.path());
+        let source = cloud_source();
+        let (restore_plan, remote, commit_id) = cloud_restore_fixture(true).await;
+        let args = CloneArgs {
+            no_single_branch: false,
+            no_checkout: true,
+            no_progress: false,
+            remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
+            local_path: None,
+            branch: None,
+            single_branch: false,
+            bare: false,
+            depth: None,
+            tags: false,
+            no_tags: false,
+        };
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+
+        execute_cloud_publish_clone(&args, &source, restore_plan, remote, parent.path(), &output)
+            .await
+            .expect("cloud clone --no-checkout should complete");
+
+        let clone_dir = parent.path().join("kepler-ledger");
+        // --no-checkout: the working tree is NOT populated...
+        assert!(
+            !clone_dir.join("README.md").exists(),
+            "--no-checkout must not write the working-tree file"
+        );
+        // ...but objects/refs/HEAD and config ARE restored.
+        let _clone_cwd = ChangeDirGuard::new(&clone_dir);
+        let head = Head::current_commit_result()
+            .await
+            .expect("restored HEAD should be readable")
+            .expect("restored HEAD should point at a commit");
+        assert_eq!(head.to_string(), commit_id.to_string());
+        // Config (remote + cloud site) is restored regardless of --no-checkout.
+        assert_eq!(
+            config_value("remote.origin.url").await.as_deref(),
+            Some("libra+cloud://code.example.com/kepler-ledger")
+        );
+        assert_eq!(
+            config_value("cloud.origin.site_id").await.as_deref(),
+            Some("site_123")
+        );
+        let db = get_db_conn_instance().await;
+        let restored_tag = reference::Entity::find()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+            .filter(reference::Column::Name.eq("refs/tags/v1.0.0"))
+            .filter(reference::Column::Remote.is_null())
+            .one(&db)
+            .await
+            .expect("restored tag should be queryable")
+            .expect("tag metadata should be restored even with --no-checkout");
+        assert_eq!(
+            restored_tag.commit.as_deref(),
+            Some(commit_id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn cloud_clone_restore_test_restores_tag_selector_as_detached_head() {
         let parent = tempdir().unwrap();
         let home = tempdir().unwrap();
@@ -3727,6 +3812,7 @@ mod tests {
         };
         let args = CloneArgs {
             no_single_branch: false,
+            no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
                 .to_string(),
@@ -3794,6 +3880,7 @@ mod tests {
         let (restore_plan, remote, _) = cloud_restore_fixture(false).await;
         let args = CloneArgs {
             no_single_branch: false,
+            no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,
@@ -3858,6 +3945,7 @@ mod tests {
             .expect("metadata should overwrite in-memory remote");
         let args = CloneArgs {
             no_single_branch: false,
+            no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
             local_path: None,

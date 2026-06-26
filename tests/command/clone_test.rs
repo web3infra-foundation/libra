@@ -182,6 +182,7 @@ async fn test_clone_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -217,6 +218,7 @@ async fn test_clone_bare_repository() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_dir.to_str().unwrap().to_string()),
@@ -267,6 +269,7 @@ async fn test_clone_branch_single_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -301,6 +304,7 @@ async fn test_clone_default_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -335,6 +339,7 @@ async fn test_clone_default_branch_single_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -371,6 +376,7 @@ async fn test_clone_to_existing_empty_dir() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
@@ -410,6 +416,7 @@ async fn test_clone_to_existing_dir() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
@@ -445,6 +452,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
@@ -479,6 +487,7 @@ async fn test_clone_with_depth() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -513,6 +522,7 @@ async fn test_clone_with_depth_and_branch() {
 
     command::clone::execute(CloneArgs {
         no_single_branch: false,
+        no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
@@ -572,5 +582,52 @@ fn clone_no_single_branch_countermands_single_branch() {
     assert!(
         !stderr.contains("unexpected argument") && !stderr.contains("cannot be used with"),
         "--single-branch --no-single-branch parses (override, no conflict): {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn no_checkout_skips_working_tree() {
+    use crate::command::{assert_cli_success, create_committed_repo_via_cli, run_libra_command};
+
+    // Source repo with a committed `tracked.txt`, used as a local clone source.
+    let src = create_committed_repo_via_cli();
+    let work = tempdir().unwrap();
+
+    // `clone --no-checkout` sets up .libra/refs/HEAD but does NOT populate the
+    // working tree with the tracked file.
+    let dst = work.path().join("dst");
+    let out = crate::command::run_libra_command(
+        &[
+            "clone",
+            "--no-checkout",
+            src.path().to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ],
+        work.path(),
+    );
+    assert_cli_success(&out, "clone --no-checkout");
+    assert!(dst.join(".libra").exists(), ".libra is created");
+    assert!(
+        !dst.join("tracked.txt").exists(),
+        "--no-checkout leaves the tracked file unchecked-out"
+    );
+    let head = run_libra_command(&["rev-parse", "HEAD"], &dst);
+    assert_cli_success(&head, "HEAD is resolvable after --no-checkout clone");
+
+    // Control: a normal clone of the same source DOES check out the file.
+    let dst2 = work.path().join("dst2");
+    let out2 = run_libra_command(
+        &[
+            "clone",
+            src.path().to_str().unwrap(),
+            dst2.to_str().unwrap(),
+        ],
+        work.path(),
+    );
+    assert_cli_success(&out2, "normal clone");
+    assert!(
+        dst2.join("tracked.txt").exists(),
+        "a normal clone checks out the tracked file"
     );
 }

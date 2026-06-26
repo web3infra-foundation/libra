@@ -154,6 +154,17 @@ clone, matching `git clone --no-progress`. Other output is unaffected.
 libra clone --no-progress git@github.com:user/repo.git
 ```
 
+### `--no-checkout`
+
+Do not check out HEAD into the working tree after cloning, matching `git clone
+--no-checkout`. Objects, refs and HEAD are still set up — only the working-tree
+checkout is skipped, so the destination contains the repository metadata but no
+checked-out files.
+
+```bash
+libra clone --no-checkout git@github.com:user/repo.git
+```
+
 ## Common Commands
 
 ```bash
@@ -161,6 +172,7 @@ libra clone git@github.com:user/repo.git
 libra clone https://github.com/user/repo.git
 libra clone git@github.com:user/repo.git my-dir
 libra clone --bare git@github.com:user/repo.git
+libra clone --no-checkout git@github.com:user/repo.git
 libra clone -b develop git@github.com:user/repo.git
 libra clone --single-branch -b main git@github.com:user/repo.git
 libra clone --depth 1 git@github.com:user/repo.git
@@ -355,7 +367,7 @@ not, because its operation-log model fetches all refs by design.
 | Template directory | `--template=<dir>` | N/A | N/A (handled by init internally) |
 | Quiet mode | `-q` / `--quiet` | `--quiet` | `--quiet` (global flag) |
 | Verbose / progress | `--progress` / `--verbose` | N/A | Phased stderr progress (default) |
-| No checkout | `-n` / `--no-checkout` | N/A | N/A (bare implies no checkout) |
+| No checkout | `-n` / `--no-checkout` | N/A | `--no-checkout` |
 | Sparse checkout | `--sparse` | N/A | N/A |
 | Filter (partial clone) | `--filter=<spec>` | N/A | N/A |
 | Bundle URI | `--bundle-uri=<uri>` | N/A | N/A |
@@ -412,4 +424,4 @@ If checkout fails, the clone reports failure -- it does not silently succeed wit
 - `--mirror` and `--reference` are not supported
 - Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
 - The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
-- `--no-checkout` is not available as a separate flag; use `--bare` for repositories without a working tree
+- `--no-checkout` sets up objects/refs/HEAD but skips the working-tree checkout; use `--bare` instead when you want no working tree at all (no `.libra` worktree layout)
