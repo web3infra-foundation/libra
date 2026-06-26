@@ -164,6 +164,7 @@ async fn test_basic_revert() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        edit: false,
         no_edit: false,
     })
     .await;
@@ -287,6 +288,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        edit: false,
         no_edit: false,
     })
     .await;
@@ -373,6 +375,7 @@ async fn test_revert_root_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        edit: false,
         no_edit: false,
     })
     .await;
@@ -700,6 +703,7 @@ async fn test_revert_errors() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        edit: false,
         no_edit: false,
     })
     .await;
@@ -827,5 +831,275 @@ fn revert_no_edit_is_accepted() {
         std::fs::read_to_string(p.join("rev.txt")).unwrap(),
         "base\n",
         "revert restored the file content"
+    );
+}
+
+/// `revert --edit` opens the configured editor on the generated revert message
+/// and commits the edited result; `--edit` and `--no-edit` are mutually
+/// exclusive. (Uses `core.editor` so no process-global env is touched.)
+#[test]
+#[serial]
+fn test_revert_edit_opens_editor() {
+    let repo = tempdir().expect("repo dir");
+    let p = repo.path();
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    fs::write(p.join("f.txt"), "one\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "first", "--no-verify"], p)
+            .status
+            .success(),
+        "commit first"
+    );
+    fs::write(p.join("f.txt"), "two\n").expect("modify f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add 2"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "second", "--no-verify"], p)
+            .status
+            .success(),
+        "commit second"
+    );
+
+    // An editor script that replaces the revert message with a fixed line.
+    let editor = p.join("fake-editor.sh");
+    fs::write(
+        &editor,
+        "#!/bin/sh\necho 'EDITED revert subject' > \"$1\"\n",
+    )
+    .expect("write editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod editor");
+    }
+    run_libra_command(
+        &["config", "set", "core.editor", editor.to_str().unwrap()],
+        p,
+    );
+
+    let out = run_libra_command(&["revert", "HEAD", "--edit"], p);
+    assert!(
+        out.status.success(),
+        "revert --edit should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let subject = run_libra_command(&["log", "-1", "--pretty=%s"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout).trim(),
+        "EDITED revert subject",
+        "the edited message is committed"
+    );
+
+    // `--edit` and `--no-edit` are mutually exclusive (clap conflict).
+    let conflict = run_libra_command(&["revert", "HEAD", "--edit", "--no-edit"], p);
+    assert!(
+        !conflict.status.success(),
+        "--edit conflicts with --no-edit"
+    );
+}
+
+/// `revert --edit` is carried through a conflict: after resolving and running
+/// `revert --continue`, the editor opens again (via `RevertState.edit`) and the
+/// edited message is committed.
+#[test]
+#[serial]
+fn test_revert_edit_carried_through_continue() {
+    let repo = tempdir().expect("repo dir");
+    let p = repo.path();
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    let commit = |msg: &str, body: &str| {
+        fs::write(p.join("f.txt"), body).expect("write f");
+        assert!(
+            run_libra_command(&["add", "f.txt"], p).status.success(),
+            "add"
+        );
+        assert!(
+            run_libra_command(&["commit", "-m", msg, "--no-verify"], p)
+                .status
+                .success(),
+            "commit {msg}"
+        );
+    };
+    commit("c1", "a\nb\nc\n");
+    commit("c2", "a\nB\nc\n"); // changes line 2
+    commit("c3", "a\nZ\nc\n"); // changes line 2 again → reverting c2 will conflict
+
+    let editor = p.join("fake-editor.sh");
+    fs::write(&editor, "#!/bin/sh\necho 'EDITED via continue' > \"$1\"\n").expect("write editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    run_libra_command(
+        &["config", "set", "core.editor", editor.to_str().unwrap()],
+        p,
+    );
+
+    // Reverting c2 (HEAD~1) conflicts with c3's change to line 2.
+    let conflicted = run_libra_command(&["revert", "HEAD~1", "--edit"], p);
+    assert!(
+        !conflicted.status.success(),
+        "reverting HEAD~1 should conflict: {}",
+        String::from_utf8_lossy(&conflicted.stdout)
+    );
+
+    // Resolve and continue: the editor opens (RevertState carried `--edit`).
+    fs::write(p.join("f.txt"), "a\nRESOLVED\nc\n").expect("resolve");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add resolved"
+    );
+    let cont = run_libra_command(&["revert", "--continue"], p);
+    assert!(
+        cont.status.success(),
+        "revert --continue should succeed: {}",
+        String::from_utf8_lossy(&cont.stderr)
+    );
+    let subject = run_libra_command(&["log", "-1", "--pretty=%s"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout).trim(),
+        "EDITED via continue",
+        "the edited message is committed after --continue"
+    );
+}
+
+/// A failing/empty editor on a CLEAN `revert --edit` must leave the working
+/// tree and HEAD unchanged (the message is resolved before the worktree is
+/// mutated), and must NOT leave a stray in-progress revert.
+#[test]
+#[serial]
+fn test_revert_edit_failure_leaves_worktree_clean() {
+    let repo = tempdir().expect("repo dir");
+    let p = repo.path();
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    fs::write(p.join("f.txt"), "one\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "first", "--no-verify"], p)
+            .status
+            .success(),
+        "commit first"
+    );
+    fs::write(p.join("f.txt"), "two\n").expect("modify f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add 2"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "second", "--no-verify"], p)
+            .status
+            .success(),
+        "commit second"
+    );
+
+    // An editor that exits non-zero (failure).
+    let editor = p.join("bad-editor.sh");
+    fs::write(&editor, "#!/bin/sh\nexit 1\n").expect("write editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    run_libra_command(
+        &["config", "set", "core.editor", editor.to_str().unwrap()],
+        p,
+    );
+
+    let out = run_libra_command(&["revert", "HEAD", "--edit"], p);
+    assert!(!out.status.success(), "a failing editor aborts the revert");
+    // The working tree is untouched (revert was not applied), HEAD is unchanged,
+    // and there is no in-progress revert to clean up.
+    assert_eq!(
+        fs::read_to_string(p.join("f.txt")).unwrap(),
+        "two\n",
+        "worktree unchanged"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "no stray revert state on a clean-path editor failure"
+    );
+    let subject = run_libra_command(&["log", "-1", "--pretty=%s"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout).trim(),
+        "second",
+        "HEAD unchanged (no revert commit)"
+    );
+}
+
+/// A failing editor during `revert --continue` must leave `revert-state.json`
+/// in place so the revert stays recoverable (`--abort`/retry).
+#[test]
+#[serial]
+fn test_revert_edit_failure_during_continue_keeps_state() {
+    let repo = tempdir().expect("repo dir");
+    let p = repo.path();
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    let commit = |msg: &str, body: &str| {
+        fs::write(p.join("f.txt"), body).expect("write f");
+        assert!(
+            run_libra_command(&["add", "f.txt"], p).status.success(),
+            "add"
+        );
+        assert!(
+            run_libra_command(&["commit", "-m", msg, "--no-verify"], p)
+                .status
+                .success(),
+            "commit {msg}"
+        );
+    };
+    commit("c1", "a\nb\nc\n");
+    commit("c2", "a\nB\nc\n");
+    commit("c3", "a\nZ\nc\n");
+
+    let editor = p.join("bad-editor.sh");
+    fs::write(&editor, "#!/bin/sh\nexit 1\n").expect("write editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    run_libra_command(
+        &["config", "set", "core.editor", editor.to_str().unwrap()],
+        p,
+    );
+
+    // Conflicting revert with --edit (editor not reached yet at conflict time).
+    let conflicted = run_libra_command(&["revert", "HEAD~1", "--edit"], p);
+    assert!(!conflicted.status.success(), "revert should conflict");
+    assert!(
+        p.join(".libra/revert-state.json").exists(),
+        "conflict records state"
+    );
+
+    // Resolve, then --continue: the editor runs and FAILS.
+    fs::write(p.join("f.txt"), "a\nRESOLVED\nc\n").expect("resolve");
+    assert!(
+        run_libra_command(&["add", "f.txt"], p).status.success(),
+        "add resolved"
+    );
+    let cont = run_libra_command(&["revert", "--continue"], p);
+    assert!(!cont.status.success(), "a failing editor aborts --continue");
+    // State persists so the user can retry or --abort.
+    assert!(
+        p.join(".libra/revert-state.json").exists(),
+        "revert state remains after a failed --continue editor"
     );
 }

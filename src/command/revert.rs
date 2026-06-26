@@ -22,7 +22,7 @@ use git_internal::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    command::{load_object, save_object},
+    command::{editor, load_object, save_object},
     common_utils::format_commit_msg,
     internal::{branch::Branch, head::Head},
     utils::{
@@ -41,6 +41,7 @@ EXAMPLES:
     libra revert abc1234                  Revert a specific commit
     libra revert -n HEAD                  Revert without auto-committing
     libra revert -m 1 <merge>             Revert a merge commit relative to parent 1
+    libra revert HEAD --edit              Edit the revert message in $EDITOR before committing
     libra revert HEAD --no-edit           Accept the default revert message (no editor)
     libra revert --json HEAD              Structured JSON output for agents";
 
@@ -107,6 +108,38 @@ enum RevertError {
 
     #[error("{0}")]
     MultiCommitUnsupported(String),
+
+    #[error("Aborting revert due to empty commit message")]
+    EmptyMessage,
+
+    #[error("{0}")]
+    Editor(String),
+}
+
+/// `--edit`: open the configured editor on `initial`, returning the edited
+/// message with `#` comment lines stripped and surrounding blank lines trimmed.
+/// Errors if no editor is configured, the editor fails, or the result is empty.
+async fn edit_revert_message(initial: &str) -> Result<String, RevertError> {
+    let Some(editor_cmd) = editor::resolve_editor().await else {
+        return Err(RevertError::Editor(
+            "no editor configured for --edit; set $GIT_EDITOR, core.editor, $VISUAL, or $EDITOR"
+                .to_string(),
+        ));
+    };
+    let path = util::storage_path().join("REVERT_EDITMSG");
+    let raw = editor::edit_message(&path, initial, &editor_cmd, true)
+        .await
+        .map_err(|e| RevertError::Editor(e.to_string()))?;
+    let cleaned = raw
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return Err(RevertError::EmptyMessage);
+    }
+    Ok(cleaned.to_string())
 }
 
 /// Build the `Signed-off-by` trailer (prefixed with a blank line) for
@@ -146,6 +179,7 @@ impl RevertError {
             }
             Self::RevertInProgress | Self::NoRevertInProgress => StableErrorCode::RepoStateInvalid,
             Self::StateIo(_) => StableErrorCode::IoWriteFailed,
+            Self::EmptyMessage | Self::Editor(_) => StableErrorCode::CliInvalidArguments,
         }
     }
 }
@@ -232,10 +266,16 @@ pub struct RevertArgs {
     #[clap(short = 's', long)]
     pub signoff: bool,
 
+    /// Open the editor on the auto-generated revert message before committing
+    /// (`$GIT_EDITOR` / `core.editor` / `$VISUAL` / `$EDITOR`), like
+    /// `git revert --edit`. Unlike Git, Libra's revert does NOT open an editor
+    /// by default; pass `--edit` to opt in. Mutually exclusive with `--no-edit`.
+    #[clap(short = 'e', long, conflicts_with = "no_edit")]
+    pub edit: bool,
+
     /// Accept the auto-generated revert message without launching an editor.
-    /// Libra never opens an editor for revert (it always uses the default
-    /// `Revert "<subject>"` message), so this is accepted for Git parity and is
-    /// a no-op; the `--edit` counterpart is not provided.
+    /// This is Libra's default behavior, so the flag is a no-op accepted for Git
+    /// parity; pass `-e`/`--edit` to open the editor instead.
     #[clap(long = "no-edit")]
     pub no_edit: bool,
 
@@ -323,6 +363,7 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
                         orig_head,
                         reverted_commit: commit_id.to_string(),
                         signoff: args.signoff,
+                        edit: args.edit,
                         conflicted_paths: conflicted_paths.clone(),
                     }
                     .save()?;
@@ -382,8 +423,8 @@ async fn run_revert_continue() -> Result<RevertOutput, RevertError> {
         .collect();
     let files_changed = tree_items.len();
     let tree_id = build_tree_from_map(tree_items).await?;
-    let revert_commit_id =
-        create_revert_commit(&reverted_commit_id, &orig_head, &tree_id, state.signoff).await?;
+    let message = resolve_revert_message(&reverted_commit_id, state.signoff, state.edit).await?;
+    let revert_commit_id = create_revert_commit(&orig_head, &tree_id, &message).await?;
     RevertState::cleanup()?;
 
     let commit_str = reverted_commit_id.to_string();
@@ -465,6 +506,9 @@ struct RevertState {
     reverted_commit: String,
     /// Whether `--signoff` was requested, so `--continue` reproduces the trailer.
     signoff: bool,
+    /// Whether `--edit` was requested, so `--continue` opens the editor too.
+    #[serde(default)]
+    edit: bool,
     /// Paths left with conflict markers for the user to resolve.
     conflicted_paths: Vec<String>,
 }
@@ -648,6 +692,16 @@ async fn revert_single_commit(
     let final_tree: Tree =
         load_object(&final_tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
+    // Resolve the (possibly `--edit`-ed) commit message BEFORE mutating the
+    // working tree, so an editor failure on a clean revert leaves nothing
+    // applied. Conflicts defer the message to `--continue`; `--no-commit` needs
+    // no message.
+    let prepared_message = if conflicted_paths.is_empty() && !args.no_commit {
+        Some(resolve_revert_message(commit_id, args.signoff, args.edit).await?)
+    } else {
+        None
+    };
+
     let mut new_index = Index::new();
     rebuild_index_from_tree(&final_tree, &mut new_index, "")?;
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
@@ -662,18 +716,11 @@ async fn revert_single_commit(
         return Ok(SingleRevertOutcome::Conflicted { conflicted_paths });
     }
 
-    let revert_commit_id = if args.no_commit {
-        None
-    } else {
-        Some(
-            create_revert_commit(
-                commit_id,
-                &current_head_commit_id,
-                &final_tree_id,
-                args.signoff,
-            )
-            .await?,
-        )
+    let revert_commit_id = match prepared_message {
+        Some(message) => {
+            Some(create_revert_commit(&current_head_commit_id, &final_tree_id, &message).await?)
+        }
+        None => None, // `--no-commit`
     };
     Ok(SingleRevertOutcome::Committed {
         revert_commit_id,
@@ -735,21 +782,31 @@ async fn revert_root_commit(args: &RevertArgs) -> Result<SingleRevertOutcome, Re
     let new_index = Index::new();
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
     let files_changed = current_index.tracked_files().len();
-    reset_workdir_safely(&current_index, &new_index)?;
 
+    // Resolve the HEAD + (possibly `--edit`-ed) message BEFORE clearing the
+    // working tree, so an editor failure leaves nothing applied.
+    let prepared = if args.no_commit {
+        None
+    } else {
+        let current_head = Head::current_commit()
+            .await
+            .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
+        let message = resolve_root_revert_message(args.signoff, args.edit).await?;
+        Some((current_head, message))
+    };
+
+    reset_workdir_safely(&current_index, &new_index)?;
     new_index
         .save(path::index())
         .map_err(|e| RevertError::IndexSave(e.to_string()))?;
 
     // Reverting the root commit clears the tree entirely; there is no parent to
     // conflict against, so it always completes cleanly.
-    let revert_commit_id = if args.no_commit {
-        None
-    } else {
-        let current_head = Head::current_commit()
-            .await
-            .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
-        Some(create_empty_revert_commit(&current_head, args.signoff).await?)
+    let revert_commit_id = match prepared {
+        Some((current_head, message)) => {
+            Some(create_empty_revert_commit(&current_head, &message).await?)
+        }
+        None => None,
     };
     Ok(SingleRevertOutcome::Committed {
         revert_commit_id,
@@ -854,26 +911,48 @@ fn file_name_to_utf8(path: &Path) -> Result<String, RevertError> {
         })
 }
 
-async fn create_revert_commit(
+/// Build the default `Revert "<subject>"` message for a commit, plus the
+/// `--signoff` trailer.
+async fn build_revert_message(
     reverted_commit_id: &ObjectHash,
-    parent_id: &ObjectHash,
-    tree_id: &ObjectHash,
     signoff: bool,
-) -> Result<ObjectHash, RevertError> {
+) -> Result<String, RevertError> {
     let reverted_commit: Commit =
         load_object(reverted_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
-
-    let revert_message = format!(
+    Ok(format!(
         "Revert \"{}\"\n\nThis reverts commit {}.{}",
         reverted_commit.message.lines().next().unwrap_or(""),
         reverted_commit_id,
         signoff_trailer(signoff).await?
-    );
+    ))
+}
 
+/// Resolve the final revert message: the default message, with the editor
+/// applied when `edit` is set. Callers run this BEFORE mutating the working
+/// tree so an editor failure (no editor / abort / empty) cannot leave a
+/// half-applied revert behind.
+async fn resolve_revert_message(
+    reverted_commit_id: &ObjectHash,
+    signoff: bool,
+    edit: bool,
+) -> Result<String, RevertError> {
+    let message = build_revert_message(reverted_commit_id, signoff).await?;
+    if edit {
+        edit_revert_message(&message).await
+    } else {
+        Ok(message)
+    }
+}
+
+async fn create_revert_commit(
+    parent_id: &ObjectHash,
+    tree_id: &ObjectHash,
+    message: &str,
+) -> Result<ObjectHash, RevertError> {
     let commit = Commit::from_tree_id(
         *tree_id,
         vec![*parent_id],
-        &format_commit_msg(&revert_message, None),
+        &format_commit_msg(message, None),
     );
 
     save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
@@ -881,22 +960,33 @@ async fn create_revert_commit(
     Ok(commit.id)
 }
 
+/// The default root-revert message (`Revert root commit`) plus the `--signoff`
+/// trailer, with the editor applied when `edit` is set. Resolved before the
+/// working tree is mutated.
+async fn resolve_root_revert_message(signoff: bool, edit: bool) -> Result<String, RevertError> {
+    let message = format!(
+        "Revert root commit\n\nThis reverts the initial commit.{}",
+        signoff_trailer(signoff).await?
+    );
+    if edit {
+        edit_revert_message(&message).await
+    } else {
+        Ok(message)
+    }
+}
+
 async fn create_empty_revert_commit(
     parent_id: &ObjectHash,
-    signoff: bool,
+    message: &str,
 ) -> Result<ObjectHash, RevertError> {
     let empty_tree =
         Tree::from_tree_items(Vec::new()).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     save_object(&empty_tree, &empty_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
 
-    let revert_message = format!(
-        "Revert root commit\n\nThis reverts the initial commit.{}",
-        signoff_trailer(signoff).await?
-    );
     let commit = Commit::from_tree_id(
         empty_tree.id,
         vec![*parent_id],
-        &format_commit_msg(&revert_message, None),
+        &format_commit_msg(message, None),
     );
 
     save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
@@ -1050,6 +1140,19 @@ mod tests {
         assert_eq!(
             RevertError::UpdateHead("ignored".to_string()).stable_code(),
             StableErrorCode::IoWriteFailed,
+        );
+        // `--edit` failure modes both surface as invalid-arguments.
+        assert_eq!(
+            RevertError::EmptyMessage.stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::Editor("no editor".to_string()).stable_code(),
+            StableErrorCode::CliInvalidArguments,
+        );
+        assert_eq!(
+            RevertError::EmptyMessage.to_string(),
+            "Aborting revert due to empty commit message"
         );
     }
 }

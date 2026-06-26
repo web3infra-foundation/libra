@@ -5,7 +5,7 @@
 ## 概要
 
 ```
-libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
+libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [-e | --edit] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
 libra revert --continue
 libra revert --abort
 ```
@@ -60,9 +60,17 @@ libra revert feature-branch
 
 抑制所有人类可读输出。退出码仍然表示成功或失败。
 
+### `-e`, `--edit`
+
+在提交前于编辑器中打开自动生成的 revert 消息（`Revert "<subject>"`），编辑器级联与 `commit` 相同（`$GIT_EDITOR`、`core.editor`、`$VISUAL`、`$EDITOR`）。编辑后的消息会剥离 `#` 注释行并去除首尾空行；结果为空则中止 revert。与 Git 不同，Libra 的 revert 默认**不**打开编辑器——`--edit` 为显式选用。冲突时 `--edit` 会被记住，故 `--continue` 也会打开编辑器。与 `--no-edit` 互斥。
+
+```bash
+libra revert HEAD --edit
+```
+
 ### `--no-edit`
 
-接受自动生成的 revert 消息（`Revert "<subject>"`）而不启动编辑器。Libra 从不为 revert 打开编辑器，故此为对齐 Git 而接受的 no-op；不提供 `--edit`。要自定义消息，请用 `-n` 后再 `libra commit -m`。
+接受自动生成的 revert 消息（`Revert "<subject>"`）而不启动编辑器——这是 Libra 的默认行为，故为对齐 Git 接受的 no-op。要在提交前编辑消息，请用 `-e`/`--edit`（与本标志互斥）。
 
 ### `--no-rerere-autoupdate`
 
@@ -157,9 +165,9 @@ Libra 的 revert 以路径级三方合并应用逆向更改。结果无歧义时
 |-----------|-----|-----|-------|
 | 位置提交 | `git revert <commit>...` | N/A（使用 `jj backout`） | `libra revert <commit>...`（多个，按序回滚） |
 | No-commit 模式 | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
-| 接受默认消息 | `--no-edit` | N/A | `--no-edit`（接受式 no-op；Libra 从不打开编辑器） |
+| 接受默认消息 | `--no-edit` | N/A | `--no-edit`（接受式 no-op；Libra 默认不打开编辑器——用 `-e`/`--edit` 选用） |
 | 不更新 rerere | `--no-rerere-autoupdate` | N/A | `--no-rerere-autoupdate`（接受式 no-op；无 rerere） |
-| 编辑消息 | `--edit` | N/A | 不支持（使用 `-n` 后再 `commit -m`） |
+| 编辑消息 | `-e`/`--edit` | N/A | `-e`/`--edit`（在生成消息上打开编辑器；与 Git 不同，Libra 默认不打开，需显式选用） |
 | Mainline 父提交 | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>`（合并提交必需） |
 | 冲突后继续 | `--continue` | N/A | `--continue`（解决冲突后） |
 | 中止进行中操作 | `--abort` | N/A | `--abort`（恢复 revert 前状态） |
@@ -180,7 +188,7 @@ Libra 的 revert 以路径级三方合并应用逆向更改。结果无歧义时
 | `LBR-REPO-001` | 不在 libra 仓库内 | 使用 `libra init` 初始化或进入仓库 |
 | `LBR-REPO-003` | HEAD detached（不在分支上） | 使用 `libra switch <branch>` 切换到分支 |
 | `LBR-CLI-003` | 无法解析提交引用 | 使用 `libra log` 查找有效提交引用 |
-| `LBR-CLI-002` | 合并提交缺 `-m`、对非合并提交传 `-m`，或父编号越界（exit 128） | 合并提交传有效 `-m <父编号>`；非合并提交省略 `-m` |
+| `LBR-CLI-002` | 合并提交缺 `-m`、对非合并提交传 `-m`，或父编号越界（exit 128）；或在 `-e`/`--edit` 下未配置编辑器、编辑器中止或消息为空（exit 129） | 合并提交传有效 `-m <父编号>`（非合并提交省略）；`--edit` 需设置 `$GIT_EDITOR`/`core.editor` 并保存非空消息 |
 | `LBR-CONFLICT-001` | 文件已被后续提交修改，产生冲突 | 解决冲突后 `libra revert --continue`（或 `libra revert --abort`） |
 | `LBR-IO-001` | 无法加载对象（提交、树、blob） | 检查仓库完整性 |
 | `LBR-IO-002` | 无法保存对象、索引或更新 HEAD | 检查文件系统权限和仓库可写性 |

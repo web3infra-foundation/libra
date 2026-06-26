@@ -5,7 +5,7 @@ Revert some existing commits.
 ## Synopsis
 
 ```
-libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
+libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [-e | --edit] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
 libra revert --continue
 libra revert --abort
 ```
@@ -81,12 +81,25 @@ Emit machine-readable JSON output instead of human-readable text. See [Structure
 
 Suppress all human-readable output. Exit code still indicates success or failure.
 
+### `-e`, `--edit`
+
+Open the editor on the auto-generated revert message (`Revert "<subject>"`)
+before committing, using the same cascade as `commit` (`$GIT_EDITOR`,
+`core.editor`, `$VISUAL`, `$EDITOR`). The edited message has `#` comment lines
+stripped and surrounding blank lines trimmed; an empty result aborts the revert.
+Unlike Git, Libra's revert does **not** open an editor by default — `--edit` is
+opt-in. When a revert conflicts, `--edit` is remembered so `--continue` also
+opens the editor. Mutually exclusive with `--no-edit`.
+
+```bash
+libra revert HEAD --edit
+```
+
 ### `--no-edit`
 
 Accept the auto-generated revert message (`Revert "<subject>"`) without launching
-an editor. Libra never opens an editor for revert, so this is accepted for Git
-parity and is a no-op. The `--edit` counterpart is not provided; to customize the
-message, use `-n` and then `libra commit -m`.
+an editor. This is Libra's default behavior, so the flag is a no-op accepted for
+Git parity; pass `-e`/`--edit` to open the editor instead.
 
 ### `--no-rerere-autoupdate`
 
@@ -206,9 +219,9 @@ is returned. You resolve the markers and run `libra revert --continue` (or
 |-----------|-----|-----|-------|
 | Positional commit(s) | `git revert <commit>...` | N/A (uses `jj backout`) | `libra revert <commit>...` (multiple, reverted in order) |
 | No-commit mode | `--no-commit` / `-n` | N/A | `--no-commit` / `-n` |
-| Accept default message | `--no-edit` | N/A | `--no-edit` (accepted no-op; Libra never opens an editor) |
+| Accept default message | `--no-edit` | N/A | `--no-edit` (accepted no-op; Libra does not open an editor by default — use `-e`/`--edit` to opt in) |
 | No rerere autoupdate | `--no-rerere-autoupdate` | N/A | `--no-rerere-autoupdate` (accepted no-op; no rerere) |
-| Edit message | `--edit` | N/A | Not supported (use `-n` then `commit -m`) |
+| Edit message | `-e`/`--edit` | N/A | `-e`/`--edit` (open the editor on the message; unlike Git, Libra does not open one by default — opt-in) |
 | Mainline parent | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>` (required for merge commits) |
 | Continue after conflict | `--continue` | N/A | `--continue` (after resolving conflicts) |
 | Abort in-progress | `--abort` | N/A | `--abort` (restores the pre-revert state) |
@@ -229,7 +242,7 @@ is returned. You resolve the markers and run `libra revert --continue` (or
 | `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
 | `LBR-REPO-003` | HEAD is detached (not on a branch) | Switch to a branch with `libra switch <branch>` |
 | `LBR-CLI-003` | Cannot resolve the commit reference | Use `libra log` to find valid commit references |
-| `LBR-CLI-002` | Merge commit without `-m`, `-m` on a non-merge commit, or out-of-range parent number (exit 128) | Pass a valid `-m <parent-number>` for merge commits; omit `-m` for non-merge commits |
+| `LBR-CLI-002` | Merge commit without `-m`, `-m` on a non-merge commit, or out-of-range parent number (exit 128); or, with `-e`/`--edit`, no editor configured, the editor aborted, or an empty message (exit 129) | Pass a valid `-m <parent-number>` for merge commits (omit it for non-merge commits); for `--edit`, set `$GIT_EDITOR`/`core.editor` and save a non-empty message |
 | `LBR-CONFLICT-001` | File was modified by a later commit, creating a conflict | Resolve conflicts, then `libra revert --continue` (or `libra revert --abort`) |
 | `LBR-IO-001` | Failed to load object (commit, tree, blob) | Check repository integrity |
 | `LBR-IO-002` | Failed to save object, index, or update HEAD | Check filesystem permissions and repository writability |
