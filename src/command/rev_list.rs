@@ -3,7 +3,13 @@
 use std::collections::{HashMap, HashSet};
 
 use clap::Parser;
-use git_internal::internal::object::commit::Commit;
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+    },
+};
 
 use crate::{
     command::load_object,
@@ -36,7 +42,9 @@ use rev_list_filter::{
     parent_count_filter, rev_list_author_filter, rev_list_committer_filter,
     rev_list_message_filter, rev_list_time_window, sort_rev_list_commits,
 };
-use rev_list_output::{REV_LIST_EXAMPLES, RevListEntry, RevListOutput, emit_human_rev_list};
+use rev_list_output::{
+    REV_LIST_EXAMPLES, RevListEntry, RevListObject, RevListOutput, emit_human_rev_list,
+};
 use rev_list_spec::resolve_revision_selection;
 
 #[derive(Parser, Debug)]
@@ -164,6 +172,23 @@ pub struct RevListArgs {
     #[clap(long = "no-max-parents")]
     pub no_max_parents: bool,
 
+    /// Also list the tree and blob objects reachable from the printed commits
+    /// (deduplicated), each as `<oid> <path>` after the commit lines.
+    #[clap(long)]
+    pub objects: bool,
+
+    /// Like `--objects`, and additionally print the excluded boundary commits
+    /// (the frontier) prefixed with `-` so a pack builder can treat them as
+    /// edges. Implies `--objects`.
+    #[clap(long = "objects-edge")]
+    pub objects_edge: bool,
+
+    /// Accepted as an alias of `--objects-edge`. Git's aggressive variant marks
+    /// more edge commits to build thinner packs; Libra emits the same boundary
+    /// frontier (a documented narrowing). Implies `--objects`.
+    #[clap(long = "objects-edge-aggressive")]
+    pub objects_edge_aggressive: bool,
+
     /// Revisions to include or exclude. Defaults to HEAD when omitted.
     #[clap(value_name = "SPEC")]
     pub specs: Vec<String>,
@@ -181,6 +206,21 @@ pub async fn execute(args: RevListArgs) -> Result<(), String> {
 
 pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // `--count --objects` adds the enumerated objects to a single total, which has
+    // no meaning alongside the per-side / cherry-equivalence count buckets of
+    // `--left-right` / `--cherry-mark` / `--cherry` (objects carry no side). Git
+    // rejects this combination; so does Libra, rather than report an inflated
+    // first bucket.
+    let want_objects = args.objects || args.objects_edge || args.objects_edge_aggressive;
+    if want_objects && args.count && (args.left_right || args.cherry_mark || args.cherry) {
+        return Err(CliError::command_usage(
+            "rev-list --count with object enumeration (--objects/--objects-edge) cannot be combined with --left-right, --cherry-mark, or --cherry",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("drop --objects, or count without the marked-count modes"));
+    }
+
     let result = resolve_rev_list(&args).await?;
 
     if output.is_json() {
@@ -233,8 +273,35 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     // `--count` because Git counts boundary commits in the total. Computed BEFORE the
     // `--reverse` flip so boundary child lists keep the un-reversed traversal order
     // (Git reverses only the output ROWS, not a boundary's child list).
-    let boundary = if args.boundary {
+    // `--objects-edge[-aggressive]` emits the excluded frontier commits with a
+    // leading `-` (the pack-builder "edge" markers), which is exactly the
+    // `--boundary` frontier — so compute it for those flags too.
+    let want_objects = args.objects || args.objects_edge || args.objects_edge_aggressive;
+    let want_edge = args.objects_edge || args.objects_edge_aggressive;
+    let boundary = if args.boundary || want_edge {
         compute_boundary_entries(&commits, args)
+    } else {
+        Vec::new()
+    };
+
+    // `--objects`: enumerate the deduplicated tree + blob objects reachable from
+    // the printed commits, in pre-order (root tree, then each subtree before its
+    // contents) matching `git rev-list --objects`. Objects shared with excluded
+    // commits are dropped and a `-- <pathspec>` limit prunes the walk.
+    let objects = if want_objects {
+        // Normalize pathspecs the same way the commit-level filter does
+        // (`util::to_workdir_path`) so the object walk compares git-compatible
+        // spellings (e.g. `./src`) against the workdir-relative tree paths.
+        let normalized_pathspecs: Vec<String> = args
+            .pathspecs
+            .iter()
+            .map(|spec| {
+                util::to_workdir_path(spec)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        collect_rev_list_objects(&commits, &selection.excluded, &normalized_pathspecs)?
     } else {
         Vec::new()
     };
@@ -246,10 +313,17 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     }
     let count_fields = if args.count {
         let mut fields = rev_list_count_fields(&commits, args);
-        // Git's `--count --boundary` includes the boundary commits; they carry no
-        // side, so they fall into the first (total / left) field.
+        // Git's `--count --boundary` includes the boundary commits, and
+        // `--count --objects` counts the enumerated tree/blob objects too; both
+        // carry no side, so they fall into the first (total / left) field. The
+        // boundary frontier is counted ONLY when the user asked for `--boundary`,
+        // not when it was computed solely as `--objects-edge` edge markers (Git
+        // counts commits + objects for `--objects-edge`, not the edge commits).
         if let Some(first) = fields.first_mut() {
-            *first += boundary.len();
+            if args.boundary {
+                *first += boundary.len();
+            }
+            *first += objects.len();
         }
         fields
     } else {
@@ -310,6 +384,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         inputs: selection.inputs,
         commits,
         boundary,
+        objects,
         entries,
         total,
         count_fields,
@@ -339,6 +414,204 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
         no_max_parents: args.no_max_parents,
         max_count: args.max_count,
         skip: args.skip,
+    })
+}
+
+/// Enumerate the tree and blob objects reachable from the printed commits for
+/// `--objects`, deduplicated by object id across the whole walk and matching
+/// `git rev-list --objects`:
+///
+/// - Objects reachable from EXCLUDED commits (the parents of a printed commit
+///   that are not themselves printed — e.g. the `A` side of `A..B`, or a `^spec`)
+///   are pre-marked "uninteresting": their tree closures are loaded into `seen`
+///   WITHOUT being emitted, so a range walk emits only the objects new to the
+///   included side. The excluded-side seed is tolerant of missing objects (a
+///   shallow boundary cannot be walked) — it just pre-marks what it can.
+/// - Each printed commit's root tree is then walked in pre-order (the tree
+///   itself, then each entry in tree order, recursing into a subtree immediately
+///   after emitting it). Gitlink (`TreeItemMode::Commit`) entries are skipped, as
+///   Git does. A corrupt/missing tree on the INCLUDED side is a hard error
+///   (`LBR-REPO-002`): an object-enumeration plumbing command must not silently
+///   emit an incomplete closure.
+/// - With a `-- <pathspec>` limit, the walk is pruned to the trees on the path to
+///   a pathspec plus everything under a matched pathspec; blobs are emitted only
+///   when their path is under a pathspec. The root tree is always emitted (Git
+///   does the same), so a pathspec narrows the object set but keeps the root.
+///
+/// Paths are worktree-relative; a root tree has an empty path (rendered as
+/// `<oid> ` with a trailing space).
+/// Tracks object enumeration state across all printed commits. `emitted` is the
+/// per-oid output-dedup set (each object printed at most once); `fully_walked`
+/// records trees whose ENTIRE subtree has already been covered (emitted or marked
+/// uninteresting) so traversal can be pruned. The two are kept separate because
+/// under a `-- <pathspec>` limit the same tree object can be reached at one path
+/// with a narrow scope and at another with a broader scope: deduping emission by
+/// itself must NOT prune the second, broader traversal.
+struct ObjectWalk {
+    emitted: HashSet<ObjectHash>,
+    fully_walked: HashSet<ObjectHash>,
+    out: Vec<RevListObject>,
+}
+
+fn collect_rev_list_objects(
+    commits: &[RevListSelectedCommit],
+    excluded_ids: &HashSet<String>,
+    pathspecs: &[String],
+) -> CliResult<Vec<RevListObject>> {
+    let mut walk = ObjectWalk {
+        emitted: HashSet::new(),
+        fully_walked: HashSet::new(),
+        out: Vec::new(),
+    };
+
+    // Pre-mark the uninteresting closure from the EXPLICITLY excluded commits
+    // (`^spec` / range start / `...` merge base) — their full reachability
+    // closure as computed by revision resolution. Each excluded commit's tree
+    // closure is marked covered WITHOUT being emitted, so the interesting walk
+    // emits only objects new to the included side. Commits merely omitted by
+    // `--max-count`/`--skip`/filters are NOT here, so their objects are NOT
+    // suppressed (matching Git).
+    for id in excluded_ids {
+        if let Ok(commit_id) = id.parse::<ObjectHash>() {
+            seed_uninteresting_objects(commit_id, &mut walk);
+        }
+    }
+
+    let fully_included = pathspecs.is_empty();
+    for selected in commits {
+        collect_tree_objects(
+            selected.commit.tree_id,
+            String::new(),
+            fully_included,
+            pathspecs,
+            &mut walk,
+        )?;
+    }
+    Ok(walk.out)
+}
+
+/// Load an excluded commit and mark its entire tree closure as covered WITHOUT
+/// emitting it, so the interesting walk skips objects shared with the excluded
+/// side. Tolerant of missing objects (a shallow boundary): it pre-marks what it
+/// can and gives up on what it cannot load.
+fn seed_uninteresting_objects(commit_id: ObjectHash, walk: &mut ObjectWalk) {
+    let Ok(commit) = load_object::<Commit>(&commit_id) else {
+        return;
+    };
+    seed_uninteresting_tree(commit.tree_id, walk);
+}
+
+fn seed_uninteresting_tree(tree_id: ObjectHash, walk: &mut ObjectWalk) {
+    if walk.fully_walked.contains(&tree_id) {
+        return;
+    }
+    // Load BEFORE marking covered: a tree we cannot load must NOT be recorded as
+    // uninteresting, otherwise the interesting walk would skip it (returning a
+    // truncated listing) instead of raising the corruption error. Trees form a
+    // DAG, so deferring the insert cannot cause infinite recursion.
+    let Ok(tree) = load_object::<Tree>(&tree_id) else {
+        return;
+    };
+    walk.emitted.insert(tree_id);
+    walk.fully_walked.insert(tree_id);
+    for item in &tree.tree_items {
+        match item.mode {
+            TreeItemMode::Tree => seed_uninteresting_tree(item.id, walk),
+            TreeItemMode::Commit => {} // gitlink — not an object Libra stores
+            _ => {
+                walk.emitted.insert(item.id);
+            }
+        }
+    }
+}
+
+fn collect_tree_objects(
+    tree_id: ObjectHash,
+    prefix: String,
+    fully_included: bool,
+    pathspecs: &[String],
+    walk: &mut ObjectWalk,
+) -> CliResult<()> {
+    // A fully-covered tree (whole subtree already emitted/uninteresting) needs no
+    // re-traversal. A merely-`emitted` tree may still need re-walking at a
+    // broader pathspec scope, so we do NOT prune on `emitted` alone.
+    if walk.fully_walked.contains(&tree_id) {
+        return Ok(());
+    }
+    if walk.emitted.insert(tree_id) {
+        walk.out.push(RevListObject {
+            oid: tree_id.to_string(),
+            path: prefix.clone(),
+        });
+    }
+    let tree = load_object::<Tree>(&tree_id).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to load tree object {tree_id} for rev-list --objects: {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    for item in &tree.tree_items {
+        let path = if prefix.is_empty() {
+            item.name.clone()
+        } else {
+            format!("{prefix}/{}", item.name)
+        };
+        match item.mode {
+            TreeItemMode::Tree => {
+                // Descend into a subtree when it is fully included, sits under a
+                // pathspec, or is an ancestor of one (so we reach matches below).
+                if fully_included || pathspec_descend_tree(&path, pathspecs) {
+                    let child_full = fully_included || pathspec_matches(&path, pathspecs);
+                    collect_tree_objects(item.id, path, child_full, pathspecs, walk)?;
+                }
+            }
+            // Gitlink/submodule pointer: Git omits these from `--objects`, and the
+            // commit object it names is not part of this tree's object closure.
+            TreeItemMode::Commit => {}
+            _ => {
+                if (fully_included || pathspec_matches(&path, pathspecs))
+                    && walk.emitted.insert(item.id)
+                {
+                    walk.out.push(RevListObject {
+                        oid: item.id.to_string(),
+                        path,
+                    });
+                }
+            }
+        }
+    }
+    // Only a fully-included pass guarantees the whole subtree was emitted; a
+    // pathspec-narrowed pass may have skipped siblings, so it must not prune a
+    // later broader visit to the same tree object.
+    if fully_included {
+        walk.fully_walked.insert(tree_id);
+    }
+    Ok(())
+}
+
+/// A path is "under" a pathspec when it equals, or is nested below, one of the
+/// limit paths (a trailing `/` on the pathspec is ignored; `.`/`` match all).
+fn pathspec_matches(path: &str, pathspecs: &[String]) -> bool {
+    pathspecs.iter().any(|spec| {
+        let spec = spec.trim_end_matches('/');
+        spec.is_empty() || spec == "." || path == spec || path.starts_with(&format!("{spec}/"))
+    })
+}
+
+/// A tree should be descended into when it is under a pathspec OR an ancestor of
+/// one (i.e. some pathspec lives inside it), so the walk reaches matches below
+/// while pruning unrelated sibling subtrees.
+fn pathspec_descend_tree(path: &str, pathspecs: &[String]) -> bool {
+    if path.is_empty() {
+        return true; // the root tree is the ancestor of every pathspec
+    }
+    pathspecs.iter().any(|spec| {
+        let spec = spec.trim_end_matches('/');
+        spec.is_empty()
+            || spec == "."
+            || path == spec
+            || path.starts_with(&format!("{spec}/"))
+            || spec.starts_with(&format!("{path}/"))
     })
 }
 

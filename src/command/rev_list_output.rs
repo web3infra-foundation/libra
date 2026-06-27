@@ -28,6 +28,9 @@ EXAMPLES:
     libra rev-list ^main feature    Exclude commits reachable from main
     libra rev-list main..feature    Walk commits reachable from feature, not main
     libra rev-list --boundary main..feature  Also print the excluded boundary commits (- prefix)
+    libra rev-list --objects HEAD   List reachable tree/blob objects after the commits
+    libra rev-list --objects-edge main..feature
+                                    List objects and mark excluded boundary commits as edges (- prefix)
     libra rev-list main...feature   Walk the symmetric difference between two refs
     libra rev-list --merges HEAD    Print only merge commits
     libra rev-list --max-parents 0 HEAD
@@ -80,6 +83,16 @@ fn is_not_boundary(boundary: &bool) -> bool {
     !*boundary
 }
 
+/// A tree or blob object reachable from the printed commits (`--objects`). The
+/// `path` is worktree-relative and empty for a commit's root tree, matching
+/// `git rev-list --objects`, which prints the root tree as `<oid> ` (a trailing
+/// space) and named objects as `<oid> <path>`.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct RevListObject {
+    pub(super) oid: String,
+    pub(super) path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct RevListOutput {
     pub(super) input: String,
@@ -89,6 +102,10 @@ pub(super) struct RevListOutput {
     /// metadata fields as the listed commits when `--parents`/`--timestamp` are set).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) boundary: Vec<RevListEntry>,
+    /// `--objects`: the deduplicated tree/blob objects reachable from the printed
+    /// commits, emitted after the commit (and boundary) lines.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) objects: Vec<RevListObject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) entries: Option<Vec<RevListEntry>>,
     pub(super) total: usize,
@@ -155,7 +172,7 @@ impl RevListOutput {
             .iter()
             .map(|entry| self.format_one(entry))
             .collect();
-        if self.reverse {
+        let mut lines = if self.reverse {
             // Git reverses the COMPLETE stream (listed ++ boundary). `listed` is
             // already reversed upstream, so the reversed full stream is
             // reverse(boundary) followed by the (already reversed) listed commits —
@@ -167,7 +184,16 @@ impl RevListOutput {
             let mut lines = listed;
             lines.extend(boundary);
             lines
-        }
+        };
+        // `--objects` lines follow the commit/boundary stream and are unaffected
+        // by `--reverse` (Git emits the object list after the commits). The root
+        // tree has an empty path and renders as `<oid> ` (trailing space).
+        lines.extend(
+            self.objects
+                .iter()
+                .map(|object| format!("{} {}", object.oid, object.path)),
+        );
+        lines
     }
 }
 

@@ -16,6 +16,12 @@ pub(super) struct RevListSelection {
     pub(super) inputs: Vec<String>,
     pub(super) commits: Vec<Commit>,
     pub(super) sides: HashMap<String, RevListSide>,
+    /// The full reachability closure of the EXPLICITLY excluded tips (`^spec`,
+    /// the start of `A..B`, and the merge base of `A...B`) — i.e. the
+    /// "uninteresting" commits. Used by `--objects` to mark the objects reachable
+    /// from the excluded side so they are not re-emitted. Distinct from commits
+    /// merely omitted by `--max-count`/`--skip`/`--grep`/etc., which are NOT here.
+    pub(super) excluded: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -96,6 +102,7 @@ pub(super) async fn resolve_revision_selection(
         inputs: input_terms,
         commits,
         sides,
+        excluded,
     })
 }
 

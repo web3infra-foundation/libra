@@ -29,6 +29,9 @@ libra rev-list [OPTIONS] [SPEC]
 | `--parents` | 在每个提交后打印父提交 ID。 |
 | `--timestamp` | 在每个提交前打印提交者时间戳，字段顺序与 Git 的 `timestamp commit [parents...]` 一致。 |
 | `--boundary` | 额外打印处于前沿的边界提交——被列出提交的、自身未被列出的父提交（被 `^spec`/范围起点排除，或在 `--max-count`/`--skip` 切割之外），每个以 `-` 前缀。通常置于列出提交之后；在 `--reverse` 下整个输出流被反转，因此边界提交会置于最前。边界提交经同一渲染路径输出，因此 `--parents`/`--children`/`--timestamp` 元数据会保留（两个与 Git 一致的合并细节：`--first-parent --parents` 下未被遍历的第二父边界以裸 `-id` 输出；`--children` 下边界提交的子提交从输出集派生）。`--count` 会把边界提交计入总数。 |
+| `--objects` | 在提交行之后，额外列出从打印的提交可达的、去重后的 tree 与 blob 对象，每个为 `<oid> <path>`。每个提交的根 tree 输出为 `<oid> `（尾随空格、空路径）；子 tree 与 blob 带其工作区相对路径。对象按 pre-order 遍历（先 tree 本身，再按 tree 顺序遍历每个条目，遇到子 tree 立即递归），与 `git rev-list --objects` 一致。对象行始终跟在提交/边界流之后，不受 `--reverse` 重排。从**被排除**提交（如 `A..B` 的 `A` 侧、或 `^rev`）可达的对象被视为 uninteresting 并省略，故范围只列出包含侧新增的对象。`-- <pathspec>` 限定会把遍历裁剪到通往 pathspec 路径上的 tree 以及其下全部内容（根 tree 始终保留）。gitlink/子模块（`160000`）条目被跳过。包含侧的缺失/损坏 tree 是硬错误（`LBR-REPO-002`），不会静默截断列表。`--count --objects` 把对象计入总数，但不能与 `--left-right`/`--cherry-mark`/`--cherry` 同用（对象无 side）。 |
+| `--objects-edge` | 隐含 `--objects`，并额外以 `-` 前缀打印被排除的边界提交（前沿），供 pack 构建器作为 edge 处理。 |
+| `--objects-edge-aggressive` | 作为 `--objects-edge` 的别名接受。Git 的 aggressive 变体会标记更多 edge 提交以构建更薄的 pack；Libra 输出相同的边界前沿（有意收窄）。 |
 | `<SPEC>` | 要从中枚举的修订。默认为 `HEAD`。 |
 
 ## 常用命令
@@ -51,6 +54,8 @@ libra rev-list --parents HEAD
 libra rev-list --timestamp --parents HEAD
 libra rev-list HEAD~1
 libra rev-list refs/remotes/origin/main
+libra rev-list --objects HEAD
+libra rev-list --objects-edge main..feature
 libra --json rev-list HEAD
 ```
 
@@ -69,6 +74,8 @@ def5678901234567890abcdef12345678abc1234
 ```
 
 ## 结构化输出
+
+使用 `--boundary` 时，前沿提交位于单独的 `boundary[]` 数组（为空时省略）。使用 `--objects`（或 `--objects-edge[-aggressive]`）时，可达的 tree/blob 对象位于单独的 `objects[]` 数组（`{ "oid", "path" }`，为空时省略），去重且顺序与人类输出一致；根 tree 的 `"path"` 为空。`--objects-edge[-aggressive]` 还会以 `-` 前缀填充 `boundary[]` 的 edge 提交。
 
 ```json
 {
