@@ -133,7 +133,8 @@ Renaming old.rs to new.rs
 - `--machine` 以紧凑单行 JSON 写入相同 schema
 - 成功时 `stderr` 保持干净
 - dry-run 输出报告计划的移动对，不改变文件系统或索引
-- `-k` 只报告实际计划或移动的来源候选
+- `moves` / `index_updates` 只列出实际计划或移动的来源候选
+- `-k` / `--skip-errors` 增加 `skipped` 数组——每个被丢弃的来源一条 `{ "source", "reason" }`（如缺失或未跟踪的来源）。无跳过时省略该字段。人类模式对跳过保持静默（与 Git `mv -k` 一致），细节仅在 JSON 中体现。
 - `--sparse` 是 no-op，不会增加 `sparse` 字段
 
 示例：
@@ -184,6 +185,38 @@ Dry-run：
     "dry_run": true,
     "forced": false,
     "verbose": false
+  }
+}
+```
+
+被跳过的来源（`-k` / `--skip-errors`）：
+
+```json
+{
+  "ok": true,
+  "command": "mv",
+  "data": {
+    "moves": [
+      {
+        "source": "tracked.rs",
+        "destination": "src/tracked.rs"
+      }
+    ],
+    "index_updates": [
+      {
+        "source": "tracked.rs",
+        "destination": "src/tracked.rs"
+      }
+    ],
+    "dry_run": false,
+    "forced": false,
+    "verbose": false,
+    "skipped": [
+      {
+        "source": "missing.rs",
+        "reason": "bad source, source=missing.rs, destination=src"
+      }
+    ]
   }
 }
 ```

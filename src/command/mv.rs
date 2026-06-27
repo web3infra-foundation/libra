@@ -91,6 +91,17 @@ struct MvOutput {
     dry_run: bool,
     forced: bool,
     verbose: bool,
+    /// Sources skipped under `-k`/`--skip-errors`, with the reason each was
+    /// dropped. Empty (and omitted from JSON) when nothing was skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skipped: Vec<MvSkipped>,
+}
+
+/// A source dropped by `-k`/`--skip-errors`, paired with why it was skipped.
+#[derive(Debug, Serialize)]
+struct MvSkipped {
+    source: String,
+    reason: String,
 }
 
 pub async fn execute(args: MvArgs) {
@@ -153,6 +164,7 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
             return Err(format!("fatal: failed to load index: {err}"));
         }
     };
+    let mut skipped: Vec<MvSkipped> = Vec::new();
     for src in &sources {
         match validate_source_and_collect_moves(
             src,
@@ -164,11 +176,19 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
             Ok(plan) => {
                 if args.skip_errors && plan_targets_existing_planned_destination(&move_plan, &plan)
                 {
+                    skipped.push(MvSkipped {
+                        source: util::path_to_string(&util::to_workdir_path(src)),
+                        reason: "destination is already targeted by an earlier source".to_string(),
+                    });
                     continue;
                 }
                 move_plan.extend(plan);
             }
-            Err(_) if args.skip_errors => {
+            Err(err) if args.skip_errors => {
+                skipped.push(MvSkipped {
+                    source: util::path_to_string(&util::to_workdir_path(src)),
+                    reason: strip_fatal_prefix(&err),
+                });
                 continue;
             }
             Err(err) => {
@@ -189,9 +209,19 @@ async fn execute_inner(args: MvArgs, output: &OutputConfig) -> Result<MvOutput, 
         args.verbose,
         args.dry_run,
         args.force,
+        skipped,
         &mut index,
         output,
     )
+}
+
+/// Strip a leading `fatal: ` from a validation error so the reason reads cleanly
+/// when it is reported as a skipped-source diagnostic rather than a fatal error.
+fn strip_fatal_prefix(message: &str) -> String {
+    message
+        .strip_prefix("fatal: ")
+        .unwrap_or(message)
+        .to_string()
 }
 /// Validates a source path and builds the move plan.
 ///
@@ -438,16 +468,22 @@ fn perform_moves(
     verbose: bool,
     dry_run: bool,
     force: bool,
+    skipped: Vec<MvSkipped>,
     index: &mut Index,
     output: &OutputConfig,
 ) -> Result<MvOutput, String> {
     let mut moved_count = 0usize;
+
+    // `-k`/`--skip-errors` stays silent on stderr in human mode (matching Git's
+    // `mv -k`); the dropped sources are surfaced only via `MvOutput.skipped` in
+    // the structured `--json`/`--machine` output.
     let output_result = MvOutput {
         moves: move_pairs_for_output(&plan.fs_moves),
         index_updates: move_pairs_for_output(&plan.index_updates),
         dry_run,
         forced: force,
         verbose,
+        skipped,
     };
 
     for (src, dst) in &plan.fs_moves {

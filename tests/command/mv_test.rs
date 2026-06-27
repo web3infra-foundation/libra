@@ -924,3 +924,88 @@ fn test_mv_help_lists_examples_banner() {
         );
     }
 }
+
+/// `mv -k --json` records which sources it skipped in a `skipped` array (each
+/// entry pairs the source with the reason), while the valid source still moves.
+/// Human mode stays silent on stderr (matching Git's `mv -k`), which other
+/// tests pin.
+#[test]
+fn test_mv_skip_errors_reports_skipped_sources() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::create_dir(p.join("dest")).expect("create dest dir");
+
+    let json_out = run_libra_command(
+        &["--json", "mv", "-k", "ghost.txt", "tracked.txt", "dest/"],
+        p,
+    );
+    assert_cli_success(&json_out, "mv -k --json should skip the missing source");
+    let json: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("valid JSON");
+    let skipped = &json["data"]["skipped"];
+    assert_eq!(
+        skipped[0]["source"], "ghost.txt",
+        "skipped source recorded: {json}"
+    );
+    assert!(
+        skipped[0]["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "skipped reason is non-empty: {json}"
+    );
+
+    // The valid source still moved.
+    assert!(p.join("dest/tracked.txt").exists(), "valid source moved");
+    assert!(!p.join("tracked.txt").exists(), "original removed");
+}
+
+/// `mv -k --json` records the duplicate-target skip path too: when two sources
+/// would move to the same destination, the later one is reported in `skipped`
+/// with a duplicate-target reason while the first still moves.
+#[test]
+fn test_mv_skip_errors_json_reports_duplicate_target() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::create_dir_all(p.join("a")).unwrap();
+    fs::create_dir_all(p.join("b")).unwrap();
+    fs::create_dir_all(p.join("dest")).unwrap();
+    fs::write(p.join("a/same.txt"), "from-a\n").unwrap();
+    fs::write(p.join("b/same.txt"), "from-b\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "a/same.txt", "b/same.txt"], p),
+        "add duplicate-basename files",
+    );
+
+    let json_out = run_libra_command(
+        &["--json", "mv", "-k", "a/same.txt", "b/same.txt", "dest"],
+        p,
+    );
+    assert_cli_success(&json_out, "mv -k --json duplicate target");
+    let json: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("valid JSON");
+    let skipped = &json["data"]["skipped"];
+    assert_eq!(
+        skipped[0]["source"], "b/same.txt",
+        "the later duplicate-target source is skipped: {json}"
+    );
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("already targeted")),
+        "duplicate-target reason is reported: {json}"
+    );
+    // The first source still moved into dest.
+    assert!(p.join("dest/same.txt").exists(), "first source moved");
+}
+
+/// Without any skips, `mv --json` omits the `skipped` field entirely.
+#[test]
+fn test_mv_json_omits_skipped_when_none() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let json_out = run_libra_command(&["--json", "mv", "tracked.txt", "renamed.txt"], p);
+    assert_cli_success(&json_out, "mv --json rename");
+    let json: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("valid JSON");
+    assert!(
+        json["data"].get("skipped").is_none(),
+        "skipped must be omitted when nothing was skipped: {json}"
+    );
+}

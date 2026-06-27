@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`-k` / `--skip-errors` supported; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state
+- 兼容级别：`partial`。`-k` / `--skip-errors` supported（并在 `--json` 的 `skipped` 数组中报告被丢弃的来源 + 原因；人类模式静默，与 Git 一致）; `--sparse` accepted as a no-op because Libra does not maintain sparse-checkout state
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -14,7 +14,7 @@
 ## 设计方案
 
 - 入口与分发：已公开接入 `src/cli.rs::Commands`；已由 `src/command/mod.rs` 导出。CLI 层在 `src/cli.rs` 把解析后的参数交给命令模块，命令模块负责把领域错误转换为 `CliError` / `CliResult`。
-- 源码分层：主要实现文件为 `src/command/mv.rs`。参数/子命令类型包括：`MvArgs`；输出、错误或状态类型包括：`MvOutput`（模块私有，无可见性修饰符，仅限 `mv` 模块内可见，字段 `moves` / `index_updates` / `dry_run` / `forced` / `verbose`，经 `emit_json_data` 序列化驱动 `--json` 契约；`-k` 只影响哪些候选进入 `moves` / `index_updates`，`--sparse` 不进入 JSON schema），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
+- 源码分层：主要实现文件为 `src/command/mv.rs`。参数/子命令类型包括：`MvArgs`；输出、错误或状态类型包括：`MvOutput`（模块私有，无可见性修饰符，仅限 `mv` 模块内可见，字段 `moves` / `index_updates` / `dry_run` / `forced` / `verbose` / `skipped`（`Vec<MvSkipped{source,reason}>`，`skip_serializing_if = Vec::is_empty`），经 `emit_json_data` 序列化驱动 `--json` 契约；`-k` 决定哪些候选进入 `moves` / `index_updates`，被丢弃的来源进入 `skipped`，`--sparse` 不进入 JSON schema），错误通过 `CliResult` 或上层命令错误统一传播；主要执行函数包括：`execute`、`execute_safe`。
 - 执行路径：`execute_safe` 负责 CLI 安全包装、错误映射和输出配置；索引路径会加载、比较、刷新或保存 `.libra/index`。
 
 - 流程图：以下流程图按当前源码分层展示主路径和底层对象边界，便于维护者把代码入口、执行函数和副作用范围对应起来。
@@ -55,7 +55,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容限制 | Sparse checkout cone 语义 | `--sparse` 已作为 no-op 接受；由于 Libra 尚未维护 sparse-checkout 状态，无法复现 Git 在 cone 外路径上的放宽语义。 |
-| 后续增强 | `-k` skip 诊断输出 | 当前按 Git 行为静默跳过无效来源，并在 JSON 中只返回实际 move plan；如果未来需要 agent 级 skipped 明细，需要新增输出字段并同步 JSON schema 测试。 |
+| ✅ 已实现 | `-k` skip 诊断输出 | `MvOutput.skipped`（`Vec<MvSkipped{source,reason}>`，`skip_serializing_if = Vec::is_empty`）在 `--json`/`--machine` 中报告被丢弃的来源与原因（两类：bad/invalid source、与更早来源目标重复）。人类模式保持静默（与 Git `mv -k` 一致，由 `test_mv_skip_errors_*` 既有测试固定）。带回归测试 `test_mv_skip_errors_reports_skipped_sources`（bad/invalid source）、`test_mv_skip_errors_json_reports_duplicate_target`（duplicate-target）、`test_mv_json_omits_skipped_when_none`（空时省略）。 |
 
 ## 维护要求
 
