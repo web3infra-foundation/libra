@@ -672,7 +672,9 @@ fn test_ls_files_abbrev_shortens_object_name() {
 fn test_ls_files_ignored() {
     // `-i`/`--ignored` lists the ignored set: `-i -o` shows ignored UNTRACKED files
     // (inverse of `-o`), `-i -c` shows tracked files matching an exclude pattern.
-    // `-i` requires `-o`/`-c` plus `--exclude-standard`, matching git.
+    // `-i` requires `-o`/`-c` plus an exclude source — `--exclude-standard` or an
+    // explicit `-x`/`-X` pattern (the latter covered by
+    // `test_ls_files_ignored_with_custom_exclude`) — matching git.
     let repo = create_committed_repo_via_cli();
     let p = repo.path();
     std::fs::write(p.join(".libraignore"), "build/\n*.log\n").unwrap();
@@ -804,5 +806,235 @@ fn modified_and_deleted_short_flags_alias_long_forms() {
         stdout_lines(&d_short).contains(&"delete.txt".to_string()),
         "-d lists the deleted file: {:?}",
         stdout_lines(&d_short)
+    );
+}
+
+/// `-o -x <pattern>` excludes untracked files matching the pattern; `-X <file>`
+/// reads additional patterns from a file (gitignore syntax, comments/blanks
+/// skipped). Both supplement the `--others` listing.
+#[test]
+fn test_ls_files_exclude_pattern_and_file() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("keep.rs"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "keep.rs"], p), "add keep.rs");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("a.log"), "l\n").unwrap();
+    fs::write(p.join("b.log"), "l\n").unwrap();
+    fs::write(p.join("c.dat"), "d\n").unwrap();
+    fs::write(p.join("note.txt"), "n\n").unwrap();
+
+    // -x '*.log' drops the logs from the others listing.
+    let out = run_libra_command(&["ls-files", "-o", "-x", "*.log"], p);
+    assert_cli_success(&out, "ls-files -o -x");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !listed.contains("a.log") && !listed.contains("b.log"),
+        "logs excluded: {listed}"
+    );
+    assert!(
+        listed.contains("c.dat") && listed.contains("note.txt"),
+        "others kept: {listed}"
+    );
+
+    // -X file: combine *.log + *.dat from a file.
+    fs::write(p.join("ex.txt"), "# comment\n\n*.log\n*.dat\n").unwrap();
+    let out = run_libra_command(&["ls-files", "-o", "-X", "ex.txt"], p);
+    assert_cli_success(&out, "ls-files -o -X");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !listed.contains("a.log") && !listed.contains("c.dat"),
+        "file patterns excluded logs and dat: {listed}"
+    );
+    assert!(
+        listed.contains("note.txt"),
+        "unmatched other kept: {listed}"
+    );
+}
+
+/// `-i -o -x <pattern>` lists ONLY the untracked files matching the explicit
+/// pattern (the custom exclude defines the ignored set; `--exclude-standard` is
+/// not required when an explicit pattern is supplied).
+#[test]
+fn test_ls_files_ignored_with_custom_exclude() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("keep.rs"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "keep.rs"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("a.log"), "l\n").unwrap();
+    fs::write(p.join("note.txt"), "n\n").unwrap();
+
+    let out = run_libra_command(&["ls-files", "-i", "-o", "-x", "*.log"], p);
+    assert_cli_success(&out, "ls-files -i -o -x (no --exclude-standard)");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        listed.contains("a.log"),
+        "the matched (ignored) file is listed: {listed}"
+    );
+    assert!(
+        !listed.contains("note.txt"),
+        "non-matching others omitted: {listed}"
+    );
+}
+
+/// A directory exclude pattern (`-x dir/`, or the same via `-X`) excludes every
+/// untracked file beneath the directory (gitignore parent-directory semantics),
+/// not just an entry literally named `dir`.
+#[test]
+fn test_ls_files_exclude_directory_pattern() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("keep.rs"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "keep.rs"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::create_dir_all(p.join("build")).unwrap();
+    fs::write(p.join("build/a.o"), "o\n").unwrap();
+    fs::write(p.join("build/b.o"), "o\n").unwrap();
+    fs::write(p.join("top.txt"), "t\n").unwrap();
+
+    // -x 'build/' drops everything under build/.
+    let out = run_libra_command(&["ls-files", "-o", "-x", "build/"], p);
+    assert_cli_success(&out, "ls-files -o -x build/");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !listed.contains("build/"),
+        "files under build/ excluded: {listed}"
+    );
+    assert!(listed.contains("top.txt"), "sibling kept: {listed}");
+
+    // -i -o -x 'build/' lists ONLY the files under build/.
+    let out = run_libra_command(&["ls-files", "-i", "-o", "-x", "build/"], p);
+    assert_cli_success(&out, "ls-files -i -o -x build/");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        listed.contains("build/a.o") && listed.contains("build/b.o"),
+        "build files listed: {listed}"
+    );
+    assert!(
+        !listed.contains("top.txt"),
+        "non-matching omitted: {listed}"
+    );
+
+    // Same directory pattern via -X file.
+    fs::write(p.join("ex.txt"), "build/\n").unwrap();
+    let out = run_libra_command(&["ls-files", "-o", "-X", "ex.txt"], p);
+    assert_cli_success(&out, "ls-files -o -X (dir pattern)");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !listed.contains("build/a.o"),
+        "dir pattern from file excludes subtree: {listed}"
+    );
+}
+
+/// Git parent-directory dominance: once a directory is excluded, a later
+/// whitelist for a child cannot re-include it. `-x build/ -x !build/keep.txt`
+/// must NOT surface `build/keep.txt`.
+#[test]
+fn test_ls_files_exclude_parent_dominance() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::create_dir_all(p.join("build")).unwrap();
+    fs::write(p.join("build/a.o"), "o\n").unwrap();
+    fs::write(p.join("build/keep.txt"), "k\n").unwrap();
+    fs::write(p.join("top.txt"), "t\n").unwrap();
+
+    let out = run_libra_command(
+        &["ls-files", "-o", "-x", "build/", "-x", "!build/keep.txt"],
+        p,
+    );
+    assert_cli_success(&out, "ls-files -o -x build/ -x !build/keep.txt");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !listed.contains("build/"),
+        "a child cannot be re-included once its parent dir is excluded: {listed}"
+    );
+    assert!(listed.contains("top.txt"), "unrelated other kept: {listed}");
+}
+
+/// Git source precedence: command-line `-x` patterns rank above `-X` files, so a
+/// later inline `-x !pattern` re-includes a file excluded by an `-X` file.
+#[test]
+fn test_ls_files_exclude_inline_overrides_file() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("a.log"), "a\n").unwrap();
+    fs::write(p.join("b.log"), "b\n").unwrap();
+    fs::write(p.join("ex.txt"), "*.log\n").unwrap();
+
+    // -X excludes all *.log; the higher-precedence inline -x re-includes a.log.
+    let out = run_libra_command(&["ls-files", "-o", "-X", "ex.txt", "-x", "!a.log"], p);
+    assert_cli_success(&out, "ls-files -o -X ex -x !a.log");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        listed.contains("a.log"),
+        "inline -x re-includes over -X file: {listed}"
+    );
+    assert!(
+        !listed.contains("b.log"),
+        "other *.log stays excluded: {listed}"
+    );
+}
+
+/// Git cross-source precedence: command-line `-x` outranks `.libraignore`, so an
+/// inline negation re-includes a file the standard excludes would drop.
+#[test]
+fn test_ls_files_exclude_inline_overrides_standard() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+    fs::write(p.join("tracked.txt"), "x\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "tracked.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join(".libraignore"), "*.log\n").unwrap();
+    fs::write(p.join("a.log"), "a\n").unwrap();
+    fs::write(p.join("b.log"), "b\n").unwrap();
+
+    // .libraignore excludes *.log; the higher-precedence -x negation re-includes a.log.
+    let out = run_libra_command(&["ls-files", "-o", "--exclude-standard", "-x", "!a.log"], p);
+    assert_cli_success(&out, "ls-files -o --exclude-standard -x !a.log");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        listed.contains("a.log"),
+        "inline -x negation overrides .libraignore: {listed}"
+    );
+    assert!(
+        !listed.contains("b.log"),
+        "other *.log stays excluded by .libraignore: {listed}"
     );
 }

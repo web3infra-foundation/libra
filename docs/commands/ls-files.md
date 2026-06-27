@@ -27,7 +27,7 @@ always prints repo-root-relative paths).
 Pathspecs are resolved from the caller's current working directory, not forced
 to the repository root. Exact-file and directory-prefix filtering are both
 supported; pathspecs that resolve outside the repository are rejected. The
-explicit exclude-source flags (`-x` / `--exclude-from`), resolve-undo, and
+resolve-undo and
 sparse-checkout integration remain deferred.
 
 ## Options
@@ -45,8 +45,10 @@ sparse-checkout integration remain deferred.
 | `--full-name` | Accepted for Git compatibility. Libra always prints repo-root-relative paths (the `git --full-name` form), so this is a no-op. |
 | `--others`, `-o` | Show untracked working-tree files. |
 | `--cached`, `-c` | Show files staged in the index. |
-| `-i`, `--ignored` | Show only the ignored set: `-i -o` lists ignored untracked files (the inverse of `-o`), `-i -c` lists tracked files matching an exclude pattern. Must be combined with `-o`/`-c` and requires `--exclude-standard` (exit 128 otherwise), matching Git. |
+| `-i`, `--ignored` | Show only the ignored set: `-i -o` lists ignored untracked files (the inverse of `-o`), `-i -c` lists tracked files matching an exclude pattern. Must be combined with `-o`/`-c` and needs an exclude source — `--exclude-standard` or an explicit `-x`/`-X` pattern (exit 128 otherwise), matching Git. |
 | `--exclude-standard` | With `--others`, honor `.libraignore` rules. |
+| `-x`, `--exclude <pattern>` | Skip untracked files matching `<pattern>` (gitignore syntax) from the `--others` listing. Repeatable; supplements `--exclude-standard`. With `-i` the pattern instead defines the ignored set. |
+| `-X`, `--exclude-from <file>` | Read additional exclude patterns from `<file>` (one per line; `#` comments and blank lines skipped) and apply them like `-x`. Repeatable. |
 | `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
 | `-z` | Emit NUL-delimited text records instead of newline-delimited output. Text mode only; rejects `--json` / `--machine`. |
 | `<pathspec>...` | Limit output to an exact file or directory prefix. Pathspecs resolve from the current working directory. |
@@ -61,6 +63,8 @@ libra ls-files --modified
 libra ls-files --deleted
 libra ls-files --others
 libra ls-files --others --exclude-standard
+libra ls-files -o -x '*.log'              # untracked files except *.log
+libra ls-files -o -X .extra-excludes      # read extra exclude patterns from a file
 libra ls-files -i -o --exclude-standard   # only the ignored untracked files
 libra ls-files tracked-dir
 libra ls-files --others --exclude-standard others-dir
@@ -136,6 +140,8 @@ entries use `null` for fields that do not apply:
 | Untracked files | `--others` | `--others` | Use status/file commands |
 | Ignore-aware untracked | `--others --exclude-standard` | Same | Different model |
 | Ignored files only | `-i -o --exclude-standard` | Same (`-i -c` for tracked) | Different model |
+| Explicit exclude pattern | `-x` / `--exclude <pattern>` | `-x` / `--exclude` | Different model |
+| Explicit exclude file | `-X` / `--exclude-from <file>` | `-X` / `--exclude-from` | Different model |
 | Pathspec filters | `<pathspec>...` | Supported | Different model |
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
 | NUL output | `-z` (text mode only) | `-z` | Different model |

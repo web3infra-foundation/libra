@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::utils::{
     error::{CliError, CliResult, StableErrorCode},
-    ignore::{self, IgnorePolicy},
+    ignore,
     output::{OutputConfig, emit_json_data},
     path, util,
 };
@@ -28,6 +28,8 @@ EXAMPLES:
     libra ls-files --stage              Include stage information (for conflicts)
     libra ls-files --others             Show untracked files
     libra ls-files --exclude-standard   Exclude files matching .libraignore
+    libra ls-files -o -x '*.log'        Show untracked files except ones matching a pattern
+    libra ls-files -o -X .gitignore-extra  Read extra exclude patterns from a file
     libra ls-files -i -o --exclude-standard  List only the ignored untracked files
     libra ls-files tracked-dir          Limit output to a pathspec
     libra ls-files --error-unmatch src  Fail if a pathspec matches nothing
@@ -62,13 +64,24 @@ pub struct LsFilesArgs {
 
     /// Show only ignored files (the inverse of the usual listing). Must be combined
     /// with `--others` (ignored untracked files) and/or `--cached` (tracked files
-    /// that match an exclude pattern), and requires `--exclude-standard`.
+    /// that match an exclude pattern), and needs an exclude source —
+    /// `--exclude-standard` or an explicit `-x`/`-X` pattern.
     #[clap(long = "ignored", short = 'i')]
     pub ignored: bool,
 
     /// Exclude files matching .libraignore patterns
     #[clap(long)]
     pub exclude_standard: bool,
+
+    /// Skip untracked files matching `<pattern>` (gitignore syntax) in the
+    /// `--others` listing. Repeatable; supplements `--exclude-standard`.
+    #[clap(long = "exclude", short = 'x', value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+
+    /// Read additional exclude patterns from `<file>` (one per line, `#`
+    /// comments and blank lines ignored) and apply them like `-x`. Repeatable.
+    #[clap(long = "exclude-from", short = 'X', value_name = "FILE")]
+    pub exclude_from: Vec<String>,
 
     /// Exit with an error when any pathspec matches no files
     #[clap(long)]
@@ -147,8 +160,32 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
+    // Explicit `-x <pattern>` / `-X <file>` exclude sources (gitignore syntax),
+    // compiled once into an in-memory matcher. They supplement `--exclude-standard`
+    // for the `--others` listing and count toward the `-i` ignored set.
+    let exclude_patterns = collect_ls_files_exclude_patterns(_args)?;
+    let custom_excludes =
+        util::build_exclude_matcher(&workdir, &exclude_patterns).map_err(|e| {
+            CliError::command_usage(e).with_stable_code(StableErrorCode::CliInvalidArguments)
+        })?;
+    // Whether a path is excluded, with Git source precedence: the explicit
+    // `-x`/`-X` matcher (higher precedence) decides first — an explicit negation
+    // (`Some(false)`) re-includes the path even if `.libraignore` would exclude
+    // it; only when no custom pattern matches (`None`) do the standard
+    // `--exclude-standard` rules apply.
+    let is_excluded = |abs: &Path| {
+        let custom = custom_excludes
+            .as_ref()
+            .and_then(|m| util::exclude_matcher_verdict(m, &workdir, abs, abs.is_dir()));
+        match custom {
+            Some(verdict) => verdict,
+            None => _args.exclude_standard && ignore::path_matches_ignore_pattern(abs, &workdir),
+        }
+    };
+
     // `-i`/`--ignored` flips the listing to the ignored set. Like Git, it must be
-    // paired with `-o`/`-c` and needs an exclude source (`--exclude-standard`).
+    // paired with `-o`/`-c` and needs an exclude source (`--exclude-standard` or
+    // an explicit `-x`/`-X` pattern).
     if _args.ignored {
         if !_args.others && !_args.cached {
             return Err(CliError::fatal(
@@ -157,7 +194,7 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             .with_exit_code(128)
             .with_stable_code(StableErrorCode::CliInvalidArguments));
         }
-        if !_args.exclude_standard {
+        if !_args.exclude_standard && exclude_patterns.is_empty() {
             return Err(CliError::fatal(
                 "ls-files --ignored needs some exclude pattern".to_string(),
             )
@@ -196,8 +233,9 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             for entry in index.tracked_entries(*stage) {
                 let worktree_path = workdir.join(&entry.name);
                 // `-i`: among cached entries, list only those matching an exclude
-                // pattern (a tracked file that would otherwise be ignored).
-                if _args.ignored && !ignore::path_matches_ignore_pattern(&worktree_path, &workdir) {
+                // pattern — `.libraignore` (under `--exclude-standard`) or an
+                // explicit `-x`/`-X` pattern (a tracked file that would be ignored).
+                if _args.ignored && !is_excluded(&worktree_path) {
                     continue;
                 }
                 let exists = worktree_path.exists();
@@ -239,26 +277,37 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
             .into_iter()
             .map(|entry| entry.name.clone())
             .collect();
-        let all_files = if _args.ignored || !_args.exclude_standard {
-            util::list_workdir_files_unfiltered()
-        } else {
+        // When only the standard exclude is in play (no explicit `-x`/`-X` and not
+        // `-i`), the standard-filtered listing is enough. Otherwise list every
+        // untracked file and decide per-file below so custom patterns and the
+        // ignored set are honored uniformly.
+        let needs_per_file = _args.ignored || custom_excludes.is_some();
+        let all_files = if !needs_per_file && _args.exclude_standard {
             util::list_workdir_files()
+        } else {
+            util::list_workdir_files_unfiltered()
         }
         .map_err(|source| {
             CliError::fatal(format!("failed to list working tree files: {source}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
-        // `-i -o`: keep only the IGNORED untracked files (`OnlyIgnored` also drops
-        // tracked entries, so the tracked-skip below becomes a no-op for them).
-        let files = if _args.ignored {
-            ignore::filter_workdir_paths(all_files, IgnorePolicy::OnlyIgnored, &index)
-        } else {
-            all_files
-        };
 
-        for file in files {
+        for file in all_files {
             let display = file.to_string_lossy().replace('\\', "/");
             if tracked.contains(&display) {
+                continue;
+            }
+            let abs = workdir.join(&file);
+            // An untracked file is "excluded" per Git source precedence: explicit
+            // `-x`/`-X` first, then `.libraignore` under `--exclude-standard`.
+            let excluded = is_excluded(&abs);
+            if _args.ignored {
+                // `-i -o`: list ONLY the excluded (ignored) untracked files.
+                if !excluded {
+                    continue;
+                }
+            } else if excluded {
+                // Normal `-o`: drop excluded untracked files.
                 continue;
             }
             entries.push(FileEntry {
@@ -278,6 +327,33 @@ fn run_ls_files(_args: &LsFilesArgs) -> CliResult<Vec<FileEntry>> {
 
     entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.stage.cmp(&b.stage)));
     Ok(entries)
+}
+
+/// Collect the explicit exclude patterns for `-x`/`-X` in Git's precedence order.
+/// Later patterns win (gitignore last-match-wins), and Git ranks command-line
+/// `--exclude` (`-x`) above `--exclude-from` (`-X`) files, so the `-X` file lines
+/// (in file then line order) are collected FIRST and the inline `-x` patterns
+/// LAST. Blank and `#`-comment lines in `-X` files are skipped (gitignore file
+/// semantics).
+fn collect_ls_files_exclude_patterns(args: &LsFilesArgs) -> CliResult<Vec<String>> {
+    let mut patterns: Vec<String> = Vec::new();
+    for file in &args.exclude_from {
+        let contents = fs::read_to_string(file).map_err(|source| {
+            CliError::fatal(format!("failed to read exclude file '{file}': {source}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("check the --exclude-from path")
+        })?;
+        for line in contents.lines() {
+            let trimmed = line.trim_end_matches('\r');
+            if trimmed.is_empty() || trimmed.trim_start().starts_with('#') {
+                continue;
+            }
+            patterns.push(trimmed.to_string());
+        }
+    }
+    // Command-line `-x` patterns rank above `-X` files, so they go last (wins).
+    patterns.extend(args.exclude.iter().cloned());
+    Ok(patterns)
 }
 
 fn resolve_ls_files_pathspecs(

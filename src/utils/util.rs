@@ -15,7 +15,10 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, types::ObjectType},
 };
-use ignore::{Match, WalkBuilder, gitignore::Gitignore};
+use ignore::{
+    Match, WalkBuilder,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use path_absolutize::*;
@@ -1153,6 +1156,64 @@ fn cached_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
         },
     );
     matcher
+}
+
+/// Build an in-memory gitignore matcher from explicit exclude patterns supplied
+/// on the command line (e.g. `ls-files -x <pattern>` / `-X <file>`), rooted at
+/// `work_dir`. Returns `None` when there are no patterns, so callers can skip the
+/// match entirely. Pattern syntax matches `.libraignore` (the same engine).
+pub fn build_exclude_matcher(
+    work_dir: &Path,
+    patterns: &[String],
+) -> Result<Option<Gitignore>, String> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GitignoreBuilder::new(work_dir);
+    for pattern in patterns {
+        builder
+            .add_line(None, pattern)
+            .map_err(|error| format!("invalid exclude pattern '{pattern}': {error}"))?;
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|error| format!("failed to compile exclude patterns: {error}"))
+}
+
+/// Three-state verdict of an explicit-exclude matcher built by
+/// [`build_exclude_matcher`] for `abs_path` (under `work_dir`). `Some(true)`
+/// means excluded; `Some(false)` means explicitly re-included by a negation (a
+/// higher-precedence source — the caller should let this override lower-priority
+/// excludes such as `.libraignore`); `None` means no explicit pattern matched
+/// (defer to the standard excludes).
+///
+/// Honors Git's parent-directory dominance: once an ancestor directory is
+/// excluded, the path is excluded regardless of a child negation (e.g. the pair
+/// `build/` and `!build/keep.txt` still excludes `build/keep.txt`). Ancestors
+/// are walked top-down; the first ancestor whose last-matching rule is `Ignore`
+/// excludes everything beneath it.
+pub fn exclude_matcher_verdict(
+    matcher: &Gitignore,
+    work_dir: &Path,
+    abs_path: &Path,
+    is_dir: bool,
+) -> Option<bool> {
+    if let Ok(rel) = abs_path.strip_prefix(work_dir) {
+        let comps: Vec<_> = rel.components().collect();
+        let mut cur = work_dir.to_path_buf();
+        for comp in comps.iter().take(comps.len().saturating_sub(1)) {
+            cur.push(comp.as_os_str());
+            if matches!(matcher.matched(&cur, true), Match::Ignore(_)) {
+                return Some(true);
+            }
+        }
+    }
+    match matcher.matched(abs_path, is_dir) {
+        Match::Ignore(_) => Some(true),
+        Match::Whitelist(_) => Some(false),
+        Match::None => None,
+    }
 }
 
 fn load_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
