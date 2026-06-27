@@ -1,6 +1,6 @@
 //! Implements `for-each-ref` to enumerate refs with filtering and formatting.
 
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, io::IsTerminal, str::FromStr};
 
 use clap::Parser;
 use git_internal::{
@@ -36,6 +36,7 @@ EXAMPLES:
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
     libra for-each-ref --format='%(refname:short) %(committerdate:relative)'  Date in a chosen format (iso/short/unix/relative/...)
+    libra --color=always for-each-ref --format='%(color:green)%(refname:short)%(color:reset)'  Colorize output with ANSI escapes
     libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
     libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
     libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
@@ -1070,12 +1071,44 @@ fn render_output(
     }
 
     let quote = resolve_quote_style(args);
+    // `%(color:…)` atoms emit ANSI only when color is enabled: forced on by
+    // `--color=always`, off by `--color=never`/NO_COLOR, and tty-gated under the
+    // `auto` default (mirroring Git's `want_color()`).
+    let color_enabled = match output.color {
+        crate::utils::output::ColorChoice::Always => true,
+        crate::utils::output::ColorChoice::Never => false,
+        crate::utils::output::ColorChoice::Auto => std::io::stdout().is_terminal(),
+    };
     for entry in entries {
         if let Some(format) = &args.format {
-            println!(
-                "{}",
-                render_format(format, entry, head_refname, upstreams, pushes, quote)?
-            );
+            // Tracks (per row) whether the last emitted `%(color:…)` atom left
+            // color active — Git's `need_color_reset_at_eol`. It is driven by the
+            // color atoms during rendering, not by scanning the output, so a
+            // literal CSI such as `\x1b[K` in the format text never confuses it.
+            let need_color_reset = std::cell::Cell::new(false);
+            let mut line = render_format(
+                format,
+                entry,
+                head_refname,
+                upstreams,
+                pushes,
+                color_enabled,
+                &need_color_reset,
+                quote,
+            )?;
+            // Git appends a trailing `GIT_COLOR_RESET` (`\x1b[m`) when the row
+            // leaves color active, so color never bleeds into the next row or the
+            // caller's prompt. Under `--shell`/etc. it is a separate quoted field.
+            if color_enabled && need_color_reset.get() {
+                // Git appends the reset adjacent to the last field (no separating
+                // space) — under `--shell`/etc. it is a second quoted literal
+                // butted against the previous one (e.g. `'…''\x1b[m'`).
+                match quote {
+                    Some(style) => line.push_str(&quote_value("\x1b[m", style)),
+                    None => line.push_str("\x1b[m"),
+                }
+            }
+            println!("{line}");
         } else if let Some(style) = quote {
             // The default format is the two fields `<objectname> <refname>`; each
             // is quoted independently, the separating space is literal.
@@ -1091,12 +1124,15 @@ fn render_output(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_format(
     format: &str,
     entry: &RefEntry,
     head_refname: Option<&str>,
     upstreams: &HashMap<String, String>,
     pushes: &HashMap<String, String>,
+    color_enabled: bool,
+    need_color_reset: &std::cell::Cell<bool>,
     quote: Option<QuoteStyle>,
 ) -> CliResult<String> {
     // `:short` modifiers: the short ref name (namespace prefix stripped) and the
@@ -1230,7 +1266,15 @@ fn render_format(
         ("objecttype", entry.objecttype.as_str()),
     ];
     let date_ctx = DateAtomContext::from_fields(&fields);
-    render_fragment(format, &atoms, entry, &date_ctx, quote)
+    render_fragment(
+        format,
+        &atoms,
+        entry,
+        &date_ctx,
+        color_enabled,
+        need_color_reset,
+        quote,
+    )
 }
 
 /// Column position for a `%(align)` block.
@@ -1250,6 +1294,8 @@ fn render_fragment(
     atoms: &[(&str, &str)],
     entry: &RefEntry,
     date_ctx: &DateAtomContext,
+    color_enabled: bool,
+    need_color_reset: &std::cell::Cell<bool>,
     quote: Option<QuoteStyle>,
 ) -> CliResult<String> {
     let mut out = String::with_capacity(fragment.len());
@@ -1278,7 +1324,15 @@ fn render_fragment(
             // This matches Git, where under `--shell`/`--perl`/`--python`/`--tcl`
             // only the topmost align block is quoted as a single string literal —
             // nested align blocks and block literals do not quote separately.
-            let inner = render_fragment(&body[..end_start], atoms, entry, date_ctx, None)?;
+            let inner = render_fragment(
+                &body[..end_start],
+                atoms,
+                entry,
+                date_ctx,
+                color_enabled,
+                need_color_reset,
+                None,
+            )?;
             let padded = pad_aligned(&inner, width, position);
             push_field(&mut out, &padded, quote);
             rest = &body[after_end..];
@@ -1310,13 +1364,29 @@ fn render_fragment(
             };
             // The condition renders raw (it is tested, not emitted); the chosen
             // branch renders at the active quote level like any other output.
-            let cond_value = render_fragment(condition, atoms, entry, date_ctx, None)?;
+            let cond_value = render_fragment(
+                condition,
+                atoms,
+                entry,
+                date_ctx,
+                color_enabled,
+                need_color_reset,
+                None,
+            )?;
             let chosen = if eval_if_condition(cond_spec, &cond_value)? {
                 then_branch
             } else {
                 else_branch
             };
-            out.push_str(&render_fragment(chosen, atoms, entry, date_ctx, quote)?);
+            out.push_str(&render_fragment(
+                chosen,
+                atoms,
+                entry,
+                date_ctx,
+                color_enabled,
+                need_color_reset,
+                quote,
+            )?);
             rest = &body[after_end..];
             continue;
         }
@@ -1350,6 +1420,20 @@ fn render_fragment(
                 quote,
             );
         } else if let Some(value) = date_atom_value(token, date_ctx) {
+            push_field(&mut out, &value, quote);
+        } else if let Some(spec) = token.strip_prefix("color:") {
+            // Validate the spec regardless of color state (a bad `%(color:…)` is a
+            // format error even when output is not colored, matching Git). The
+            // resolved value (the escape when color is enabled, else empty) goes
+            // through `push_field` so the active `--shell`/etc. quoting still
+            // applies to the color atom, like Git.
+            let escape = color_spec_to_ansi(spec)?;
+            if color_enabled {
+                // Git's rule: the trailing reset is needed unless the last color
+                // atom was itself the bare reset (`GIT_COLOR_RESET` = `\x1b[m`).
+                need_color_reset.set(escape != "\x1b[m");
+            }
+            let value = if color_enabled { escape } else { String::new() };
             push_field(&mut out, &value, quote);
         } else {
             match atoms.iter().find(|(name, _)| *name == token) {
@@ -1697,6 +1781,156 @@ fn date_atom_value(token: &str, ctx: &DateAtomContext) -> Option<String> {
     )
 }
 
+/// Translate a `%(color:<spec>)` spec into the ANSI SGR escape it requests
+/// (`\x1b[<codes>m`). The spec is a space-separated list of colors and
+/// attributes, mirroring Git's color syntax: the first color word is the
+/// foreground, the second is the background. Returns an empty string for a spec
+/// that requests no codes (e.g. `normal`), and a usage error for an
+/// unrecognized word (matching Git, which rejects bad color names).
+fn color_spec_to_ansi(spec: &str) -> CliResult<String> {
+    // Git parses the words then serializes in a fixed order — reset, then
+    // attributes (ascending code), then foreground, then background — regardless
+    // of input order, so e.g. `red reset` resets THEN reapplies red.
+    let mut reset = false;
+    let mut attrs: Vec<u32> = Vec::new();
+    let mut fg: Option<String> = None;
+    let mut bg: Option<String> = None;
+    let mut color_slot: u32 = 0; // 0 = next color is foreground, 1 = background
+    for word in spec.split_whitespace() {
+        if word == "reset" {
+            reset = true;
+            continue;
+        }
+        if let Some(code) = attr_code(word) {
+            attrs.push(code);
+            continue;
+        }
+        // Otherwise it is a color word (or invalid). Git allows at most two
+        // colors (foreground then background); a third is a spec error.
+        if color_slot >= 2 {
+            return Err(
+                CliError::command_usage(format!("too many colors in color spec '{spec}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments),
+            );
+        }
+        // `normal` yields no code but still consumes a color slot.
+        let code = color_word_code(word, color_slot)?;
+        if color_slot == 0 {
+            fg = code;
+        } else {
+            bg = code;
+        }
+        color_slot += 1;
+    }
+
+    attrs.sort_unstable();
+    attrs.dedup();
+    let has_other = !attrs.is_empty() || fg.is_some() || bg.is_some();
+    // A bare `reset` is Git's `GIT_COLOR_RESET` — `\x1b[m` (empty params), not
+    // `\x1b[0m`. Combined with other codes it contributes a leading `0`.
+    if reset && !has_other {
+        return Ok("\x1b[m".to_string());
+    }
+    let mut codes: Vec<String> = Vec::new();
+    if reset {
+        codes.push("0".to_string());
+    }
+    codes.extend(attrs.into_iter().map(|c| c.to_string()));
+    codes.extend(fg);
+    codes.extend(bg);
+    if codes.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("\x1b[{}m", codes.join(";")))
+}
+
+/// Map an attribute word to its SGR code, accepting both the compact (`nobold`)
+/// and hyphenated (`no-bold`) negation forms Git supports. Returns `None` when
+/// the word is not an attribute (so the caller treats it as a color word).
+/// `reset` is handled by the caller (it has special ordering).
+fn attr_code(word: &str) -> Option<u32> {
+    // (positive code, "off" code) for each attribute.
+    let positive = |w: &str| -> Option<(u32, u32)> {
+        match w {
+            "bold" => Some((1, 22)),
+            "dim" => Some((2, 22)),
+            "italic" => Some((3, 23)),
+            "ul" | "underline" => Some((4, 24)),
+            "blink" => Some((5, 25)),
+            "reverse" => Some((7, 27)),
+            "strike" => Some((9, 29)),
+            _ => None,
+        }
+    };
+    if let Some((on, _)) = positive(word) {
+        return Some(on);
+    }
+    // Negated attribute: `no-bold` (hyphenated) or `nobold` (compact). Try the
+    // hyphenated form first so `no-...` is not mis-stripped by the `no` prefix.
+    let base = word
+        .strip_prefix("no-")
+        .or_else(|| word.strip_prefix("no"))?;
+    positive(base).map(|(_, off)| off)
+}
+
+/// Resolve a single color word to its SGR code for the given slot (0 =
+/// foreground, ≥1 = background). `normal` resolves to `None` (no code). Supports
+/// the 8 basic names, their `bright<name>` variants, `default`, 256-color
+/// indices (0–255), and `#rrggbb` truecolor. Errors on anything else.
+fn color_word_code(word: &str, slot: u32) -> CliResult<Option<String>> {
+    let is_bg = slot >= 1;
+    const NAMES: [&str; 8] = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ];
+    if word == "normal" {
+        return Ok(None);
+    }
+    if word == "default" {
+        return Ok(Some(if is_bg { "49" } else { "39" }.to_string()));
+    }
+    if let Some(idx) = NAMES.iter().position(|&n| n == word) {
+        let base = if is_bg { 40 } else { 30 };
+        return Ok(Some((base + idx as u32).to_string()));
+    }
+    if let Some(rest) = word.strip_prefix("bright")
+        && let Some(idx) = NAMES.iter().position(|&n| n == rest)
+    {
+        let base = if is_bg { 100 } else { 90 };
+        return Ok(Some((base + idx as u32).to_string()));
+    }
+    if let Ok(n) = word.parse::<u32>()
+        && n <= 255
+    {
+        // Git maps 0–7 to the basic ANSI colors and 8–15 to the bright variants;
+        // only 16–255 use the `38/48;5;n` 256-color form.
+        let code = if n <= 7 {
+            (if is_bg { 40 } else { 30 }) + n
+        } else if n <= 15 {
+            (if is_bg { 100 } else { 90 }) + (n - 8)
+        } else {
+            return Ok(Some(format!("{};5;{n}", if is_bg { 48 } else { 38 })));
+        };
+        return Ok(Some(code.to_string()));
+    }
+    if let Some(hex) = word.strip_prefix('#')
+        && hex.len() == 6
+        && let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        )
+    {
+        return Ok(Some(format!(
+            "{};2;{r};{g};{b}",
+            if is_bg { 48 } else { 38 }
+        )));
+    }
+    Err(
+        CliError::command_usage(format!("unrecognized color '{word}'"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments),
+    )
+}
+
 /// Format a timestamp for a for-each-ref date atom. Reuses the shared
 /// `format_timestamp_with` for the deterministic formats it supports —
 /// `default`, `short`, `iso`/`iso8601`, `iso-strict`/`iso8601-strict`,
@@ -1870,5 +2104,65 @@ mod relative_date_tests {
     #[test]
     fn relative_date_future_is_guarded() {
         assert_eq!(relative_date_at(1000, 2000), "in the future");
+    }
+}
+
+#[cfg(test)]
+mod color_spec_tests {
+    use super::color_spec_to_ansi;
+
+    #[test]
+    fn basic_colors_and_attributes() {
+        assert_eq!(color_spec_to_ansi("red").unwrap(), "\x1b[31m");
+        assert_eq!(color_spec_to_ansi("reset").unwrap(), "\x1b[m"); // git GIT_COLOR_RESET
+        // First color is fg, second is bg; attributes can lead.
+        assert_eq!(
+            color_spec_to_ansi("bold green blue").unwrap(),
+            "\x1b[1;32;44m"
+        );
+        assert_eq!(color_spec_to_ansi("brightred").unwrap(), "\x1b[91m");
+        assert_eq!(color_spec_to_ansi("ul").unwrap(), "\x1b[4m");
+    }
+
+    #[test]
+    fn extended_colors() {
+        // 0-7 are basic, 8-15 bright, 16-255 the 256-color form (git numeric map).
+        assert_eq!(color_spec_to_ansi("1").unwrap(), "\x1b[31m");
+        assert_eq!(color_spec_to_ansi("9").unwrap(), "\x1b[91m");
+        assert_eq!(color_spec_to_ansi("214").unwrap(), "\x1b[38;5;214m");
+        assert_eq!(
+            color_spec_to_ansi("#ff8800").unwrap(),
+            "\x1b[38;2;255;136;0m"
+        );
+        // 256-color as background (second color slot).
+        assert_eq!(color_spec_to_ansi("red 240").unwrap(), "\x1b[31;48;5;240m");
+    }
+
+    #[test]
+    fn serialization_order_is_git_faithful() {
+        // Output order is always reset, attrs (ascending), fg, bg — regardless of
+        // input order — so `red reset` resets THEN reapplies red.
+        assert_eq!(color_spec_to_ansi("red reset").unwrap(), "\x1b[0;31m");
+        assert_eq!(color_spec_to_ansi("red bold").unwrap(), "\x1b[1;31m");
+        assert_eq!(color_spec_to_ansi("bold red").unwrap(), "\x1b[1;31m");
+    }
+
+    #[test]
+    fn negated_attributes_compact_and_hyphenated() {
+        // Both `nobold` and `no-bold` map to the off code (22); same for others.
+        assert_eq!(color_spec_to_ansi("no-bold").unwrap(), "\x1b[22m");
+        assert_eq!(color_spec_to_ansi("nobold").unwrap(), "\x1b[22m");
+        assert_eq!(color_spec_to_ansi("no-ul").unwrap(), "\x1b[24m");
+        assert_eq!(color_spec_to_ansi("noreverse").unwrap(), "\x1b[27m");
+    }
+
+    #[test]
+    fn normal_yields_no_code_and_bad_color_errors() {
+        assert_eq!(color_spec_to_ansi("normal").unwrap(), "");
+        assert!(color_spec_to_ansi("bogus").is_err());
+        assert!(color_spec_to_ansi("256").is_err()); // out of 0..=255 range
+        // At most two colors (fg, bg); a third is a spec error.
+        assert!(color_spec_to_ansi("red green blue").is_err());
+        assert_eq!(color_spec_to_ansi("red green").unwrap(), "\x1b[31;42m");
     }
 }

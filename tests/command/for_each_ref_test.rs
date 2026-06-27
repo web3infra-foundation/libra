@@ -2268,3 +2268,115 @@ fn test_for_each_ref_date_format_modifiers() {
     ]);
     assert!(rel.ends_with("ago"), "relative date ends with 'ago': {rel}");
 }
+
+/// `%(color:<spec>)` emits ANSI escapes when color is enabled (`--color=always`),
+/// nothing when disabled (`--color=never`), and rejects an unrecognized color.
+#[test]
+#[serial]
+fn test_for_each_ref_color_atom() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+
+    // --color=always emits the escape (red … reset).
+    let always = run(&[
+        "--color=always",
+        "for-each-ref",
+        "--format=%(color:red)%(refname:short)%(color:reset)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&always, "for-each-ref %(color) --color=always");
+    let out = String::from_utf8(always.stdout).unwrap();
+    assert_eq!(
+        out.trim_end(),
+        "\u{1b}[31mmain\u{1b}[m",
+        "ANSI red + git reset (ESC[m) emitted: {out:?}"
+    );
+
+    // --color=never strips color: just the ref name.
+    let never = run(&[
+        "--color=never",
+        "for-each-ref",
+        "--format=%(color:red)%(refname:short)%(color:reset)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&never, "for-each-ref %(color) --color=never");
+    assert_eq!(
+        String::from_utf8(never.stdout).unwrap().trim_end(),
+        "main",
+        "no escapes under --color=never"
+    );
+
+    // An unrecognized color is a format error even when color is off.
+    let bad = run(&[
+        "--color=never",
+        "for-each-ref",
+        "--format=%(color:bogus)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        !bad.status.success(),
+        "bad color spec is rejected: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // A third color is rejected (git allows at most foreground + background).
+    let too_many = run(&[
+        "for-each-ref",
+        "--format=%(color:red green blue)",
+        "refs/heads/main",
+    ]);
+    assert!(!too_many.status.success(), "a third color is rejected");
+
+    // A row that leaves color active gets a trailing git reset (ESC[m) appended,
+    // so color never bleeds past the record; an explicit trailing reset is not
+    // doubled.
+    let trailing = run(&[
+        "--color=always",
+        "for-each-ref",
+        "--format=%(color:red)X",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&trailing, "for-each-ref trailing-reset");
+    assert_eq!(
+        String::from_utf8(trailing.stdout).unwrap().trim_end(),
+        "\u{1b}[31mX\u{1b}[m",
+        "trailing git reset appended when color left active"
+    );
+
+    // Under `--shell`, the color atom is still quoted like any field, and the
+    // appended trailing reset is a separate quoted field (a lone `%(color:red)`
+    // leaves color active).
+    let shell_on = run(&[
+        "--color=always",
+        "for-each-ref",
+        "--shell",
+        "--format=%(color:red)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&shell_on, "for-each-ref --shell %(color) --color=always");
+    assert_eq!(
+        String::from_utf8(shell_on.stdout).unwrap().trim_end(),
+        "\'\u{1b}[31m\'\'\u{1b}[m\'",
+        "shell mode quotes the color escape and the adjacent (no-space) trailing reset"
+    );
+    let shell_off = run(&[
+        "--color=never",
+        "for-each-ref",
+        "--shell",
+        "--format=%(color:red)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&shell_off, "for-each-ref --shell %(color) --color=never");
+    assert_eq!(
+        String::from_utf8(shell_off.stdout).unwrap().trim_end(),
+        "\'\'",
+        "shell mode quotes an empty color field when color is off (no trailing reset)"
+    );
+}
