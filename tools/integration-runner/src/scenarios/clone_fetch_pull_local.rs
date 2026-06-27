@@ -78,6 +78,13 @@ pub(crate) fn scenario_clone_fetch_pull_local(ctx: &mut ScenarioCtx<'_>) -> Resu
             missing_ref.status.code()
         );
     }
+    // `--symref` against a local *Git* remote (this fixture is a `git init`
+    // repo, served via `git-upload-pack`, which advertises
+    // `symref=HEAD:refs/heads/main`): the `ref:` line for HEAD must appear above
+    // HEAD's own OID line. (Local *Libra* repos advertise no `symref=`
+    // capability and print no `ref:` line — covered by ls_remote unit tests.)
+    let symref = ctx.command(&["ls-remote", "--symref", &remote], ctx.run_dir.clone(), true)?;
+    assert_stdout_contains(&symref, "ref: refs/heads/main\tHEAD")?;
     let json_ls_remote = ctx.command(
         &["--json", "ls-remote", "--heads", &remote, "main"],
         ctx.run_dir.clone(),

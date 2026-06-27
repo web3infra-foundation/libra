@@ -29,6 +29,7 @@ libra ls-remote --refs origin
 libra ls-remote --get-url origin
 libra ls-remote --sort=version:refname --tags origin
 libra ls-remote --exit-code origin main
+libra ls-remote --symref origin  # local Git remote (git-upload-pack) advertises symref=HEAD → prints `ref: refs/heads/main\tHEAD` above HEAD's OID line
 ! libra ls-remote --exit-code origin no-match  # exit 2, silent
 ! libra remote set-branches origin main
 ! libra remote set-head origin main

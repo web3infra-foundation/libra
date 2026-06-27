@@ -5,13 +5,13 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use super::{
-    LsRemoteArgs, LsRemoteError,
+    LsRemoteArgs, LsRemoteEntry, LsRemoteError, LsRemoteOutput, LsRemoteSymref,
     ls_remote_filter::{CompiledPattern, include_reference},
     ls_remote_redaction::{
         sanitize_discovery_error, sanitize_remote_error_reason, visible_remote_display,
         visible_remote_url,
     },
-    resolve_remote,
+    parse_symrefs, resolve_output_symrefs, resolve_remote, write_ref_lines,
 };
 use crate::{
     internal::protocol::DiscRef,
@@ -61,6 +61,7 @@ fn args_with_filters(heads: bool, tags: bool, refs: bool) -> LsRemoteArgs {
         get_url: false,
         exit_code: false,
         sort: None,
+        symref: false,
         repository: "origin".to_string(),
         patterns: vec![],
     }
@@ -217,4 +218,148 @@ fn discovery_error_redacts_url_credentials_in_source() {
     assert!(!sanitized.contains("user"));
     assert!(!sanitized.contains("secret"));
     assert!(sanitized.contains("https://example.invalid/repo.git"));
+}
+
+#[test]
+fn parse_symrefs_extracts_from_to_pairs() {
+    let caps = vec![
+        "multi_ack".to_string(),
+        "symref=HEAD:refs/heads/main".to_string(),
+        "symref=refs/remotes/origin/HEAD:refs/remotes/origin/main".to_string(),
+        "agent=git/2.40".to_string(),
+    ];
+    let symrefs = parse_symrefs(&caps);
+    assert_eq!(symrefs.len(), 2, "two well-formed symref capabilities");
+    assert_eq!(symrefs[0].name, "HEAD");
+    assert_eq!(symrefs[0].target, "refs/heads/main");
+    assert_eq!(symrefs[1].name, "refs/remotes/origin/HEAD");
+    assert_eq!(symrefs[1].target, "refs/remotes/origin/main");
+}
+
+#[test]
+fn parse_symrefs_ignores_malformed_and_non_symref_capabilities() {
+    let caps = vec![
+        "thin-pack".to_string(),
+        "symref=HEAD".to_string(),             // no `:` body
+        "symref=:refs/heads/main".to_string(), // empty name
+        "symref=HEAD:".to_string(),            // empty target
+        "ofs-delta".to_string(),
+    ];
+    assert!(
+        parse_symrefs(&caps).is_empty(),
+        "malformed and non-symref capabilities yield no symrefs"
+    );
+}
+
+fn entry(hash: &str, refname: &str) -> LsRemoteEntry {
+    LsRemoteEntry {
+        hash: hash.to_string(),
+        refname: refname.to_string(),
+    }
+}
+
+fn output_with(entries: Vec<LsRemoteEntry>, symrefs: Vec<LsRemoteSymref>) -> LsRemoteOutput {
+    LsRemoteOutput {
+        remote: "origin".to_string(),
+        url: "https://example.com/repo.git".to_string(),
+        heads_only: false,
+        tags_only: false,
+        refs_only: false,
+        get_url: false,
+        exit_code: false,
+        sort: None,
+        patterns: vec![],
+        entries,
+        symrefs,
+    }
+}
+
+#[test]
+fn resolve_output_symrefs_keeps_only_present_names() {
+    let caps = vec!["symref=HEAD:refs/heads/main".to_string()];
+    let entries = vec![
+        entry("a".repeat(40).as_str(), "HEAD"),
+        entry("a".repeat(40).as_str(), "refs/heads/main"),
+    ];
+    let symrefs = resolve_output_symrefs(&caps, &entries, true);
+    assert_eq!(symrefs.len(), 1);
+    assert_eq!(symrefs[0].name, "HEAD");
+    assert_eq!(symrefs[0].target, "refs/heads/main");
+}
+
+#[test]
+fn resolve_output_symrefs_drops_filtered_out_names() {
+    // HEAD advertised but excluded from the entries (e.g. `--heads`): no symref.
+    let caps = vec!["symref=HEAD:refs/heads/main".to_string()];
+    let entries = vec![entry("b".repeat(40).as_str(), "refs/heads/main")];
+    assert!(resolve_output_symrefs(&caps, &entries, true).is_empty());
+}
+
+#[test]
+fn resolve_output_symrefs_empty_when_not_requested_or_no_capability() {
+    let entries = vec![entry("c".repeat(40).as_str(), "HEAD")];
+    // Not requested.
+    assert!(
+        resolve_output_symrefs(
+            &["symref=HEAD:refs/heads/main".to_string()],
+            &entries,
+            false
+        )
+        .is_empty()
+    );
+    // Requested but the remote advertised no `symref=` capability (e.g. a local
+    // Libra repo; local Git repos via git-upload-pack do advertise it).
+    assert!(resolve_output_symrefs(&[], &entries, true).is_empty());
+}
+
+#[test]
+fn write_ref_lines_emits_ref_line_before_matching_oid() {
+    let oid = "d".repeat(40);
+    let data = output_with(
+        vec![
+            entry(&oid, "HEAD"),
+            entry(&oid, "refs/heads/main"),
+            entry(&"e".repeat(40), "refs/tags/v1"),
+        ],
+        vec![LsRemoteSymref {
+            name: "HEAD".to_string(),
+            target: "refs/heads/main".to_string(),
+        }],
+    );
+    let mut buf: Vec<u8> = Vec::new();
+    write_ref_lines(&mut buf, &data).unwrap();
+    let text = String::from_utf8(buf).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "ref: refs/heads/main\tHEAD\n{oid}\tHEAD\n{oid}\trefs/heads/main\n{}\trefs/tags/v1\n",
+            "e".repeat(40)
+        ),
+        "ref: line precedes only the HEAD oid line, in order"
+    );
+}
+
+#[test]
+fn ls_remote_output_json_omits_empty_symrefs_and_includes_populated() {
+    // Empty symrefs => field omitted (skip_serializing_if).
+    let empty = output_with(vec![entry(&"f".repeat(40), "refs/heads/main")], vec![]);
+    let value = serde_json::to_value(&empty).unwrap();
+    assert!(
+        value.as_object().unwrap().get("symrefs").is_none(),
+        "empty symrefs must be omitted from JSON"
+    );
+
+    // Populated symrefs => present with name/target.
+    let populated = output_with(
+        vec![entry(&"f".repeat(40), "HEAD")],
+        vec![LsRemoteSymref {
+            name: "HEAD".to_string(),
+            target: "refs/heads/main".to_string(),
+        }],
+    );
+    let value = serde_json::to_value(&populated).unwrap();
+    assert_eq!(
+        value["symrefs"],
+        serde_json::json!([{"name": "HEAD", "target": "refs/heads/main"}]),
+    );
 }

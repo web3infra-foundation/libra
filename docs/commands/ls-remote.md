@@ -18,6 +18,7 @@ libra ls-remote [OPTIONS] <repository> [patterns...]
 | `--get-url` | Resolve and print the configured URL without contacting the remote | `libra ls-remote --get-url origin` |
 | `--exit-code` | Exit with status 2 when discovery succeeds but no refs match | `libra ls-remote --exit-code origin main` |
 | `--sort <KEY>` | Sort refs by `refname`, `-refname`, `version:refname`, or `-version:refname` | `libra ls-remote --sort=version:refname --tags origin` |
+| `--symref` | Print symbolic-ref targets advertised by the remote (e.g. `ref: refs/heads/main\tHEAD`) above the matching ref | `libra ls-remote --symref origin` |
 | `patterns...` | Match full ref names or trailing path components; `*` and `?` follow Git-style glob behavior and can match `/` | `libra ls-remote origin main 'refs/heads/*'` |
 
 ## Human Output
@@ -81,6 +82,9 @@ libra ls-remote --get-url origin
 # Sort tags with version-aware refname ordering
 libra ls-remote --sort=version:refname --tags origin
 
+# Show symbolic-ref targets (HEAD) advertised by the remote
+libra ls-remote --symref origin
+
 # Structured JSON envelope for agents, tags only
 libra --json ls-remote --tags origin
 ```
@@ -96,3 +100,4 @@ see `docs/development/commands/_general.md` item B).
 - `--heads` and `--tags` can be combined to show both branch and tag refs while excluding `HEAD`.
 - `--get-url` exits before protocol discovery and prints the same redacted URL form used by remote diagnostics.
 - `--exit-code` is a silent script signal: no matches returns status 2 without rendering an error.
+- `--symref` prints a `ref: <target>\t<name>` line above a symbolic ref's own OID line, sourced from the remote's advertised `symref=` capabilities (typically `HEAD`). It is reported only for symrefs whose name survives the active filters. Git remotes and local Git repositories (served via `git-upload-pack`) advertise `symref=HEAD:…`, so HEAD's target is printed. Local **Libra** repositories advertise no `symref=` capability, so no `ref:` line is printed for them — Libra never synthesizes a symref from a local `HEAD` (an intentional difference from Git); the JSON envelope then omits the `symrefs` array.

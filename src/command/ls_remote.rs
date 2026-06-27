@@ -39,6 +39,7 @@ EXAMPLES:
     libra ls-remote --get-url origin                Resolve a remote URL without contacting it
     libra ls-remote --heads origin main             List only branch heads matching `main`
     libra ls-remote --exit-code origin main         Exit 2 when no refs match
+    libra ls-remote --symref origin                 Show symbolic-ref targets (e.g. HEAD)
     libra --json ls-remote --tags origin            Structured JSON output for agents (tags only)";
 
 #[derive(Parser, Debug)]
@@ -68,6 +69,11 @@ pub struct LsRemoteArgs {
     #[clap(long, value_name = "KEY")]
     pub sort: Option<String>,
 
+    /// Show the targets of symbolic refs advertised by the remote (e.g.
+    /// `ref: refs/heads/main\tHEAD`)
+    #[clap(long)]
+    pub symref: bool,
+
     /// Remote name, URL, or local repository path
     pub repository: String,
 
@@ -79,6 +85,14 @@ pub struct LsRemoteArgs {
 struct LsRemoteEntry {
     hash: String,
     refname: String,
+}
+
+/// A symbolic ref advertised by the remote: `name` (e.g. `HEAD`) points at
+/// `target` (e.g. `refs/heads/main`).
+#[derive(Debug, Clone, Serialize)]
+struct LsRemoteSymref {
+    name: String,
+    target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +107,54 @@ struct LsRemoteOutput {
     sort: Option<String>,
     patterns: Vec<String>,
     entries: Vec<LsRemoteEntry>,
+    /// Symbolic-ref targets, populated only with `--symref`. Empty for local
+    /// Libra repositories and any transport that does not advertise `symref=`
+    /// capabilities (local Git repositories, served via `git-upload-pack`, do
+    /// advertise them and are populated).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    symrefs: Vec<LsRemoteSymref>,
+}
+
+/// Parse `symref=<from>:<to>` capability tokens advertised by `git-upload-pack`
+/// into `(name, target)` pairs (e.g. `symref=HEAD:refs/heads/main` →
+/// `("HEAD", "refs/heads/main")`). Capabilities without a `symref=` prefix or a
+/// well-formed `from:to` body are ignored.
+fn parse_symrefs(capabilities: &[String]) -> Vec<LsRemoteSymref> {
+    capabilities
+        .iter()
+        .filter_map(|cap| {
+            let body = cap.strip_prefix("symref=")?;
+            let (name, target) = body.split_once(':')?;
+            if name.is_empty() || target.is_empty() {
+                return None;
+            }
+            Some(LsRemoteSymref {
+                name: name.to_string(),
+                target: target.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Resolve the symbolic refs to surface for `--symref`: parse the remote's
+/// advertised `symref=` capabilities (e.g. `symref=HEAD:refs/heads/main`) and
+/// keep only those whose `name` survives the active ref filters. Returns empty
+/// when `--symref` was not requested, or for local Libra repositories /
+/// transports that advertise no `symref=` capability (local Git repositories
+/// served via `git-upload-pack` do advertise it). Libra reads symrefs from the
+/// wire only — it never synthesizes them from a local `HEAD`.
+fn resolve_output_symrefs(
+    capabilities: &[String],
+    entries: &[LsRemoteEntry],
+    want: bool,
+) -> Vec<LsRemoteSymref> {
+    if !want {
+        return Vec::new();
+    }
+    parse_symrefs(capabilities)
+        .into_iter()
+        .filter(|symref| entries.iter().any(|entry| entry.refname == symref.name))
+        .collect()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -163,6 +225,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
             sort: args.sort,
             patterns: args.patterns,
             entries: Vec::new(),
+            symrefs: Vec::new(),
         });
     }
 
@@ -191,6 +254,8 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         .collect();
     sort_entries(&mut entries, args.sort.as_deref())?;
 
+    let symrefs = resolve_output_symrefs(&discovery.capabilities, &entries, args.symref);
+
     Ok(LsRemoteOutput {
         remote: visible_remote,
         url: visible_remote_url(&remote_url),
@@ -202,6 +267,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         sort: args.sort,
         patterns: args.patterns,
         entries,
+        symrefs,
     })
 }
 
@@ -250,11 +316,21 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        for entry in &data.entries {
-            writeln!(writer, "{}\t{}", entry.hash, entry.refname).map_err(|error| {
-                CliError::io(format!("failed to write ls-remote output: {error}"))
-            })?;
-        }
-        Ok(())
+        write_ref_lines(&mut writer, data)
+            .map_err(|error| CliError::io(format!("failed to write ls-remote output: {error}")))
     }
+}
+
+/// Write the human-readable `<oid>\t<name>` ref lines, emitting a
+/// `ref: <target>\t<name>` line immediately before a symref's own OID line
+/// (matching `git ls-remote --symref`). Generic over the writer so the exact
+/// line layout — including symref placement — is unit-testable.
+fn write_ref_lines<W: Write>(writer: &mut W, data: &LsRemoteOutput) -> std::io::Result<()> {
+    for entry in &data.entries {
+        if let Some(symref) = data.symrefs.iter().find(|s| s.name == entry.refname) {
+            writeln!(writer, "ref: {}\t{}", symref.target, symref.name)?;
+        }
+        writeln!(writer, "{}\t{}", entry.hash, entry.refname)?;
+    }
+    Ok(())
 }
