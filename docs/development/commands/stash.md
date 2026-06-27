@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`），`push` 支持 `-u` / `--include-untracked`（`--no-include-untracked` 经 clap `overrides_with` 撤销，最后出现者生效；默认排除未跟踪故单独为 no-op）、`-a` / `--all` 与 `-k` / `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），同时把 patch 级差异（`-p` / `--patch`）以及 create/store 等 plumbing 子命令延后（详见“还未实现的功能”）。
+`libra stash` 的目标是临时保存脏工作区并支持恢复、查看、删除和基于 stash 建分支。实现需要覆盖 push/pop/list/apply/drop/show/branch/clear，其中 `show` 提供文件级摘要（`--name-only` / `--name-status`）以及 patch 级差异（`-p` / `--patch`，复用 `log::generate_diff` 输出统一 diff），`push` 支持 `-u` / `--include-untracked`（`--no-include-untracked` 经 clap `overrides_with` 撤销，最后出现者生效；默认排除未跟踪故单独为 no-op）、`-a` / `--all` 与 `-k` / `--keep-index`（纳入的未跟踪/忽略文件存于第三个 stash parent，并由 `apply` / `pop` 恢复），create/store 等 plumbing 子命令仍延后（详见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
@@ -36,8 +36,8 @@ flowchart TD
 ## 实现历史
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
-- 2026-06-06 `99ac8a43`（`feat(stash): add 'stash show -p/--patch' unified diff`）：该提交曾为 `stash show` 引入 `-p` / `--patch` 统一 diff，但该能力已不在当前 HEAD —— `Stash::Show` 枚举只剩 `stash` / `--name-only` / `--name-status`，`run_show` 也只产出文件级摘要，未保留任何 patch 字段（与“还未实现的功能”表一致）。
-- 2026-06-12 `57dc1cf8`（`feat(p0-rejection): add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash`）：该提交的标题列出 stash，但当前 HEAD 的 `Stash` 枚举与 `src/command/stash.rs` 中并不存在任何 `-p` / `--patch` 拒绝逻辑（既无 clap 标志，也无运行期守卫）——就 stash 而言该节点并未扩展可用参数或行为。
+- 2026-06-06 `99ac8a43`（`feat(stash): add 'stash show -p/--patch' unified diff`）：该提交曾为 `stash show` 引入 `-p` / `--patch` 统一 diff；该能力一度从 HEAD 回退，现已重新实现 —— `Stash::Show` 新增 `patch: bool`，`run_show` 在 `-p` 下复用 `log::generate_diff(&stash_commit, …)`（stash commit 的第一父即 base，故等价于 `git stash show -p`），`StashOutput::Show` 增加加项 `patch: Option<String>`（`skip_serializing_if = "Option::is_none"`，无 `-p` 时 JSON 不含该字段）。与“还未实现的功能”表“✅ 已实现”一致。
+- 2026-06-12 `57dc1cf8`（`feat(p0-rejection): add -p/--patch flag rejection across add, commit, checkout, restore, reset, rebase, stash`）：该提交标题列出 stash，但 stash 从未引入过 `-p` / `--patch` 的*拒绝*逻辑——对 stash 而言它是 no-op。注意这与上面重新实现的 `stash show -p`（统一 diff 显示，非拒绝）无关：当前 HEAD 的 `Stash::Show` 已带 `patch: bool` clap 标志，`-p` 是受支持的 patch 显示参数，而非被拒绝的交互式 patch 模式。
 - 2026-06-07 `e6fd7f11`（`feat(stash): support untracked and keep-index push`）：功能演进：为 `stash push` 引入 `-u` / `--include-untracked`、`-a` / `--all` 与 `--keep-index`。该提交的内容曾被一次纠缠的 reconcile 误删，于 2026-06-18 针对已分叉的代码重新落地：`Stash::Push` 现含 `include_untracked` / `all` / `keep_index` 字段，纳入的未跟踪/忽略文件写入第三个 stash parent，由 `apply` / `pop` 恢复，`--keep-index` 在 push 后把工作区还原到索引状态。
 - 2026-05-31 `30f17a99`（`fix(stash): protect branch from dirty worktree`）：实现修正：protect branch from dirty worktree；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 2026-05-21 `242c6072`（`test(stash): pin StashError stable_code mapping (v0.17.705)`）：测试契约：pin StashError stable_code mapping (v0.17.705)；相关行为已有回归守卫，后续变更需要继续满足。
@@ -47,8 +47,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/stash.md`。
-- Synopsis：`libra stash (push [-m <message>] | pop [<stash>] | list | apply [<stash>] | drop [<stash>] | show [<stash>] [--name-only | --name-status] | branch <branch> [<stash>] | clear [--force])`。
-- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [--no-include-untracked] [-a, --all] [-k, --keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
+- Synopsis：`libra stash (push [-m <message>] | pop [<stash>] | list | apply [<stash>] | drop [<stash>] | show [<stash>] [-p | --patch] [--name-only | --name-status] | branch <branch> [<stash>] | clear [--force])`。
+- 公开参数/子命令包括：`push [-m, --message <MESSAGE>] [-u, --include-untracked] [--no-include-untracked] [-a, --all] [-k, --keep-index]`、`pop [<stash>]`、`list`、`apply [<stash>]`、`drop [<stash>]`、`show [<stash>] [-p, --patch] [--name-only] [--name-status]`、`branch <branch> [<stash>]`、`clear [--force]`。
 
 
 ## 还未实现的功能
@@ -56,7 +56,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 兼容矩阵说明 | `push` / `pop` / `list` / `apply` / `drop` / `show` / `branch` / `clear` 支持；`push` 支持 `-m`、`-u` / `--include-untracked`、`-a` / `--all`、`-k` / `--keep-index`；`create` / `store` 延后 (see [docs/development/commands/_compatibility.md#d8-stash-create](docs/development/commands/_compatibility.md#d8-stash-create) and [#d9-stash-store](docs/development/commands/_compatibility.md#d9-stash-store)) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
-| 兼容差异项 | Patch 级差异 (stash show) | 原始对照：不支持；相关参数/替代：-p / --patch；当前说明：`stash show` 仅产出文件级摘要（`--name-only` / `--name-status`），不输出统一 diff。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | Patch 级差异 (stash show) | `stash show -p` / `--patch` 复用 `log::generate_diff(&stash_commit, …)`（stash commit 第一父即 base，等价于 `git stash show -p`）输出统一 diff；人类格式仅打印 diff（无摘要脚注），JSON 加项 `patch`（无 `-p` 时省略，向后兼容）。带集成测试 `test_stash_show_patch_emits_unified_diff`。 |
 | 兼容差异项 | Pathspec (部分支持 stash) | 原始对照：不支持；相关参数/替代：-- <pathspec>...；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | Plumbing create/store | 原始对照：不支持 (延后 — see compatibility/declined.md D8/D9)；相关参数/替代：stash create / stash store；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 

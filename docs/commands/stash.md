@@ -10,7 +10,7 @@ libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
 libra stash drop [<stash>]
-libra stash show [<stash>] [--name-only | --name-status]
+libra stash show [<stash>] [-p | --patch] [--name-only | --name-status]
 libra stash branch <branch> [<stash>]
 libra stash clear [--force]
 ```
@@ -111,10 +111,11 @@ Show the file-level changes recorded in a stash entry.
 | Argument / Flag | Description |
 |-----------------|-------------|
 | `<stash>` | Stash reference, e.g. `stash@{1}`. Defaults to `stash@{0}`. |
+| `-p` / `--patch` | Show the stashed changes as a unified diff (patch) instead of the file-level summary. |
 | `--name-only` | Show only the changed file names, one per line. |
 | `--name-status` | Show file names prefixed with the status code (`A` / `M` / `D`). |
 
-`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set.
+`--name-only` and `--name-status` are mutually exclusive in human render mode; the JSON envelope always carries the full `files` list with status, regardless of which hint is set. With `-p`/`--patch`, the human output is the unified diff (no summary footer) and the JSON envelope adds a `patch` field (absent otherwise).
 
 ```bash
 # File-level summary of stash@{0}
@@ -122,6 +123,9 @@ libra stash show
 
 # Inspect a specific stash entry
 libra stash show stash@{1}
+
+# Show the stashed changes as a unified diff
+libra stash show -p
 
 # File names only
 libra stash show --name-only
@@ -399,7 +403,8 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |
 | List | `stash list` | `stash list [<log-options>]` | N/A |
-| Show file-level summary | `stash show [<stash>] [--name-only \| --name-status]` | `stash show [-p] [<stash>]` | N/A |
+| Show file-level summary | `stash show [<stash>] [--name-only \| --name-status]` | `stash show [<stash>]` | N/A |
+| Show stash as a patch | `stash show -p \| --patch [<stash>]` | `stash show -p [<stash>]` | N/A |
 | Create branch from stash | `stash branch <branch> [<stash>]` | `stash branch <branch> [<stash>]` | N/A |
 | Clear all stashes | `stash clear [--force]` | `stash clear` | N/A |
 | Plumbing create/store | Not supported (deferred — see compatibility/declined.md D8/D9) | `stash create` / `stash store` | N/A |

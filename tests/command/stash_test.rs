@@ -940,6 +940,60 @@ fn test_stash_show_reports_modified_file() {
     );
 }
 
+/// `stash show -p` emits a git-style unified diff of the stashed changes (and
+/// the `--json` envelope carries the diff in an additive `patch` field), while a
+/// plain `stash show` omits the `patch` field entirely.
+#[test]
+fn test_stash_show_patch_emits_unified_diff() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "first line\nsecond line\n")
+        .expect("failed to modify tracked file");
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before show -p",
+    );
+
+    // Human `-p`: a unified diff with the git header + hunk for the change.
+    let human = run_libra_command(&["stash", "show", "-p"], repo.path());
+    assert_cli_success(&human, "stash show -p");
+    let patch = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        patch.contains("diff --git a/tracked.txt b/tracked.txt"),
+        "expected a git diff header: {patch}"
+    );
+    assert!(patch.contains("@@"), "expected a hunk header: {patch}");
+    assert!(
+        patch.contains("+first line"),
+        "expected the added line in the diff: {patch}"
+    );
+    // `-p` replaces the file-level summary footer.
+    assert!(
+        !patch.contains("files changed,"),
+        "`-p` should not print the summary footer: {patch}"
+    );
+
+    // JSON `-p`: the `patch` field is present and holds the same diff.
+    let json_out = run_libra_command(&["--json", "stash", "show", "-p"], repo.path());
+    assert_cli_success(&json_out, "stash show -p --json");
+    let json = parse_json_stdout(&json_out);
+    assert_eq!(json["data"]["action"], "show");
+    assert!(
+        json["data"]["patch"]
+            .as_str()
+            .is_some_and(|p| p.contains("diff --git")),
+        "JSON patch field should hold the unified diff"
+    );
+
+    // Without `-p`, the additive `patch` field is absent (back-compatible).
+    let plain = run_libra_command(&["--json", "stash", "show"], repo.path());
+    assert_cli_success(&plain, "stash show --json");
+    assert!(
+        parse_json_stdout(&plain)["data"].get("patch").is_none(),
+        "plain stash show must not include the patch field"
+    );
+}
+
 /// `stash show --name-only` in human mode prints only the file path,
 /// without the "files changed" footer.
 #[test]

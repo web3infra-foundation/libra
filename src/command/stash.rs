@@ -30,7 +30,7 @@ use serde::Serialize;
 use crate::{
     cli::Stash,
     command::{
-        load_object,
+        load_object, log,
         reset::{
             rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
             restore_working_directory_from_tree,
@@ -199,6 +199,11 @@ pub enum StashOutput {
         stash_id: String,
         files: Vec<StashFileChange>,
         files_changed: StashFilesChangedStats,
+        /// Unified diff of the stashed changes, present only with `-p`/`--patch`
+        /// (additive; omitted from JSON otherwise so existing consumers are
+        /// unaffected).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patch: Option<String>,
         // Human-render hints. Skipped in JSON because the structured output
         // always carries the full file list with status.
         #[serde(skip)]
@@ -256,6 +261,7 @@ EXAMPLES:
     libra stash push --keep-index     Keep staged changes in place
     libra stash list                  Show all stash entries
     libra stash show                  File-level summary of stash@{0}
+    libra stash show -p               Show the stashed changes as a unified diff
     libra stash show stash@{1}        Inspect a specific stash entry
     libra stash branch hotfix         Branch off the latest stash and drop it
     libra stash apply                 Re-apply stash@{0} without dropping
@@ -307,7 +313,8 @@ async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutpu
             stash,
             name_only,
             name_status,
-        } => run_show(stash, name_only, name_status).await,
+            patch,
+        } => run_show(stash, name_only, name_status, patch).await,
         Stash::Branch { branch, stash } => run_branch(branch, stash).await,
         Stash::Clear { force } => run_clear(force, output).await,
     }
@@ -543,6 +550,7 @@ async fn run_show(
     stash: Option<String>,
     name_only: bool,
     name_status: bool,
+    patch: bool,
 ) -> Result<StashOutput, StashError> {
     let (index, stash_id_str) = resolve_stash_to_commit_hash(stash)?;
     let git_dir =
@@ -615,11 +623,28 @@ async fn run_show(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     stats.total = files.len();
 
+    // `-p`/`--patch`: the stashed changes as a unified diff. A stash commit's
+    // first parent IS the base it was created against, so `log::generate_diff`
+    // (which diffs a commit against its first parent — the same git-faithful
+    // engine `log`/`show`/`format-patch` use) yields exactly the stash diff.
+    let patch_text = if patch {
+        Some(
+            log::generate_diff(&stash_commit, Vec::new())
+                .await
+                .map_err(|e| {
+                    StashError::ReadObject(format!("failed to generate stash diff: {e}"))
+                })?,
+        )
+    } else {
+        None
+    };
+
     Ok(StashOutput::Show {
         stash: format!("stash@{{{index}}}"),
         stash_id: stash_id_str,
         files,
         files_changed: stats,
+        patch: patch_text,
         name_only,
         name_status,
     })
@@ -762,11 +787,16 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
             stash,
             files,
             files_changed,
+            patch,
             name_only,
             name_status,
             ..
         } => {
-            if *name_only {
+            if let Some(patch) = patch {
+                // `-p`/`--patch`: emit the unified diff only (no file summary),
+                // matching `git stash show -p`.
+                print!("{patch}");
+            } else if *name_only {
                 for change in files {
                     println!("{}", change.path);
                 }

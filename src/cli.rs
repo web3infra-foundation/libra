@@ -518,7 +518,9 @@ pub enum Stash {
         #[arg(help = "The stash to drop")]
         stash: Option<String>,
     },
-    #[command(about = "Show the changes recorded in the stash as a file-level summary")]
+    #[command(
+        about = "Show the changes recorded in the stash as a file-level summary or a unified diff (-p)"
+    )]
     Show {
         #[arg(help = "Stash reference (default: stash@{0})")]
         stash: Option<String>,
@@ -526,6 +528,12 @@ pub enum Stash {
         name_only: bool,
         #[arg(long, help = "Show only file names with their status code")]
         name_status: bool,
+        #[arg(
+            short = 'p',
+            long = "patch",
+            help = "Show the stashed changes as a unified diff (patch)"
+        )]
+        patch: bool,
     },
     #[command(about = "Create and check out a new branch from the stash, then drop it")]
     Branch {

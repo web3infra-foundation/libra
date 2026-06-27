@@ -10,7 +10,7 @@ libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
 libra stash drop [<stash>]
-libra stash show [<stash>] [--name-only | --name-status]
+libra stash show [<stash>] [-p | --patch] [--name-only | --name-status]
 libra stash branch <branch> [<stash>]
 libra stash clear [--force]
 ```
@@ -111,10 +111,11 @@ libra stash drop stash@{1}
 | 参数 / 标志 | 说明 |
 |-------------|------|
 | `<stash>` | Stash 引用，例如 `stash@{1}`。默认是 `stash@{0}`。 |
+| `-p` / `--patch` | 以统一 diff（patch）形式显示 stash 的改动，取代文件级摘要。 |
 | `--name-only` | 只显示已更改文件名，每行一个。 |
 | `--name-status` | 显示带状态码前缀的文件名（`A` / `M` / `D`）。 |
 
-`--name-only` 和 `--name-status` 在人工渲染模式下互斥；无论设置哪个提示，JSON 信封始终携带包含状态的完整 `files` 列表。
+`--name-only` 和 `--name-status` 在人工渲染模式下互斥；无论设置哪个提示，JSON 信封始终携带包含状态的完整 `files` 列表。使用 `-p` / `--patch` 时，人类输出为统一 diff（无摘要脚注），JSON 信封增加 `patch` 字段（否则不含）。
 
 ```bash
 # stash@{0} 的文件级摘要
@@ -122,6 +123,9 @@ libra stash show
 
 # 查看指定 stash 条目
 libra stash show stash@{1}
+
+# 以统一 diff 显示 stash 改动
+libra stash show -p
 
 # 只显示文件名
 libra stash show --name-only
@@ -399,7 +403,8 @@ Libra 保留 Git 的 `stash@{N}` 引用语法以保持熟悉度。从 Git 迁移
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |
 | List | `stash list` | `stash list [<log-options>]` | N/A |
-| 显示文件级摘要 | `stash show [<stash>] [--name-only \| --name-status]` | `stash show [-p] [<stash>]` | N/A |
+| 显示文件级摘要 | `stash show [<stash>] [--name-only \| --name-status]` | `stash show [<stash>]` | N/A |
+| 以 patch 显示 stash | `stash show -p \| --patch [<stash>]` | `stash show -p [<stash>]` | N/A |
 | 从 stash 创建分支 | `stash branch <branch> [<stash>]` | `stash branch <branch> [<stash>]` | N/A |
 | 清空所有 stash | `stash clear [--force]` | `stash clear` | N/A |
 | Plumbing create/store | 不支持（已推迟，见 compatibility/declined.md D8/D9） | `stash create` / `stash store` | N/A |
