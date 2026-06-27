@@ -27,6 +27,8 @@ EXAMPLES:
     libra tag v1.0                        Create a lightweight tag at HEAD
     libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
     libra tag -F notes.txt v1.1           Annotated tag with message from a file (- for stdin)
+    libra tag -e v1.1                     Compose the annotated-tag message in an editor
+    libra tag -e -m \"draft\" v1.1          Open the editor pre-filled with a message to edit
     libra tag -l -n 2                     List tags with up to 2 annotation lines
     libra tag -d v1.0                     Delete a tag
     libra tag --points-at HEAD            List tags pointing at HEAD's commit
@@ -57,6 +59,14 @@ pub struct TagArgs {
     /// Like `-m`, providing it creates an annotated tag.
     #[clap(short = 'F', long = "file", conflicts_with = "message")]
     pub file: Option<String>,
+
+    /// Open an editor to compose or edit the annotated-tag message. With `-m`/
+    /// `-F` the editor is pre-filled with that message for further editing;
+    /// without them it composes a new message. Because Libra has no separate
+    /// `-a`, `-e` is the editor-driven way to create an annotated tag — an empty
+    /// message after stripping comments aborts the tag.
+    #[clap(short = 'e', long = "edit")]
+    pub edit: bool,
 
     /// Replace an existing tag with the same name instead of failing
     #[clap(short, long, group = "action")]
@@ -103,8 +113,9 @@ pub struct TagArgs {
     #[clap(long = "no-column", overrides_with = "column")]
     pub no_column: bool,
 
-    /// Create a vault-PGP-signed annotated tag (requires a message via `-m`,
-    /// since Libra does not open an editor for the tag body).
+    /// Create a vault-PGP-signed annotated tag. Requires a message via `-m`
+    /// (`requires = "message"`); `-e`/`--edit` can further edit that `-m` body
+    /// before signing, but `-s` does not accept `-F` or an editor-only message.
     #[clap(
         short = 's',
         long = "sign",
@@ -183,7 +194,9 @@ pub(crate) fn validate_cli_args(args: &TagArgs) -> CliResult<()> {
 /// delete, verify, or any list filter so an invalid invocation is a usage
 /// error rather than silently ignoring the message (or performing a delete).
 fn validate_message_source_create_only(args: &TagArgs) -> Result<(), TagError> {
-    if args.message.is_none() && args.file.is_none() {
+    // `-e`/`--edit` is the editor-driven annotated-tag creation mode, so it is a
+    // create-only option just like `-m`/`-F`.
+    if args.message.is_none() && args.file.is_none() && !args.edit {
         return Ok(());
     }
     let non_create = args.list
@@ -199,7 +212,7 @@ fn validate_message_source_create_only(args: &TagArgs) -> Result<(), TagError> {
         || args.column.is_some();
     if non_create {
         return Err(TagError::MessageOptionRequiresCreate(
-            "-m/--message and -F/--file are only valid when creating a tag".to_string(),
+            "-m/--message, -F/--file, and -e/--edit are only valid when creating a tag".to_string(),
         ));
     }
     Ok(())
@@ -291,6 +304,15 @@ enum TagError {
 
     #[error("tag '{0}' has a bad signature")]
     BadSignature(String),
+
+    #[error("no editor configured for `-e`/`--edit`")]
+    NoEditor,
+
+    #[error("failed to edit tag message: {0}")]
+    EditorFailed(String),
+
+    #[error("no tag message given, aborting")]
+    EmptyEditedMessage,
 }
 
 fn map_verify_tag_error(error: tag::VerifyTagError) -> TagError {
@@ -354,7 +376,7 @@ impl From<TagError> for CliError {
             }
             TagError::MessageOptionRequiresCreate(_) => CliError::command_usage(message)
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint("-m/--message and -F/--file create a tag; drop the listing/delete/verify options."),
+                .with_hint("-m/--message, -F/--file, and -e/--edit create a tag; drop the listing/delete/verify options."),
             TagError::MessageFileRead { .. } => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::IoReadFailed)
                 .with_hint("check that the message file path exists and is readable."),
@@ -396,6 +418,18 @@ impl From<TagError> for CliError {
             // A bad signature is a verification failure, not a usage error: exit 1.
             TagError::BadSignature(_) => CliError::failure(message)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            TagError::NoEditor => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("set GIT_EDITOR, core.editor, VISUAL, or EDITOR")
+                .with_hint("or pass the message directly with -m/--message or -F/--file."),
+            TagError::EditorFailed(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            // An empty edited message is a runtime abort (exit 128), matching
+            // Git and `commit`'s empty-message handling — not a usage error.
+            TagError::EmptyEditedMessage => CliError::failure(message)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("write a non-comment message in the editor, or pass -m/--message."),
         }
     }
 }
@@ -420,6 +454,72 @@ fn resolve_tag_message(args: &TagArgs) -> Result<Option<String>, TagError> {
     }
 }
 
+/// Open an editor (`-e`/`--edit`) to compose or edit the annotated-tag message.
+/// The buffer is seeded with the `-m`/`-F` message (if any) plus a commented
+/// instruction block; on save, comment lines are stripped (`git stripspace`
+/// semantics). An empty result aborts the tag, matching Git's "no tag message
+/// given" behavior.
+async fn compose_tag_message(name: &str, base: Option<&str>) -> Result<String, TagError> {
+    use std::io::IsTerminal;
+
+    let body = base.unwrap_or("");
+    let separator = if body.is_empty() || body.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let template = format!(
+        "{body}{separator}\
+         # Write a message for tag:\n\
+         #   {name}\n\
+         # Lines starting with '#' will be ignored.\n"
+    );
+
+    // An explicitly configured editor runs even without a TTY (so scripted
+    // editors work in tests/automation); `vi` is only assumed on a terminal.
+    let editor_cmd = match crate::command::editor::resolve_editor().await {
+        Some(cmd) => cmd,
+        None if std::io::stdin().is_terminal() => "vi".to_string(),
+        None => return Err(TagError::NoEditor),
+    };
+
+    let path = crate::utils::util::storage_path().join("TAG_EDITMSG");
+    let raw = crate::command::editor::edit_message(&path, &template, &editor_cmd, true)
+        .await
+        .map_err(|e| TagError::EditorFailed(e.to_string()))?;
+
+    let message = clean_tag_message(&raw);
+    if message.is_empty() {
+        return Err(TagError::EmptyEditedMessage);
+    }
+    Ok(message)
+}
+
+/// Clean an edited tag-message buffer with `git stripspace` semantics (Git's
+/// default cleanup for tag messages): drop whole-line comments (first character
+/// `#`), trim trailing whitespace per line, and collapse blank-line runs while
+/// dropping leading/trailing blanks.
+fn clean_tag_message(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending_blank = false;
+    for line in raw.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            pending_blank = !out.is_empty();
+            continue;
+        }
+        if pending_blank {
+            out.push(String::new());
+            pending_blank = false;
+        }
+        out.push(trimmed.to_string());
+    }
+    out.join("\n")
+}
+
 fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
     if args.name.is_some() {
         return Ok(());
@@ -429,6 +529,8 @@ fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
         Some("tag name is required for --delete")
     } else if args.message.is_some() || args.file.is_some() {
         Some("tag name is required when using --message/--file")
+    } else if args.edit {
+        Some("tag name is required when using --edit")
     } else if args.force {
         Some("tag name is required for --force")
     } else {
@@ -558,7 +660,15 @@ async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
         return run_delete_tag(name).await;
     }
 
-    let message = resolve_tag_message(args)?;
+    let base_message = resolve_tag_message(args)?;
+    // `-e`/`--edit` opens an editor on the (optional) base message; the edited,
+    // comment-stripped result becomes the annotated-tag message. Without `-e`
+    // the base message is used as-is (annotated iff `-m`/`-F` was given).
+    let message = if args.edit {
+        Some(compose_tag_message(name, base_message.as_deref()).await?)
+    } else {
+        base_message
+    };
     run_create_tag(name, message, args.force, args.sign).await
 }
 

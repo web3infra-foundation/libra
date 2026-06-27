@@ -834,6 +834,7 @@ async fn test_force_tag() {
     tag::execute(TagArgs {
         name: Some("v1.0".into()),
         file: None,
+        edit: false,
         list: false,
         delete: false,
         message: Some("Updated".into()),
@@ -964,6 +965,7 @@ async fn test_delete_tag() {
     tag::execute(TagArgs {
         name: Some("to-delete".into()),
         file: None,
+        edit: false,
         list: false,
         delete: true,
         message: None,
@@ -1031,6 +1033,7 @@ async fn test_annotation_lines_tag() {
     tag::execute(TagArgs {
         name: Some("v1.0.1".into()),
         file: None,
+        edit: false,
         list: false,
         delete: false,
         message: Some("Single line annotation message".into()),
@@ -1085,6 +1088,7 @@ async fn test_annotation_lines_tag() {
     tag::execute(TagArgs {
         name: Some("v1.0.3".into()),
         file: None,
+        edit: false,
         list: false,
         delete: false,
         message: Some("multi\nline\nannotation\ntag".into()),
@@ -1556,5 +1560,119 @@ fn tag_no_column_countermands_column() {
             .lines()
             .any(|l| l.contains("v1aaaa") && l.contains("v2bbbb")),
         "--no-column countermands --column (one per line): {listed}"
+    );
+}
+
+/// End-to-end `tag -e`/`--edit`: a scripted editor composes an annotated-tag
+/// message (comments stripped); with `-m` the editor is pre-filled and a no-op
+/// editor keeps that seed; a comment-only buffer aborts with "no tag message".
+#[cfg(unix)]
+#[test]
+fn tag_edit_composes_seeds_and_aborts_via_editor() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Write a scripted editor that overwrites the buffer ($1) with `body`.
+    let overwrite_editor = |name: &str, body: &str| -> String {
+        let path = p.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n")).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+
+    // 1) `-e` alone composes an annotated tag from the editor; comments stripped.
+    let compose = overwrite_editor("compose.sh", "composed via editor\n# ignored comment\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["tag", "-e", "v-edit"],
+        p,
+        "",
+        &[("GIT_EDITOR", compose.as_str())],
+    );
+    assert_cli_success(&out, "tag -e compose");
+    let listed = run_libra_command(&["tag", "-n1", "v-edit"], p);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("composed via editor"),
+        "annotated message composed in editor: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+
+    // 2) `-e -m "seed"` pre-fills the editor; a no-op editor keeps the seed.
+    let noop_path = p.join("noop.sh");
+    std::fs::write(&noop_path, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = std::fs::metadata(&noop_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&noop_path, perms).unwrap();
+    let out = run_libra_command_with_stdin_and_env(
+        &["tag", "-e", "-m", "seeded body", "v-seed"],
+        p,
+        "",
+        &[("GIT_EDITOR", noop_path.to_string_lossy().as_ref())],
+    );
+    assert_cli_success(&out, "tag -e -m seed");
+    let listed = run_libra_command(&["tag", "-n1", "v-seed"], p);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("seeded body"),
+        "the -m seed survives an unedited editor buffer: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+
+    // 3) A comment-only buffer cleans to empty and aborts (exit 128).
+    let empty = overwrite_editor("empty.sh", "# only a comment\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["tag", "-e", "v-empty"],
+        p,
+        "",
+        &[("GIT_EDITOR", empty.as_str())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "empty edited message aborts: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no tag message given"),
+        "abort message: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `-e`/`--edit` is a create-only mode: it requires a tag name and is rejected
+/// when combined with list/delete. These guards fire before the editor opens,
+/// so no scripted editor is needed.
+#[test]
+fn tag_edit_rejected_outside_create_mode() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // Bare `-e` with no name must not silently fall into list mode.
+    let no_name = run_libra_command(&["tag", "-e"], p);
+    assert!(!no_name.status.success(), "bare `tag -e` requires a name");
+    assert!(
+        String::from_utf8_lossy(&no_name.stderr).contains("tag name is required"),
+        "missing-name hint: {}",
+        String::from_utf8_lossy(&no_name.stderr)
+    );
+
+    // `-e` with a listing flag (and a name, so the missing-name guard passes
+    // first) is a usage error (not a silent list).
+    let with_list = run_libra_command(&["tag", "-e", "-l", "v1"], p);
+    assert!(
+        !with_list.status.success(),
+        "`tag -e -l` is rejected as a non-create mode"
+    );
+    assert!(
+        String::from_utf8_lossy(&with_list.stderr).contains("only valid when creating a tag"),
+        "create-only hint: {}",
+        String::from_utf8_lossy(&with_list.stderr)
+    );
+
+    // `-e` with delete must not silently delete while ignoring the editor.
+    let with_delete = run_libra_command(&["tag", "-e", "-d", "whatever"], p);
+    assert!(
+        !with_delete.status.success(),
+        "`tag -e -d` is rejected as a non-create mode"
     );
 }

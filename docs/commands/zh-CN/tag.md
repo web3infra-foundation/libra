@@ -5,7 +5,7 @@
 ## 概要
 
 ```
-libra tag [<name>] [-m <message> | -F <file>] [-f]
+libra tag [<name>] [-m <message> | -F <file>] [-e] [-f]
 libra tag -l [-n <lines>] [--column[=<mode>]]
 libra tag -d <name>
 ```
@@ -14,7 +14,7 @@ libra tag -d <name>
 
 `libra tag` 管理轻量标签和附注标签。轻量标签只是指向提交的具名指针，而附注标签会存储带有消息、打标签者身份和时间戳的完整标签对象。
 
-不带参数（或带 `-l`）时，命令列出所有标签。给出名称时，它会在 HEAD 处创建新标签。添加 `-m <message>` 会创建附注标签，而不是轻量标签；`-F <file>` 则从文件（或 `-` 表示 stdin）读取附注消息（与 `-m` 互斥）。`-f` 标志允许覆盖同名已有标签。
+不带参数（或带 `-l`）时，命令列出所有标签。给出名称时，它会在 HEAD 处创建新标签。添加 `-m <message>` 会创建附注标签，而不是轻量标签；`-F <file>` 则从文件（或 `-` 表示 stdin）读取附注消息（与 `-m` 互斥）；`-e`/`--edit` 在编辑器中撰写消息（有 `-m`/`-F` 时预填），因 Libra 无独立的 `-a`，`-e` 也是创建附注标签的路径。`-f` 标志允许覆盖同名已有标签。
 
 标签引用与分支引用一起存储在 SQLite 数据库中，提供相同的事务保证。
 
@@ -27,6 +27,7 @@ libra tag -d <name>
 | `-d` | `--delete` | | 删除具名标签 |
 | `-m` | `--message` | `<msg>` | 使用给定消息创建附注标签 |
 | `-F` | `--file` | `<file>` | 创建附注标签，从文件读取消息（`-` 表示 stdin）。与 `-m` 互斥。 |
+| `-e` | `--edit` | | 打开编辑器撰写或编辑附注标签消息。有 `-m`/`-F` 时编辑器以该消息预填，否则撰写新消息（Libra 无独立的 `-a`，故 `-e` 是经编辑器创建附注标签的方式）。注释行被剥离；结果为空则中止。 |
 | `-f` | `--force` | | 覆盖已有标签 |
 | `-n` | `--n-lines` | `<lines>` | 列出时显示的附注行数（0 = 只显示名称） |
 | | `--column` | `[mode]` | 以多列布局列出标签。模式 `always`/`auto`/`never`（缺省 = `always`）。不能与 `-n` 同用。 |
@@ -168,7 +169,7 @@ Git 的 `--sign` 用 GPG 生成嵌入标签对象的内联 PGP 签名。Libra **
 
 ### 为什么区分轻量标签和附注标签？
 
-Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标签是简单 ref 指针（适合临时标记），而附注标签存储对发布有用的元数据。消息来源是开关：提供 `-m` 或 `-F` 时创建附注标签，都不提供时创建轻量标签。这与 Git 行为完全匹配，让从 Git 迁移的用户保持一致心智模型。
+Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标签是简单 ref 指针（适合临时标记），而附注标签存储对发布有用的元数据。消息来源是开关：提供 `-m`、`-F` 或 `-e`（在编辑器中撰写消息）时创建附注标签，都不提供时创建轻量标签。因 Libra 无独立的 `-a`，`-e` 是经编辑器创建附注标签的路径（Git 需配合 `-a`/`-m`/`-F` 才用 `-e`）；其余两层模型与 Git 一致，让从 Git 迁移的用户保持一致心智模型。
 
 ## 参数对比：Libra vs Git vs jj
 
@@ -177,6 +178,7 @@ Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标
 | 创建轻量标签 | `git tag <name>` | `libra tag <name>` | `jj tag create <name>` |
 | 创建附注标签 | `git tag -a -m "msg" <name>` | `libra tag -m "msg" <name>` | 不支持（仅轻量） |
 | 从文件读取附注消息 | `git tag -F <file> <name>` | `libra tag -F <file> <name>`（`-` 表示 stdin） | N/A |
+| 编辑器编辑消息 | `git tag -e <name>`（配合 `-a`/`-m`/`-F`） | `libra tag -e <name>`（撰写附注消息；`-m`/`-F` 预填；无独立 `-a`） | N/A |
 | 列出标签 | `git tag -l` | `libra tag -l` | `jj tag list` |
 | 带消息列出 | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
 | 多列布局 | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]`（always/auto/never；`--no-column` 撤销） | N/A |
@@ -193,8 +195,10 @@ Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标
 | 标签已存在 | `LBR-CONFLICT-002` | "delete it first with 'libra tag -d <name>'." |
 | HEAD 没有可打标签的提交 | `LBR-REPO-003` | "create a commit first before tagging HEAD." |
 | 标签未找到（delete/show） | `LBR-CLI-003` | "use 'libra tag -l' to list available tags." |
-| --delete/--message/--file/--force 缺少标签名 | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag" |
-| `-m`/`-F` 与非创建模式（list/delete/verify/过滤）组合 | `LBR-CLI-002` | "-m/--message and -F/--file are only valid when creating a tag" |
+| --delete/--message/--file/--edit/--force 缺少标签名 | `LBR-CLI-002` | "use 'libra tag <name>' to create or update a tag"（`--edit` 为 "tag name is required when using --edit"） |
+| `-m`/`-F`/`-e` 与非创建模式（list/delete/verify/过滤）组合 | `LBR-CLI-002` | "-m/--message, -F/--file, and -e/--edit are only valid when creating a tag" |
+| 编辑消息为空（`-e` 缓冲全为注释/空白） | `LBR-REPO-003` | "write a non-comment message in the editor, or pass -m/--message." |
+| `-e` 无可用编辑器（无 GIT_EDITOR/core.editor/VISUAL/EDITOR 且无 TTY） | `LBR-REPO-003` | "set GIT_EDITOR, core.editor, VISUAL, or EDITOR" |
 | 无法解析 HEAD | `LBR-IO-001` 或 `LBR-REPO-002` | -- |
 | 无法序列化附注标签 | `LBR-REPO-005` | -- |
 | 无法存储对象 | `LBR-IO-002` | -- |
