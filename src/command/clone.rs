@@ -173,6 +173,36 @@ pub struct CloneArgs {
     /// shallow remotes.
     #[clap(long = "reject-shallow")]
     pub reject_shallow: bool,
+
+    /// Borrow objects from an existing local repository to reduce transfer
+    /// (Git's `--reference <repo>`, which sets up `objects/info/alternates`).
+    /// Accepted for compatibility but a no-op with a warning: Libra has no object
+    /// alternates — it always copies every object into the clone — so there is
+    /// nothing to borrow and the reference is ignored. May be given multiple
+    /// times.
+    #[clap(long = "reference", value_name = "repo")]
+    pub reference: Vec<String>,
+
+    /// Like `--reference`, but silently ignore a reference that cannot be used
+    /// (Git's `--reference-if-able`). Since Libra never uses alternates, the
+    /// reference is always "unusable" and is silently ignored — exactly Git's
+    /// graceful-degradation behavior. May be given multiple times.
+    #[clap(long = "reference-if-able", value_name = "repo")]
+    pub reference_if_able: Vec<String>,
+
+    /// Share objects with a local source via alternates instead of copying
+    /// (Git's `--shared`/`-s`). Accepted for compatibility but a no-op with a
+    /// warning: Libra always copies objects (no alternates), so the clone is
+    /// self-contained rather than sharing the source's object store.
+    #[clap(long = "shared", short = 's')]
+    pub shared: bool,
+
+    /// Copy borrowed objects in so the clone does not depend on `--reference`
+    /// (Git's `--dissociate`). Accepted for compatibility and a no-op: Libra
+    /// never borrows objects (it always copies), so every clone is already
+    /// fully self-contained — there is nothing to dissociate.
+    #[clap(long = "dissociate")]
+    pub dissociate: bool,
 }
 
 /// `--reject-shallow`: refuse a clone that ended up shallow without the user
@@ -185,6 +215,23 @@ pub struct CloneArgs {
 /// when `--depth` is given Libra does NOT reject. The common cases still match
 /// Git: `--reject-shallow` alone rejects a shallow result, and a full clone of a
 /// non-shallow source is allowed.
+/// Warn when `--reference`/`--shared` were given: those flags ask Git to share
+/// or borrow objects from another local store via alternates, but Libra always
+/// copies every object into the clone (it has no object alternates), so the
+/// clone is self-contained and the flags have no effect. `--reference-if-able`
+/// and `--dissociate` are intentionally silent (Git's `-if-able` silently
+/// ignores an unusable reference, and a copy-only clone is already dissociated).
+fn object_alternates_warning(args: &CloneArgs) -> Option<String> {
+    if args.reference.is_empty() && !args.shared {
+        return None;
+    }
+    Some(
+        "--reference/--shared have no effect: Libra has no object alternates and \
+         always copies every object into the clone, so it is already self-contained"
+            .to_string(),
+    )
+}
+
 fn clone_should_reject_shallow(
     reject_shallow: bool,
     is_shallow: bool,
@@ -1586,6 +1633,7 @@ async fn clone_cloud_publish_into_destination(
 
     let mut warnings = init_output.warnings.clone();
     warnings.extend(object_report.warnings);
+    warnings.extend(object_alternates_warning(args));
     let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
         .map_err(|source| CloneError::IgnoreFile { source })?;
     warnings.extend(summary.warnings);
@@ -3045,6 +3093,7 @@ async fn clone_into_destination(
     }
 
     let mut warnings = init_output.warnings.clone();
+    warnings.extend(object_alternates_warning(args));
     let mut gitignore_converted = Vec::new();
     if !args.bare {
         let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
@@ -3591,6 +3640,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3807,6 +3860,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3901,6 +3958,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3983,6 +4044,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -4055,6 +4120,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4124,6 +4193,10 @@ mod tests {
             local: false,
             no_local: false,
             reject_shallow: false,
+            reference: vec![],
+            reference_if_able: vec![],
+            shared: false,
+            dissociate: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),

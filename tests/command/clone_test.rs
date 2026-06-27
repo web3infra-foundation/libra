@@ -186,6 +186,10 @@ async fn test_clone_branch() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -226,6 +230,10 @@ async fn test_clone_bare_repository() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -281,6 +289,10 @@ async fn test_clone_branch_single_branch() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -320,6 +332,10 @@ async fn test_clone_default_branch() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -359,6 +375,10 @@ async fn test_clone_default_branch_single_branch() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -400,6 +420,10 @@ async fn test_clone_to_existing_empty_dir() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -444,6 +468,10 @@ async fn test_clone_to_existing_dir() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -484,6 +512,10 @@ async fn test_clone_to_dir_with_existing_file_name() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -523,6 +555,10 @@ async fn test_clone_with_depth() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -562,6 +598,10 @@ async fn test_clone_with_depth_and_branch() {
         local: false,
         no_local: false,
         reject_shallow: false,
+        reference: vec![],
+        reference_if_able: vec![],
+        shared: false,
+        dissociate: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -909,4 +949,94 @@ fn test_clone_reject_shallow_allows_normal_and_depth() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(shallow.join(".libra").exists(), "depth clone created");
+}
+
+/// `--reference`/`--shared`/`--reference-if-able`/`--dissociate` are accepted as
+/// no-ops (Libra has no object alternates — it always copies). The clone still
+/// succeeds; `--reference`/`--shared` add an explanatory warning, while
+/// `--reference-if-able` (graceful) and `--dissociate` are silent.
+#[test]
+#[serial]
+fn test_clone_object_alternates_flags_are_noops() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    fs::write(sp.join("f.txt"), "x\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], sp).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], sp)
+            .status
+            .success(),
+        "commit"
+    );
+    let source_str = sp.to_str().unwrap();
+    let dest_root = tempdir().expect("dest root");
+
+    // --reference + --dissociate: clone succeeds, warning present for --reference.
+    let d1 = dest_root.path().join("d1");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--reference",
+            "/nonexistent/repo",
+            "--dissociate",
+            source_str,
+            d1.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "clone with --reference/--dissociate succeeds: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d1.join(".libra").exists(), "clone created");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--reference/--shared have no effect"),
+        "--reference warns it is a no-op, got: {stderr}"
+    );
+
+    // --reference-if-able alone is silently ignored (graceful) — no warning.
+    let d2 = dest_root.path().join("d2");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--reference-if-able",
+            "/nonexistent/repo",
+            source_str,
+            d2.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "clone with --reference-if-able succeeds"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("have no effect"),
+        "--reference-if-able is silently ignored (no warning)"
+    );
+
+    // -s/--shared is accepted and warns.
+    let d3 = dest_root.path().join("d3");
+    let out = run_libra_command(
+        &["clone", "-s", source_str, d3.to_str().unwrap()],
+        dest_root.path(),
+    );
+    assert!(out.status.success(), "clone with --shared succeeds");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--reference/--shared have no effect"),
+        "--shared warns it is a no-op"
+    );
 }

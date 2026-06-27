@@ -168,6 +168,29 @@ with `--depth`).
 libra clone --reject-shallow git@github.com:user/repo.git
 ```
 
+### `--reference <repo>` / `--reference-if-able <repo>` / `--shared` (`-s`) / `--dissociate`
+
+Git's object-sharing flags, which set up `objects/info/alternates` so a clone
+borrows or shares objects with another local store. **Libra has no object
+alternates** — it always copies every object into the clone — so a Libra clone is
+always fully self-contained. These flags are therefore accepted for
+compatibility as **no-ops**:
+
+- `--reference <repo>` and `--shared` (`-s`) emit an explanatory warning that
+  they had no effect (objects are copied, not borrowed/shared). `--reference` may
+  be given multiple times.
+- `--reference-if-able <repo>` is silently ignored — matching Git, which silently
+  drops a reference it cannot use (here, none are usable). May be given multiple
+  times.
+- `--dissociate` is a silent no-op: there is never a borrow to dissociate.
+
+The clone still succeeds and produces a complete, self-contained repository.
+
+```bash
+libra clone --reference /path/to/local/mirror git@github.com:user/repo.git
+libra clone --dissociate git@github.com:user/repo.git
+```
+
 ### `--tags` / `--no-tags`
 
 `libra clone` fetches **all** tags by default (matching Git). `--no-tags` clones
@@ -407,8 +430,9 @@ not, because its operation-log model fetches all refs by design.
 | Shallow since date | `--shallow-since=<date>` | N/A | N/A |
 | Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
 | Mirror clone | `--mirror` | N/A | N/A |
-| Reference repository | `--reference <repo>` | N/A | N/A |
-| Dissociate from reference | `--dissociate` | N/A | N/A |
+| Reference repository | `--reference <repo>` / `--reference-if-able <repo>` | N/A | accepted no-op (Libra always copies objects, no alternates); `--reference` warns, `--reference-if-able` silent |
+| Shared object store | `--shared` / `-s` | N/A | accepted no-op (always copies); warns |
+| Dissociate from reference | `--dissociate` | N/A | accepted no-op (already self-contained); silent |
 | No hardlinks | `--no-hardlinks` | N/A | N/A |
 | Recurse submodules | `--recurse-submodules` | N/A | N/A (no submodules) |
 | Shallow submodules | `--shallow-submodules` | N/A | N/A |
@@ -470,7 +494,7 @@ If checkout fails, the clone reports failure -- it does not silently succeed wit
 ## Compatibility Notes
 
 - `--recurse-submodules` is not supported; Libra does not implement submodules
-- `--mirror` and `--reference` are not supported
+- `--mirror` is not supported; `--reference`/`--reference-if-able`/`--shared`/`--dissociate` are accepted no-ops (Libra has no object alternates — it always copies objects — so a clone is already self-contained; `--reference`/`--shared` warn, the others are silent)
 - Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
 - The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
 - `--no-checkout` sets up objects/refs/HEAD but skips the working-tree checkout; use `--bare` instead when you want no working tree at all (no `.libra` worktree layout)
