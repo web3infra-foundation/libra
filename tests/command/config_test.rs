@@ -52,23 +52,93 @@ async fn test_cli_config_list_global_without_repo() {
 
 #[tokio::test]
 #[serial]
-async fn test_cli_config_system_returns_error() {
+async fn test_cli_config_system_read_write() {
     let temp_dir = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
-    let global_db_dir = tempdir().unwrap();
-    let _scoped =
-        ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_cli_sys.db"));
+    // Point the system scope at a temp DB so the test never touches /etc/libra.
+    let system_db_dir = tempdir().unwrap();
+    let _system = EnvVarGuard::set(
+        "LIBRA_CONFIG_SYSTEM_DB",
+        system_db_dir
+            .path()
+            .join("system_config_cli.db")
+            .as_os_str(),
+    );
 
-    // --system scope is removed and should always error
+    // --system writes and reads back (no repository required, like --global).
     let result = exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
-    assert!(result.is_err(), "--system should be rejected");
+    assert!(result.is_ok(), "--system set should succeed: {result:?}");
 
-    let result = exec_async(vec!["config", "--system", "--get", "user.name"]).await;
-    assert!(result.is_err(), "--system --get should be rejected");
+    let read_result = exec_async(vec!["config", "--system", "--get", "user.name"]).await;
+    assert!(read_result.is_ok(), "--system --get should succeed");
 
-    let result = exec_async(vec!["config", "--list", "--system"]).await;
-    assert!(result.is_err(), "--system --list should be rejected");
+    let list_result = exec_async(vec!["config", "--list", "--system"]).await;
+    assert!(list_result.is_ok(), "--system --list should succeed");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_cascade_system_is_lowest_precedence() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    // Pin both global and system scopes to writable temp DBs.
+    let global_db = temp_path
+        .path()
+        .join("glob.db")
+        .to_string_lossy()
+        .to_string();
+    let system_db = temp_path
+        .path()
+        .join("sys.db")
+        .to_string_lossy()
+        .to_string();
+    let env: [(&str, &str); 2] = [
+        ("LIBRA_CONFIG_GLOBAL_DB", global_db.as_str()),
+        ("LIBRA_CONFIG_SYSTEM_DB", system_db.as_str()),
+    ];
+
+    // System-only value resolves via the cascade (local/global have no key).
+    let set_sys = run_libra_command_with_stdin_and_env(
+        &["config", "--system", "custom.scopetest", "from-system"],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(set_sys.status.success(), "set --system");
+    let get = run_libra_command_with_stdin_and_env(
+        &["config", "--get", "custom.scopetest"],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(
+        String::from_utf8_lossy(&get.stdout).contains("from-system"),
+        "cascade resolves to the system value: {}",
+        String::from_utf8_lossy(&get.stdout)
+    );
+
+    // A global value of the same key overrides system (global > system).
+    let set_glob = run_libra_command_with_stdin_and_env(
+        &["config", "--global", "custom.scopetest", "from-global"],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(set_glob.status.success(), "set --global");
+    let get2 = run_libra_command_with_stdin_and_env(
+        &["config", "--get", "custom.scopetest"],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(
+        String::from_utf8_lossy(&get2.stdout).contains("from-global"),
+        "global overrides system in the cascade: {}",
+        String::from_utf8_lossy(&get2.stdout)
+    );
 }
 
 #[tokio::test]
@@ -85,25 +155,65 @@ async fn test_cli_config_local_requires_repo() {
 
 #[tokio::test]
 #[serial]
-async fn test_config_system_scope_is_rejected_as_command_usage_error() {
+async fn test_config_system_scope_roundtrip_and_vault_rejection() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let output = run_libra_command(&["config", "--system", "list"], temp_path.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--system scope is not supported"),
-        "stderr should describe the unsupported scope, got: {stderr}"
+    // Redirect the system scope to a writable temp DB (never touch /etc/libra).
+    let sys_db = temp_path.path().join("sys").join("config.db");
+    let sys_db_str = sys_db.to_string_lossy().to_string();
+    let env: [(&str, &str); 1] = [("LIBRA_CONFIG_SYSTEM_DB", sys_db_str.as_str())];
+
+    // `--system` set then get roundtrips through the system DB.
+    let set = run_libra_command_with_stdin_and_env(
+        &["config", "--system", "user.name", "sys user"],
+        temp_path.path(),
+        "",
+        &env,
     );
-    // config.md line 175: classifies as a CLI usage error (exit 2 fine /
-    // 129 coarse). The previous `from_legacy_string` path collapsed this
-    // to a generic failure (exit 128).
-    assert_eq!(
-        output.status.code(),
-        Some(129),
-        "--system rejection must classify as CLI usage (exit 129), got status: {:?}, stderr: {stderr}",
-        output.status,
+    assert!(
+        set.status.success(),
+        "--system set: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert!(sys_db.exists(), "the system config DB was created");
+
+    let get = run_libra_command_with_stdin_and_env(
+        &["config", "--system", "--get", "user.name"],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(get.status.success(), "--system --get should succeed");
+    assert!(
+        String::from_utf8_lossy(&get.stdout).contains("sys user"),
+        "system value read back: {}",
+        String::from_utf8_lossy(&get.stdout)
+    );
+
+    // Vault-encrypted secrets are not supported in the system scope.
+    let vault = run_libra_command_with_stdin_and_env(
+        &[
+            "config",
+            "set",
+            "--system",
+            "--encrypt",
+            "custom.secret",
+            "s3cr3t",
+        ],
+        temp_path.path(),
+        "",
+        &env,
+    );
+    assert!(
+        !vault.status.success(),
+        "--system --encrypt must be rejected"
+    );
+    assert!(
+        String::from_utf8_lossy(&vault.stderr).contains("not supported in --system scope"),
+        "vault-rejection message: {}",
+        String::from_utf8_lossy(&vault.stderr)
     );
 }
 
@@ -459,14 +569,184 @@ async fn test_config_scope_system_errors() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // --system scope is removed and should always error
-    let result = exec_async(vec!["config", "--system", "user.name", "system_user"]).await;
-    assert!(result.is_err(), "--system should be rejected");
+    // Redirect the system scope to a temp DB so nothing touches /etc/libra.
+    let system_db_dir = tempdir().unwrap();
+    let _system = EnvVarGuard::set(
+        "LIBRA_CONFIG_SYSTEM_DB",
+        system_db_dir.path().join("system_vault.db").as_os_str(),
+    );
+
+    // Plain `--system` writes succeed, but vault-encrypted secrets are rejected.
+    let ok = exec_async(vec!["config", "--system", "user.name", "system_user"]).await;
+    assert!(ok.is_ok(), "--system plain set should succeed: {ok:?}");
+
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--system",
+        "--encrypt",
+        "custom.secret",
+        "s3cr3t",
+    ])
+    .await;
+    assert!(result.is_err(), "--system --encrypt should be rejected");
     let err = result.unwrap_err();
     assert!(
-        err.message().contains("--system scope is not supported"),
+        err.message().contains("not supported in --system scope"),
         "unexpected error: {}",
         err.message()
+    );
+
+    // The whole `vault.*` namespace is rejected in system scope, including
+    // non-sensitive pubkey keys that `is_sensitive_key` does not flag, and
+    // mixed-case section names (Git section names are case-insensitive).
+    for key in [
+        "vault.signing",
+        "vault.ssh.origin.pubkey",
+        "Vault.signing",
+        "VAULT.gpg.pubkey",
+    ] {
+        let r = exec_async(vec!["config", "--system", key, "x"]).await;
+        assert!(r.is_err(), "--system {key} should be rejected");
+        assert!(
+            r.unwrap_err()
+                .message()
+                .contains("not supported in --system scope"),
+            "{key} rejection should name the system scope"
+        );
+    }
+
+    // `config import --system` is rejected up front: import auto-encrypts
+    // sensitive keys, which the system scope does not support.
+    let import = exec_async(vec!["config", "import", "--system"]).await;
+    assert!(import.is_err(), "config import --system should be rejected");
+    assert!(
+        import
+            .unwrap_err()
+            .message()
+            .contains("not supported in --system scope"),
+        "import rejection should name the system scope"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_system_rejected_vault_write_does_not_create_db() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    // Point the system scope at a path that does NOT yet exist.
+    let fresh_dir = tempdir().unwrap();
+    let sys_db = fresh_dir.path().join("never").join("config.db");
+    let _system = EnvVarGuard::set("LIBRA_CONFIG_SYSTEM_DB", sys_db.as_os_str());
+
+    // A rejected `--system --encrypt` write must short-circuit before touching
+    // the DB, so the system config path is never created.
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--system",
+        "--encrypt",
+        "custom.secret",
+        "s3cr3t",
+    ])
+    .await;
+    assert!(result.is_err(), "--system --encrypt should be rejected");
+    assert!(
+        !sys_db.exists(),
+        "the rejected vault write must not create the system DB"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_system_rename_into_vault_namespace_rejected() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let system_db_dir = tempdir().unwrap();
+    let _system = EnvVarGuard::set(
+        "LIBRA_CONFIG_SYSTEM_DB",
+        system_db_dir.path().join("system_rename.db").as_os_str(),
+    );
+
+    // Seed a plain (non-sensitive) system key, then try to rename its section
+    // into the vault namespace — which would smuggle a secret key past the
+    // direct-set guard. It must be rejected.
+    let seed = exec_async(vec!["config", "--system", "foo.bar", "value"]).await;
+    assert!(seed.is_ok(), "plain system set should succeed: {seed:?}");
+
+    let rename = exec_async(vec![
+        "config",
+        "--system",
+        "--rename-section",
+        "foo",
+        "vault.env",
+    ])
+    .await;
+    assert!(
+        rename.is_err(),
+        "renaming a system section into vault.env must be rejected"
+    );
+    assert!(
+        rename
+            .unwrap_err()
+            .message()
+            .contains("not supported in --system scope"),
+        "rename rejection should name the system scope"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_system_set_rejected_when_existing_row_is_encrypted() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    // Isolate HOME so the global vault key lands in the temp dir, then build an
+    // encrypted row in a shared DB via the (vault-capable) global scope.
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", home.path().as_os_str());
+    let shared_db = temp_path.path().join("shared.db");
+    let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", shared_db.as_os_str());
+
+    let seed = exec_async(vec![
+        "config",
+        "set",
+        "--global",
+        "--encrypt",
+        "custom.secret",
+        "cipher",
+    ])
+    .await;
+    assert!(seed.is_ok(), "seed encrypted global row: {seed:?}");
+
+    // Reuse that DB as the system DB so it already holds an encrypted row, then
+    // a `--system --plaintext` write to the same key must be rejected (it would
+    // otherwise keep the row's encrypted flag while storing a plaintext value).
+    let _system = EnvVarGuard::set("LIBRA_CONFIG_SYSTEM_DB", shared_db.as_os_str());
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--system",
+        "--plaintext",
+        "custom.secret",
+        "newval",
+    ])
+    .await;
+    assert!(
+        result.is_err(),
+        "--system --plaintext over an encrypted row must be rejected"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .message()
+            .contains("not supported in --system scope"),
+        "rejection should name the system scope"
     );
 }
 

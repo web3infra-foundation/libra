@@ -22,11 +22,11 @@
 | 可靠性 / 容错性 | ★★★☆☆ | 事务边界已提及，但缺磁盘满、网络抖动、部分失败、进程崩溃后的具体恢复策略。 | 增加磁盘满/部分失败/崩溃恢复步骤；定义「失败后仓库状态」标准。 |
 | 兼容性 / 互操作性 | ★★★★☆ | 不追求完整 Git parity 的边界合理；导出格式互操作要求明确。 | 明确 Git 版本目标；增加 SHA-1/SHA-256 混用检测和格式版本门。 |
 | 可扩展性 / 可维护性 | ★★★★☆ | 复用 `internal/*` 单一实现的方向正确；文档本身较长，需决策日志和可并行切片。 | 增加决策日志；GGT-00A 拆分为可独立推进的切片；新增命令不得复制既有逻辑。 |
-| 合规性 / 标准符合性 | ★★★★☆ | 许可证/source 记录要求存在；缺少 DCO 和文档标准引用。 | PR 验收清单增加 DCO；fixture 来源模板；文档标准指向 `_general.md`。 |
+| 合规性 / 标准符合性 | ★★★☆☆ | 许可证/source 记录要求存在，但**未点名 Grit 的 GPLv2/MIT 双许可证拆分**：`grit-git` 与仓库内 `/git`、`/tests` 为 GPLv2，仅 `grit-lib` 为 MIT，而 Libra 为 MIT——从 GPLv2 资产移植文本/预期输出/逻辑有 copyleft 污染风险。缺少 DCO 和文档标准引用。 | 显式声明 GPLv2→MIT 净室边界（见高风险质量门第 7 项）：行为参考优先取自 `grit-lib`(MIT) 与 Git 公开文档，不抄 `grit-git`/`/tests`；PR 验收清单增加 DCO；fixture 来源模板；文档标准指向 `_general.md`。 |
 
 > 评级说明：★★★★★ = 当前可直接执行；★★★★☆ = 小风险/需补强；★★★☆☆ = 需新增控制点方可进入开发。
 
-最后核对：2026-06-24（Libra `v0.17.1613` 工作区；Grit 外部基线为 GitHub [`v0.5.0` release](https://github.com/gitbutlerapp/grit/releases/tag/v0.5.0) + [main README](https://github.com/gitbutlerapp/grit/blob/main/README.md) 中的 `grit-git`/`grit-lib` 说明；本次补充核对了 `src/command/{fetch,remote,gc,prune,maintenance}.rs`、`src/command/mod.rs`、`tests/command/mod.rs` 和 `docs/development/commands/{README,fetch,remote,rebase}.md`）。实现任何 Grit 对齐项前，必须重新生成 Grit 命令清单并记录 tag/commit，不能只沿用本文件的历史快照。
+最后核对：2026-06-24（Libra `v0.17.1613` 工作区；Grit 外部基线为本地工作区 `gitbutlerapp/grit` @ `v0.5.0-12-gdfb079967`，对应 GitHub [`v0.5.0` release](https://github.com/gitbutlerapp/grit/releases/tag/v0.5.0) + [main README](https://github.com/gitbutlerapp/grit/blob/main/README.md) 中的 `grit-git`/`grit-lib` 说明）。本次实地核对：Grit 侧确认 `KNOWN_COMMANDS` 共 152 条（`grit-git/src/main.rs:5452`，README「140+」属实）、`grit-lib`/`grit-git` 引用的命令/库文件存在、`data/tests/<group>/<stem>.toml` 测试格式，以及 **`LICENSE` 的双许可证拆分**（`grit-lib`=MIT，`grit-git` 与 `/git`、`/tests`=GPLv2）；Libra 侧补充核对了 `src/command/{fetch,remote,gc,prune,maintenance,log,rebase,diff,cherry_pick,switch}.rs`、`src/command/mod.rs`、`src/cli.rs`、`tests/command/mod.rs`、`src/internal/protocol/local_client.rs` 和 `docs/development/commands/{README,_compatibility,fetch,remote,rebase}.md`，并确认 `gc.rs`/`prune.rs` 为未编译孤立文件。实现任何 Grit 对齐项前，必须重新生成 Grit 命令清单并记录 tag/commit，不能只沿用本文件的历史快照。
 
 ---
 
@@ -86,8 +86,8 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 ## 本次本地核对结论
 
 - 计划的依赖顺序总体合理，但阶段 0 需要按当前事实拆分：`gc` / `prune` 已在 `docs/development/commands/README.md` 被降级为内部历史资料，不应再作为默认公开路线推进；`remote update -p` 源码已实现；`fetch --prune` 仍是真实缺口。
-- `src/command/gc.rs`、`src/command/prune.rs`、`tests/command/gc_test.rs`、`tests/command/prune_test.rs` 存在，但 `src/command/mod.rs` 与 `src/cli.rs` 未注册，`tests/command/mod.rs` 未纳入对应测试；当前治理结论是内部化，后续只能保留去重/事实核对任务，除非重新完成公开决策。
-- `maintenance.rs::run_gc` 与 `gc.rs` 已经是两套实现，且 dry-run 计数等行为可能分叉；即使顶层 `gc` 继续内部化，也必须收口为一套 GC 领域实现，避免维护命令与内部资料分裂。
+- `src/command/gc.rs`、`src/command/prune.rs`、`tests/command/gc_test.rs`、`tests/command/prune_test.rs` 在工作区存在，但 `src/command/mod.rs`、`src/cli.rs` 与 `tests/command/mod.rs` 都没有声明对应 `mod`。Rust 不做自动模块发现，因此这四个文件**当前根本没有被编译进 crate**，是孤立死代码（dead code），而不是「已接入但未公开」的命令。当前治理结论是内部化，后续只能保留去重/事实核对任务，除非重新完成公开决策。
+- `maintenance.rs::run_gc`（`src/command/maintenance.rs:299`）是**唯一被编译、唯一会运行**的 GC 实现；约 5.3k 行的 `gc.rs` 体量大得多但未编译。因此真正的风险不是「两套实现运行时行为分叉」（`gc.rs` 永不运行），而是源码树里存在一份大体量、会随 Git/对象格式演进 bit-rot、与 `run_gc` 事实分叉、并逃过 CI 的死实现。收口目标是**二选一**并记入决策日志：① 直接删除孤立实现（`run_gc` 行为不变，无需兼容开关）；或 ② 抽取 `internal/repository_gc.rs` 单一领域实现、让 `run_gc` 委托它并删除重复（`run_gc` 行为可能变化，此时才需要兼容开关与 golden 对比）。
 - `fetch --prune` 仍未公开：`FetchArgs` 只有 `--no-prune` 兼容 no-op，没有 `-p`/`--prune`。`remote update -p` 已在 `RemoteCmds::Update` 中公开并复用 `run_prune_remote`（两段式：先 fetch 全部 resolved 远端、全部成功后再 prune），命令 README 与 `COMPATIBILITY.md` 已同步为已公开，文档同步债已结清。
 - `rebase -i` / `--edit-todo` 按 D16 继续拒绝，已从本计划主线移除；当前 `rebase.md` 与命令 README 已记录 `--autosquash`、`--reapply-cherry-picks` 已支持，但 `_compatibility.md` 的概览行仍有旧说法，阶段 0 只做文档同步债收口，不重复规划实现。
 - Grit 的命令测试不能作为 shell harness 直接接入 Libra。Grit 当前做法是把上游 Git `git/t/` 测试纳入自身 `tests/`，通过 `scripts/run-tests.sh` 和测试 harness 把 `grit-git` 暴露成 `git`；Libra 的要求不是照搬这些文件，而是阅读并归纳每个测试的场景、前置状态、操作步骤、断言和边界，然后用 `tests/command/*`、`tests/helpers/`、`tests/harness/` 或 `tools/integration-runner` 的既有 Libra 写法重写。
@@ -106,7 +106,7 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 | 可靠性 / 容错性 | 计划包含测试闭环，但原文对 crash consistency、SQLite 事务、网络超时和 partial write 描述不足。 | 中 | SQLite ref/config 变更用事务；对象写入先落对象后原子更新 refs；网络/协议命令必须保留 timeout、sideband/EOF 错误和可恢复诊断；增加磁盘满、部分失败与崩溃恢复策略。 |
 | 兼容性 / 互操作性 | 不追求完整 Git parity 的边界合理；互操作命令需特别保护 Git 格式兼容，不可因 `.libra` 内部实现污染导出格式。 | 中 | `bundle`、`fast-export/import`、pack 命令必须用 Git wire/object 格式验证，并至少与系统 Git/Grit 做读取互操作 smoke；明确 Git 版本目标。 |
 | 可扩展性 / 可维护性 | 复用 `diff`、`tree/index`、`merge-base`、pack writer 的方向正确，能避免多套引擎。 | 低 | 新增命令不得复制既有领域逻辑；优先抽 `internal/*` 单一实现，再由 porcelain/plumbing 复用；增加决策日志和 GGT-00A 并行切片。 |
-| 合规性 / 标准符合性 | 直接移植 Grit/Git 测试资产有许可证和维护风险；原文已禁止直接拷贝，但还需强制来源记录。 | 低 | 所有来自 Grit/Git 的 fixture 必须记录来源 tag/commit、许可证、裁剪理由；PR 验收清单增加 DCO；不得复制 shell harness、C helper 或大段文本。 |
+| 合规性 / 标准符合性 | 直接移植 Grit/Git 测试资产有许可证和维护风险。**关键事实**（已核对 Grit `LICENSE` + `README.md`）：`grit-git`(CLI) 及仓库内 `/git`、`/tests`（上游 Git `t*.sh`）为 **GPLv2**，仅 `grit-lib` 为 MIT；Libra 为 **MIT**。从 GPLv2 源码/预期输出搬运文本或逻辑会污染 MIT 代码库。 | 中 | 所有来自 Grit/Git 的 fixture 必须记录来源 tag/commit、许可证、裁剪理由；**净室策略**：算法参考优先取 `grit-lib`(MIT) 与 Git man page，场景从 Libra 实测行为重新推导，不复制 `grit-git`/`/tests` 的 shell harness、C helper、逐字预期输出或大段文本；PR 验收清单增加 DCO。 |
 
 ---
 
@@ -127,7 +127,7 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 
 | 能力 | 建议阶段 | Libra 源码现状 | Grit 参考 |
 |------|----------|----------------|-----------|
-| GC / prune 领域实现收口 | **0** | `src/command/gc.rs`、`prune.rs`、测试文件已存在但顶层 CLI 未注册；`docs/development/commands/README.md` 当前将 `gc` / `prune` 降级为内部历史资料；`maintenance.rs::run_gc` 为简化重复实现 | `grit-git/src/commands/gc.rs`、`prune.rs`（仅作行为参考，不默认公开） |
+| GC / prune 领域实现收口 | **0** | `src/command/gc.rs`、`prune.rs`、测试文件在工作区存在，但未在任何 `mod.rs`/`cli.rs` 声明，属**未编译孤立死代码**；`docs/development/commands/README.md` 当前将 `gc` / `prune` 降级为内部历史资料；`maintenance.rs::run_gc`（唯一被编译的实现）为简化版 | `grit-git/src/commands/gc.rs`、`prune.rs`（仅作行为参考，不默认公开） |
 | `fetch --prune` | **0** | `remote.rs::run_prune_remote` 与 `remote update -p` 已有；`FetchArgs` 仅有 `--no-prune` no-op，无 `-p`/`--prune` | `grit fetch -p` |
 | `remote update -p` 文档同步 | **✅ 已同步** | `RemoteCmds::Update` 已有 `-p`/`--prune`，`remote.md`、命令 README 与 `COMPATIBILITY.md` 均已记录为已公开 | `git remote update -p` |
 | `check-ignore` / `check-attr` | **1** | `utils/ignore.rs`、`utils/lfs.rs`；无 CLI | `check_ignore.rs`、`check_attr.rs` |
@@ -138,7 +138,7 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 | `libra credential` | **3** | `vault.ssh.*` + `ask_basic_auth`；`config.rs` 识别 `credential.helper` 但不调用 | 参考协议形状，**不**移植 `credential-cache`/`credential-store` |
 | `merge-base` | **3** | `log.rs:738`、`rebase.rs` 有 `find_merge_base` | `grit-lib/src/merge_base.rs` |
 | `apply` | **3** | 无 unified diff apply | `grit-lib/src/apply.rs`（体量大） |
-| `diff` 增强（`A...B`、`-w`） | **4** | `diff.rs:268` 写明 merge-base range 未实现 | `diff*.rs` |
+| `diff` 增强（`A...B`、`-w`） | **4** | `diff.rs`（`normalize_diff_range` 附近，约 `:298`）注释写明 `A...B` merge-base range 未实现、回落为 pathspec；`DiffArgs` 无 `-w`/`--ignore-all-space` 字段 | `diff*.rs` |
 | `repack` / `pack-objects`（隐藏） | **4** | `maintenance.rs` 有 `create_pack_from_hashes`、`run_incremental_repack` | `repack.rs`、`pack_objects.rs` |
 | `diff-index` / `diff-files` / `diff-tree` | **4** | 仅统一 `diff.rs` | 三个 plumbing 命令 |
 | `rerere` | **5** | 无模块；`cherry_pick.rs` 拒绝 `--rerere-autoupdate` | `grit-lib/src/rerere.rs` |
@@ -162,8 +162,10 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 | 风险 | 位置 | 说明 | 对应任务 |
 |------|------|------|----------|
 | `log.rs::find_merge_base` 文档声明返回「best merge-base (closest ancestor)」但实际返回 first-found，非 LCA | `log.rs:752-792` | 非交叉合并历史下结果可能偶然正确；交叉合并（criss-cross）下排除点可能偏高，导致 `log A..B` 漏提交或多提交。`rebase.rs:3566-3614` 有同一算法但诚实标注了 TODO。 | GGT-09 |
-| 两套 `find_merge_base` 实现、签名和算法均不同 | `log.rs:752`（`CliResult<ObjectHash>`，先建全量左祖先集）、`rebase.rs:3566`（`Result<Option<ObjectHash>, String>`，双队列交替） | 抽取 `internal/merge_base.rs` 时必须统一为 LCA 算法，同时覆盖 `--all`（多 merge base）和 `--is-ancestor` 语义。 | GGT-09 |
+| 两套 `find_merge_base` 实现、签名和**遍历顺序**均不同 | `log.rs:752`（`CliResult<ObjectHash>`；先建全量左祖先集，再用 `VecDeque::pop_front` 做 **BFS** 取首个命中）、`rebase.rs:3579`（`Result<Option<ObjectHash>, String>`；双队列交替，用 `Vec::pop` 做 **LIFO/DFS**） | 两种遍历对同一历史可能返回**不同**的 first-found base，因此连「错法」也未必一致；抽取 `internal/merge_base.rs` 时必须统一为 LCA 算法，同时覆盖 `--all`（多 merge base）和 `--is-ancestor` 语义。 | GGT-09 |
 | `diff.rs` 无 `-w`/`--ignore-all-space` clap 字段 | `diff.rs` DiffArgs | 差距表写「`-w` 忽略空白」但源码中不存在该 flag；GGT-09/4.1 需新增 clap 字段 + diff 引擎空白归一化，不是仅接线。 | GGT-09 / 阶段 4.1 |
+
+> **行号约定**：本表及全文的 `file.rs:NNN` 均为 2026-06-24 工作区快照，会随提交漂移（例如 `diff.rs` 的 merge-base range 注释在本次复核已从 `:268` 漂到约 `:298`）。开工前请以**符号名**（`fn find_merge_base`、`struct DiffArgs`、`fn run_gc` 等）重新定位，不要依赖行号本身。
 
 ### 未覆盖的已知缺口（有意排除出本计划）
 
@@ -172,27 +174,27 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 | 命令 | README 记录的缺口 | 排除理由 |
 |------|-------------------|----------|
 | `log` | positional ranges、exact line history (`-L` 完整语义) | 非 Grit 独有差距；`log` 内部 `find_merge_base` 修复在 GGT-09 覆盖 |
-| `rev-list` | object/boundary traversal output | 非 Grit 差距，属内部遍历增强 |
+| `rev-list` | ~~object-enumeration traversal output (`--objects`)~~ | ✅ 已实现 `--objects`/`--objects-edge`/`--objects-edge-aggressive`（`--boundary` 亦已实现） |
 | `for-each-ref` | full Git atom language、remaining sort keys、shell quoting | 纯输出格式增强，不触及数据正确性 |
 | `ls-tree` | full Git pathspec magic | pathspec 引擎增强，独立于本计划 |
-| `grep` | untracked/no-index search | 搜索范围扩展，独立于本计划 |
-| `config` | system scope、editor round-trip、typed conversion、NUL output、section operations | 配置子系统增强，独立于本计划 |
-| `hash-object` | 仅支持 blob，不支持 tree/commit/tag | plumbing 补充，可在 GGT-05 后视需补齐 |
+| `grep` | （搜索范围扩展已完成） | `--untracked`（#160）与 `--no-index`（#161）均已实现 |
+| `config` | editor round-trip、includeIf | 配置子系统增强，独立于本计划（section 操作 `--remove-section`/`--rename-section`、`-z`/`--null` NUL 输出、`--type`/`--bool`/`--int`/`--path` 读取+设置规范化，以及 `--system` 纯配置作用域（vault/import 在该作用域拒绝）已实现） |
+| `hash-object` | 路径过滤器/attributes、`--literally` 任意类型字符串未支持 | `-t blob/commit/tree/tag` 类型化哈希 + `--literally` 已实现（#157）；其余为 plumbing 补充，可在 GGT-05 后视需补齐 |
 | `cat-file` | `-e` JSON/machine output | 输出格式补齐，独立于本计划 |
-| `blame` | reverse/whitespace/incremental/copy-move detection | 算法增强，体量大且独立 |
-| `shortlog` | format/stdin | 输出格式补齐 |
+| `blame` | reverse/incremental/copy-move detection | 算法增强，体量大且独立（`-w`/`--ignore-whitespace` 已实现） |
+| `shortlog` | stdin | `--format` 已实现（#166）；仅剩 stdin 管道输入 |
 | `rev-parse` | output-filter/parseopt modes | 解析模式补齐 |
-| `show` | named pretty presets、raw format、notes/mailmap/signature | 输出格式补齐；`mailmap` 在 GGT-13 覆盖 |
+| `show` | notes/mailmap/signature 内联显示 | 输出格式补齐；命名 pretty 预设 short/full/fuller/reference/raw + `--raw` diff 格式已实现；`mailmap` 在 GGT-13 覆盖 |
 | `stash` | `create` / `store` | 内部 API 暴露，独立于本计划 |
 | `symbolic-ref` | 仅支持 HEAD | SQLite refs 架构限制，非 Grit 差距 |
 | `tag` | editor (`-e`)、Git GPG interop | 独立于本计划 |
 | `cherry-pick` / `revert` | `--edit`、strategy flags、multi-commit todo | sequencer 增强，部分由 D 编号治理 |
-| `merge` | octopus/custom strategies、`--verify-signatures`、`--stat` | 策略引擎增强，独立于本计划 |
-| `commit` | `--status` / `-t --template` | 编辑器模板增强，独立于本计划 |
-| `describe` | `--contains` | 独立于本计划 |
-| `reset` / `restore` | merge/keep mode、overlay/conflict variants | 独立于本计划 |
+| `merge` | octopus/custom strategies | 策略引擎增强，独立于本计划（`--stat`、`--verify-signatures`(vault-key PGP) 已实现） |
+| `commit` | `-t --template` | 编辑器模板增强，独立于本计划（`--status` 已实现） |
+| `describe` | （`--contains` 已实现，git name-rev） | 独立于本计划 |
+| `reset` / `restore` | reset merge/keep mode、restore conflict re-render（`--merge`/`--conflict`）variants | 独立于本计划（restore `--overlay`/`--no-overlay` 与 `--ours`/`--theirs`/`--ignore-unmerged` 已实现） |
 | `bisect` | `replay` | 独立于本计划 |
-| `format-patch` | `--attach`/`--inline`/`--from`/`--to`/`--cc`/`--base`/`--interdiff`/`--range-diff`/`--notes`/`--force` | 邮件格式增强，独立于本计划 |
+| `format-patch` | `--attach`/`--inline`/`--base`/`--interdiff`/`--range-diff`/`--notes` | 邮件格式增强，独立于本计划（`--to`/`--cc`/`--no-to`/`--no-cc` #168、`--from` #169 已实现；`--force` 非 Git 标志） |
 | `fsck` | JSON/machine output、strict mode、pack verification surface | 输出和检查增强，独立于本计划 |
 | `archive` / `clean` (`-i`) / `pull` / `push` (local file remote) | 各自 README 记录的缺口 | 独立于本计划 |
 
@@ -208,14 +210,14 @@ flowchart TD
     S3 --> S4["阶段 4: diff 增强 + repack"]
     S4 --> S5["阶段 5: rerere"]
     S4 --> S6["阶段 6: bundle / fast-export / replace / mailmap"]
-    S3 --> S7["阶段 7: 协议内化"]
+    S0 --> S7["阶段 7: 协议内化（硬依赖仅阶段 0；排程建议在 GGT-09 后）"]
 ```
 
 ### 依赖与风险矩阵
 
 | 阶段 | 前置依赖 | 关键风险 | 风险缓解 |
 |------|----------|----------|----------|
-| 0 | 无 | `gc` 去重改 `maintenance.rs::run_gc` 可能破坏既有 maintenance 行为 | dry-run 计数/expire/JSON/warning 行为差异必须先有对比测试再改；保留旧实现可切换开关直至验收 |
+| 0 | 无 | **仅当**收口取「`run_gc` 采纳 `gc.rs` 逻辑」一路时，改 `maintenance.rs::run_gc` 可能破坏既有 maintenance 行为（「删除孤立实现」一路不改 `run_gc`，无此风险） | dry-run 计数/expire/JSON/warning 行为差异必须先有对比测试再改；保留旧实现可切换开关直至验收 |
 | 1 | 0 | `check-attr` 语义与 Git `.gitattributes` 混淆 | 文档标明 D5 有意差异；测试验证 `.libra_attributes` 独立解析 |
 | 2 | 1 | `update-ref` 改 SQLite refs 架构敏感项 | 先抽 `internal/tree_plumbing.rs` 再开 `update-ref`；CAS + reflog 事务测试先行 |
 | 3 | 2 | `apply` parser 体积大且需路径安全 | MVP 只做 `--check`；写入模式延迟到 rerere 需要时；path traversal 拒绝测试 |
@@ -233,7 +235,7 @@ flowchart TD
 |------|--------|----------|------|
 | 0.0 | **事实基线与文档同步** | 对照 `README.md`、`_compatibility.md`、`docs/commands/gc.md`、`docs/commands/prune.md`、`fetch.md`、`remote.md`，确认 `gc` / `prune` 内部化、`remote update -p` 已实现、`fetch --prune` 未实现。 | README、`_compatibility.md`、本文件和单命令文档不再互相覆盖或互相矛盾。 |
 | 0.1 | **内部化 `gc` / `prune` 资料收口** | 保持顶层 CLI 不注册；把 `docs/commands/gc.md`、`docs/commands/prune.md` 等用户资料降级为内部/历史入口或删除公开暗示；记录未来重新公开的治理条件。 | `libra gc --dry-run`、`libra prune -n` 若仍返回 `LBR-CLI-001`，文档必须清楚说明这是当前契约；不再有用户文档暗示可用。 |
-| 0.2 | **GC 领域实现去重** | `maintenance run --task gc` 委托共享实现，或抽取 `internal/repository_gc.rs`；`gc.rs` 若保留为内部模块，不得与 maintenance 分叉。 | `maintenance run --task gc` 的 dry-run、expire、JSON、warning 与内部 GC 测试使用同一领域逻辑；只有一套 reachability/prune 规则。 |
+| 0.2 | **GC 领域实现收口（孤立代码去留）** | 二选一并记入决策日志：① 删除未编译的孤立 `gc.rs`/`prune.rs`（`run_gc` 不变）；或 ② 抽取 `internal/repository_gc.rs` 单一实现、`run_gc` 委托它、删除重复。无论哪种，源码树最终只剩一套会编译的 reachability/prune 规则。 | 取 ② 时，`maintenance run --task gc` 的 dry-run、expire、JSON、warning 与内部 GC 测试共用同一领域逻辑；取 ① 时确认删除后无编译/测试残留引用。 |
 | 0.3 | **内部测试定位** | `tests/command/gc_test.rs`、`prune_test.rs` 若不接入 CLI 测试，改为内部模块测试或移入对应 internal 测试；避免死测试文件长期漂移。 | `tests/command/mod.rs` 不遗漏公开命令测试；内部化路径下不保留误导性的 CLI 集成测试文件。 |
 | 0.4 | **`fetch --prune`** | `FetchArgs` 加 `prune` / `-p`；fetch 成功后删 stale `refs/remotes/<name>/*`；复用 `remote prune` 的 stale 分类；`--dry-run` 只报告不删 ref；`--no-prune` 与 `--prune` 冲突或按 clap override 明确化。 | 远端删分支后 `fetch -p` 清 tracking ref；`fetch --dry-run -p` 不写 refs/reflog/FETCH_HEAD prune 记录；`fetch --no-prune` 行为与当前一致。 |
 | 0.5 | **`remote update -p` 同步债（✅ 已完成）** | 不重复实现；已同步命令 README 与 `COMPATIBILITY.md`，`remote_test.rs` 覆盖解析、无远端通知、不可达 fetch 失败与端到端 stale ref 修剪。 | 文档不再写 `update -p` 未公开；`remote update -p`（两段式 fetch-all-then-prune）与 `fetch --prune` 语义差异已明确记录。 |
@@ -244,7 +246,7 @@ flowchart TD
 
 **首个 PR 建议范围**：仅 0.0–0.3 + `gc_smoke`/文档同步。不要把 `fetch -p` 混入事实收口 PR。
 
-**回滚策略**：若 `maintenance run --task gc` 去重后行为退化，保留旧 `run_gc` 实现作为编译期 feature `legacy-maintenance-gc` 或运行时配置 `libra maintenance run --task gc --compat=legacy`，直至新实现通过所有 golden 输出对比。
+**回滚策略**：仅在收口方式 ②（`run_gc` 采纳 `gc.rs` 逻辑、会改 `run_gc` 行为）时需要回滚路径——保留旧 `run_gc` 作为编译期 feature `legacy-maintenance-gc` 或运行时 `libra maintenance run --task gc --compat=legacy`，直至新实现通过所有 golden 输出对比；收口方式 ①（删除孤立实现）不改 `run_gc`，无需回滚开关。
 
 ---
 
@@ -392,10 +394,11 @@ gantt
 2. 新增或更新 `docs/development/commands/<cmd>.md` 与 `docs/commands/<cmd>.md`。
 3. 若已有 unpublished 用户文档，移除 unpublished 状态并同步 `docs/commands/README.md`；如已有本地化文档，保持状态一致。
 4. 在 `src/cli.rs` 补 `EXAMPLES` / compat help guards（见 [`_general.md`](_general.md)）。
-5. 补或启用 `tests/command/`，必要时更新 `tests/command/mod.rs`；若新增 cargo integration target，同步 `tests/INDEX.md`。
+5. 补或启用 `tests/command/`，必要时更新 `tests/command/mod.rs`；若新增 cargo integration target（如 `perf_smoke`/`git_interop`/`credential_security`/`protocol_*`），必须**同时**在 `Cargo.toml` 注册 `[[test]]`（Cargo 默认发现只覆盖 `tests/` 顶层文件，未注册的 target 不会运行）、加 `tests/INDEX.md` 行、并按需接入 CI job；`tests/compat/` 下的 guard 另需遵守该目录注册约定。
 6. 补 `tools/integration-runner` scenario（若该命令已有场景或对外 smoke）。
 7. 若改动拒绝/延后边界，更新 [`_compatibility.md`](_compatibility.md) D 编号或本文件范围声明。
-8. 若该命令是 Libra 已公开或候选公开的 Git 兼容命令，不论是否列入本文件差距清单，只要 Grit 已有对应 `tests/t*.sh` 或 `data/tests/<group>/<stem>.toml` 记录，就必须执行 `GGT-00A` 的场景分析和重写流程：能直接表达 Libra 行为的断言重写成 Libra 原生测试；不符合 Libra 公开契约的断言必须改写为 `_compatibility.md` 有意差异/拒绝项，不能静默跳过。
+8. 若新增 `StableErrorCode` 变体（`check-ignore`/`merge-file`/`update-ref`/`apply` 等都会引入新退出码与错误码），必须同步 `docs/error-codes.md`，否则 `compat_error_codes_doc_sync` guard 会让构建失败。
+9. 若该命令是 Libra 已公开或候选公开的 Git 兼容命令，不论是否列入本文件差距清单，只要 Grit 已有对应 `tests/t*.sh` 或 `data/tests/<group>/<stem>.toml` 记录，就必须执行 `GGT-00A` 的场景分析和重写流程：能直接表达 Libra 行为的断言重写成 Libra 原生测试；不符合 Libra 公开契约的断言必须改写为 `_compatibility.md` 有意差异/拒绝项，不能静默跳过。
 
 ### 高风险变更质量门
 
@@ -407,7 +410,7 @@ gantt
 4. **输出与错误稳定性**：human、JSON、machine/porcelain 输出字段必须有测试；用户可见失败需要稳定错误码、可读原因、受影响资源和修复建议。
 5. **性能上界**：全仓对象遍历、patch 解析、pack 读写、fast-import/export 必须说明复杂度与内存策略；大输入应使用流式或分批处理，不得一次性加载整个 pack/导入流/大型 blob 集合。
 6. **互操作验证**：对导出 Git 格式的命令（bundle、fast-export、pack-objects）至少保留一个系统 Git 或 Grit 可读取的 smoke；对导入命令至少验证失败不留下半更新 ref。
-7. **许可证与来源记录**：任何来源于 Grit/Git 的数据型 fixture 都要记录 tag/commit、许可证、裁剪理由和不能由 Libra helper 生成的原因；不得复制 shell harness、C helper 或大段测试文本。
+7. **许可证与来源记录（GPLv2→MIT 净室边界）**：Grit 是双许可证——`grit-lib` 是 MIT，但 `grit-git`（CLI 二进制）与仓库内 `/git`、`/tests`（上游 Git 测试）是 **GPLv2**；Libra 是 **MIT**。因此：(a) 算法/行为参考优先取自 `grit-lib`(MIT) 和 Git 公开 man page，把 `grit-git`/`/tests` 视为只读 GPLv2 资产；(b) **不得**把 GPLv2 来源的源码、shell harness、C helper、`t*.sh` 文本或其逐字预期输出复制或翻译进 Libra；(c) 测试场景必须从 Libra 自身实测行为重新推导（clean-room），断言写 Libra 的预期而非照抄上游；(d) 任何保留的数据型 fixture 记录来源 tag/commit、许可证、裁剪理由和不能由 Libra helper 生成的原因。
 8. **崩溃与部分失败恢复**：定义 PR 涉及命令在进程崩溃、磁盘满、网络中断、半包/半导入后的仓库状态；提供可脚本化的恢复路径（如 `libra fsck` + `libra gc` 或 `libra reflog expire`），并在命令文档「可靠性」小节说明。
 9. **功能开关与回滚**：对可能改变用户可见行为的内部重构（如 `gc` 去重、`merge-base` LCA 修正、协议内化），优先使用编译期 feature 或运行时配置保留旧行为，直至新行为通过所有回归测试和互操作 smoke。
 
@@ -442,8 +445,9 @@ gantt
 - [ ] integration scenario（若 `tools/integration-runner` 新增 scenario）
 
 ## DCO / 合规
-- [ ] 所有 commit 已 `git commit -S -s` 签名并含 `Signed-off-by`
+- [ ] 所有 commit 已 `libra commit -S -s`（Git 兼容）签名并含 `Signed-off-by`
 - [ ] fixture 来源已按模板记录（如适用）
+- [ ] **无 GPLv2 污染**：未从 `grit-git` / `/git` / `/tests`（GPLv2）复制源码、shell harness、C helper 或逐字预期输出；算法参考仅取自 `grit-lib`(MIT) 或 Git man page；测试场景为 clean-room 重写
 
 ## 验证命令
 - [ ] `cargo +nightly fmt --all --check`
@@ -462,7 +466,7 @@ gantt
 
 ### 性能基线（写入验收门槛）
 
-下列基线必须随 PR 落地新测试或文档说明；未满足视为回归。基线为默认硬件（CI runner 等价或更弱），输入为 `git.git` 仓库的镜像快照或本仓库 `.libra` 自身。
+下列基线必须随 PR 落地新测试或文档说明；未满足视为回归。基线**必须用 release 构建测量**（`cargo build --release` 后跑 `target/release/libra`，或 `cargo test --release`）——debug 构建慢 10–50×，用 debug 二进制套这些目标会产生假性回归或假性达标。基线为默认硬件（CI runner 等价或更弱），输入为 `git.git` 仓库的镜像快照或本仓库 `.libra` 自身。
 
 | 操作 | 时间目标（中位/上界） | 内存目标（峰值 RSS） | 测量方法 |
 |------|----------------------|----------------------|----------|
@@ -471,6 +475,7 @@ gantt
 | `libra rev-list --all --count` 10000 refs | < 1s / < 3s | < 256 MiB | 同上 |
 | `libra fsck`（小仓库 < 1000 objects） | < 2s / < 5s | < 256 MiB | 同上 |
 | `libra gc`（dry-run，10000 objects） | < 5s / < 15s | < 512 MiB | 同上 |
+| `libra repack`（10000 objects 增量） | < 8s / < 20s | < 512 MiB | 同上；复用 maintenance pack 编码，不新增 pack writer |
 | `libra bundle create`（1000 objects） | < 3s / < 10s | < 512 MiB | 同上；含 pack 编码 |
 | `libra fast-import`（1000 commits stream） | < 5s / < 15s | < 512 MiB | 含对象写入、refs 更新 |
 | `libra apply --check`（10000 行单文件 patch） | < 1s / < 3s | < 128 MiB | 流式解析验证 |
@@ -481,40 +486,43 @@ gantt
 
 > 基线可随 PR 调整，但必须记录在命令文档「性能」小节；调整理由需有 commit 或 PR 引用。禁止未调整就删除基线。
 >
-> **测量命令示例**：
+> **测量命令示例**（务必先 `cargo build --release` 并指向 `target/release/libra`，不要用 debug 二进制或 `cargo run` 测时间/内存）：
 > ```bash
+> BIN=target/release/libra
 > # 时间
-> hyperfine --warmup 3 --min-runs 10 'libra log --oneline'
+> hyperfine --warmup 3 --min-runs 10 "$BIN log --oneline"
 > # 内存（macOS）
-> /usr/bin/time -l libra log --oneline 2>&1 | grep 'maximum resident'
+> /usr/bin/time -l "$BIN" log --oneline 2>&1 | grep 'maximum resident'
 > # 内存（Linux）
-> /usr/bin/time -v libra log --oneline 2>&1 | grep 'Maximum resident'
+> /usr/bin/time -v "$BIN" log --oneline 2>&1 | grep 'Maximum resident'
 > ```
 
 ### 测试矩阵与 CI 覆盖
 
 本计划的测试必须覆盖以下维度，缺失任一维度视为质量门不通过。
 
-| 维度 | 覆盖方式 | 适用范围 |
-|------|----------|----------|
-| 单元测试（纯函数） | `cargo test --lib` | 内部模块（`merge_base`、`patch`、`repository_gc`、`rerere`） |
-| CLI 集成测试 | `cargo test --test command_test` | 所有 GGT 新增/修改的公开命令 |
-| 网络协议测试 | `cargo test --test network_remotes_test --features test-network` | `fetch` / `push` / 协议内化（阶段 7） |
-| 安全专项测试 | `cargo test --test credential_security` | `credential`、`vault` |
-| 性能 smoke | `cargo test --test perf_smoke` | 性能基线覆盖的操作 |
-| 互操作 smoke | `cargo test --test git_interop -- --nocapture`（需系统 Git） | `bundle`/`fast-export`/`pack-objects` |
-| 集成 runner scenario | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- <scenario>` | 端到端跨命令流 |
-| 文档示例验证 | `cargo test --test compat_command_docs_examples_section` | 所有 `EXAMPLES` 块 |
-| Compat matrix 对齐 | `cargo test --test compat_matrix_alignment` | `COMPATIBILITY.md` 与 README 一致性 |
-| Lint/Format | `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings` | 全部 |
-| 协议 capability | `cargo test --test protocol_capability_negotiation --features test-network` | 阶段 7 / GGT-14 |
-| 协议 timeout/恢复 | `cargo test --test protocol_timeout_recovery --features test-network` | 阶段 7 / GGT-14 |
+「现状」列区分**已存在的 target**（可直接运行）与**本计划新建的 target**（🆕，必须随首个用到它的 GGT 任务创建：新增 `tests/<target>.rs`、在 `Cargo.toml` 注册 `[[test]]`、加 `tests/INDEX.md` 行，并按需接入 CI；compat guard 类 target 还需遵守 `tests/compat/` 注册约定）。在 target 落地前，相关验证命令视为「占位」，不得当作已通过。
 
-**CI 矩阵**：
-- `compat-offline-core`：默认 L1 套件；含 `command_test` / `compat_matrix_alignment` / `compat_command_docs_examples_section` / `compat_help_flag_descriptions` / lib tests / clippy / fmt
-- `compat-network-remotes`：Wave 3 / 阶段 7；`--features test-network` 跑 `network_remotes_test` / `protocol_*`
-- `compat-perf-smoke`：Wave 6 性能 smoke；`perf_smoke` 必须跑
-- `compat-credential-security`：可选；按需在 credential 任务时启用
+| 维度 | 覆盖方式 | 现状 | 适用范围 |
+|------|----------|------|----------|
+| 单元测试（纯函数） | `cargo test --lib` | ✅ 现有 | 内部模块（`merge_base`、`patch`、`repository_gc`、`rerere`） |
+| CLI 集成测试 | `cargo test --test command_test` | ✅ 现有 | 所有 GGT 新增/修改的公开命令 |
+| 网络协议测试 | `cargo test --test network_remotes_test --features test-network` | ✅ 现有 | `fetch` / `push` / 协议内化（阶段 7） |
+| 安全专项测试 | `cargo test --test credential_security` | 🆕 待建（GGT-08） | `credential`、`vault` |
+| 性能 smoke | `cargo test --test perf_smoke` | 🆕 待建（性能基线） | 性能基线覆盖的操作 |
+| 互操作 smoke | `cargo test --test git_interop -- --nocapture`（需系统 Git） | 🆕 待建（GGT-13） | `bundle`/`fast-export`/`pack-objects` |
+| 集成 runner scenario | `cargo run --manifest-path tools/integration-runner/Cargo.toml -- <scenario>` | ✅ 现有 | 端到端跨命令流 |
+| 文档示例验证 | `cargo test --test compat_command_docs_examples_section` | ✅ 现有（`tests/compat/`） | 所有 `EXAMPLES` 块 |
+| Compat matrix 对齐 | `cargo test --test compat_matrix_alignment` | ✅ 现有（`tests/compat/`） | `COMPATIBILITY.md` 与 README 一致性 |
+| Lint/Format | `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings` | ✅ 现有 | 全部 |
+| 协议 capability | `cargo test --test protocol_capability_negotiation --features test-network` | 🆕 待建（GGT-14） | 阶段 7 / GGT-14 |
+| 协议 timeout/恢复 | `cargo test --test protocol_timeout_recovery --features test-network` | 🆕 待建（GGT-14） | 阶段 7 / GGT-14 |
+
+**CI 矩阵**（✅ 现有 job 见 `CLAUDE.md`「CI Pipeline」；🆕 为本计划提议新增的 job，需在 `.github/workflows/base.yml` 落地）：
+- ✅ `compat-offline-core`：默认 L1 套件；含 `command_test` / `compat_matrix_alignment` / `compat_command_docs_examples_section` / `compat_help_flag_descriptions` / lib tests / clippy / fmt
+- ✅ `compat-network-remotes`：Wave 3；`--features test-network` 跑 `network_remotes_test`（协议内化阶段 7 的 `protocol_*` target 落地后纳入本 job 或新 job）
+- 🆕 `compat-perf-smoke`：Wave 6 性能 smoke；`perf_smoke` target 落地后必须跑（release 构建）
+- 🆕 `compat-credential-security`：可选；`credential_security` target 落地后在 credential 任务启用
 
 **未在 CI 矩阵的测试**（需手动验证）：
 - 系统 Git 互操作 smoke（依赖环境 Git 版本）
@@ -631,7 +639,9 @@ gantt
 
 **依赖**：GGT-00。
 
-**范围**：按当前 README 结论保留顶层 `gc` / `prune` 未公开状态，处理文档降级、死测试定位和 GC 领域实现去重；不处理 fetch prune，不注册顶层命令。若产品决定重新公开，必须先更新 `GGT-00` 决策，再把本任务替换为新的公开接线任务。
+**范围**：按当前 README 结论保留顶层 `gc` / `prune` 未公开状态，处理文档降级、死测试定位和 GC 领域实现收口；不处理 fetch prune，不注册顶层命令。若产品决定重新公开，必须先更新 `GGT-00` 决策，再把本任务替换为新的公开接线任务。
+
+**前提事实**：`src/command/gc.rs`、`prune.rs`（及其测试）当前**未在任何 `mod.rs`/`cli.rs` 声明，是未编译的孤立死代码**；唯一会运行的 GC 实现是 `maintenance.rs::run_gc`。因此本任务不是「合并两套运行中的实现」，而是**决定孤立代码的去留**并收口为单一领域实现。
 
 **可能改动文件**：
 - `src/command/gc.rs`
@@ -641,8 +651,8 @@ gantt
 - `tests/command/mod.rs`
 - `tests/command/gc_test.rs`
 - `tests/command/prune_test.rs`
-- `docs/commands/gc.md`
-- `docs/commands/prune.md`
+- `docs/commands/gc.md`、`docs/commands/prune.md`（用户面，可能仍暗示可用）
+- `docs/development/internal/gc.md`、`docs/development/internal/prune.md`（README 指向的内部资料）
 - `docs/commands/README.md`
 - `docs/development/commands/README.md`
 - `docs/development/commands/_compatibility.md`
@@ -651,10 +661,10 @@ gantt
 
 **验收标准**：
 - [ ] 用户文档不再暗示顶层 `libra gc` / `libra prune` 可用；`maintenance run --task gc` 是唯一公开入口，且 `_compatibility.md` 说明原因和未来重启公开条件。
-- [ ] `gc` 与 `maintenance run --task gc` 不再有两套可能分叉的领域实现。
+- [ ] 明确选择并记录收口方式：① **删除**孤立 `gc.rs`/`prune.rs`（`run_gc` 行为不变）；或 ② 抽取 `internal/repository_gc.rs` 单一领域实现、`run_gc` 委托它、删除重复源码。完成后源码树只剩一份会编译的 GC reachability/prune 规则，不留孤立死实现。
 - [ ] `gc_test.rs` / `prune_test.rs` 不再作为未接入的死 CLI 测试漂移；要么改为内部实现测试，要么删除并以 maintenance/内部测试覆盖同等行为。
 - [ ] destructive prune/gc 路径保留 dry-run、reachability、packed-object 保护和对象目录越界保护测试。
-- [ ] 保留旧 `run_gc` 的兼容开关（编译期 feature `legacy-maintenance-gc` 或运行时 `--compat=legacy`）直至新实现通过所有 golden 输出对比，避免 maintenance 行为退化无回滚路径。
+- [ ] **仅当**收口方式为 ②（即 `run_gc` 行为会变）时，保留旧 `run_gc` 的兼容开关（编译期 feature `legacy-maintenance-gc` 或运行时 `--compat=legacy`）直至新实现通过所有 golden 输出对比；方式 ① 因不改 `run_gc` 行为无需兼容开关，但需在决策日志说明删除的孤立实现及其原有覆盖差异。
 
 **验证**：
 - [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test maintenance_gc -- --nocapture`（或当前 maintenance GC 测试过滤器）
@@ -1066,6 +1076,7 @@ patch 输入
 |------|------|----------|----------|-----------|
 | 2026-06-24 | 初版生成 | Grit v0.5.0 基线核对 + Libra v0.17.1613 源码审计 | 全部 8 阶段 | 当前文件 |
 | 2026-06-24 | 增加方案评估结论速览、关键假设、性能内存基线、决策日志 | 多维度评审 | 全局结构 | 当前文件 |
+| 2026-06-24 | 事实复核与多维改进：① 更正 `gc.rs`/`prune.rs` 为**未编译孤立死代码**（非运行时分叉的两套实现），重写 GGT-01 收口口径；② 点名 Grit **GPLv2(`grit-git`/`/git`/`/tests`) vs MIT(`grit-lib`)**、Libra MIT 的 copyleft 污染风险，新增净室质量门与 PR 检查项；③ 标注 `perf_smoke`/`git_interop`/`credential_security`/`protocol_*` 为**待建** test target 及对应 CI job，补 `[[test]]` 注册与 `docs/error-codes.md` 同步要求；④ 性能基线要求 release 构建并补 `repack` 行；⑤ 修正 `diff.rs` 行号漂移并加行号约定脚注；⑥ 对齐阶段 7 依赖图（硬依赖仅阶段 0）。基线已对照 Grit `v0.5.0-12-gdfb079967`(`gitbutlerapp/grit`) 工作区核对：`KNOWN_COMMANDS`=152、`grit-lib`/`grit-git` 文件、`data/tests/<group>/<stem>.toml`、双许可证均已实地确认。 | 评估表 / 核对结论 / 质量门 / 测试矩阵 / 性能基线 / GGT-01 / 依赖图 / 决策日志 | 当前文件 |
 
 ---
 

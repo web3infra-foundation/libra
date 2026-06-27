@@ -33,6 +33,10 @@ use crate::{
 static GLOBAL_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
     Lazy::new(|| Mutex::new(None));
 
+/// Cached database connection for System scope, paired with the resolved DB path.
+static SYSTEM_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
+    Lazy::new(|| Mutex::new(None));
+
 const EXAMPLES: &str = r#"EXAMPLES:
     libra config set user.name "John Doe"              Set local config value
     libra config get user.name                         Get value (cascade lookup)
@@ -40,6 +44,7 @@ const EXAMPLES: &str = r#"EXAMPLES:
     libra config list                                  List all local entries
     libra config list --show-origin                    List with scope labels
     libra config set --global user.email "j@x.com"     Set global config
+    libra config set --system core.editor vim           Set system-wide config (needs privileges)
     libra config unset user.signingkey                 Remove a key
     libra config import --global                       Import from Git global config
     libra config set vault.env.GEMINI_API_KEY          Store API key (interactive)
@@ -58,11 +63,17 @@ pub enum ConfigScope {
     Local,
     /// User-level (`~/.libra/config.db`).
     Global,
+    /// System-wide (`/etc/libra/config.db`, overridable via
+    /// `LIBRA_CONFIG_SYSTEM_DB`). Lowest precedence; writing it usually needs
+    /// elevated privileges, like Git's `/etc/gitconfig`.
+    System,
 }
 
 impl ConfigScope {
-    /// Cascade order for reads (highest to lowest precedence).
-    pub const CASCADE_ORDER: [ConfigScope; 2] = [ConfigScope::Local, ConfigScope::Global];
+    /// Cascade order for reads (highest to lowest precedence): local overrides
+    /// global, which overrides system — matching Git.
+    pub const CASCADE_ORDER: [ConfigScope; 3] =
+        [ConfigScope::Local, ConfigScope::Global, ConfigScope::System];
 
     /// Get the config database path for this scope.
     pub fn get_config_path(&self) -> Option<PathBuf> {
@@ -74,33 +85,47 @@ impl ConfigScope {
                 }
                 dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
             }
+            ConfigScope::System => {
+                if let Some(p) = std::env::var_os("LIBRA_CONFIG_SYSTEM_DB") {
+                    return Some(PathBuf::from(p));
+                }
+                Some(PathBuf::from("/etc/libra/config.db"))
+            }
         }
     }
 
     pub async fn ensure_config_exists(&self) -> Result<(), String> {
         match self {
             ConfigScope::Local => Ok(()),
-            ConfigScope::Global => {
+            ConfigScope::Global | ConfigScope::System => {
+                let label = scope_name(*self);
                 if let Some(config_path) = self.get_config_path() {
                     if let Some(parent_dir) = config_path.parent()
                         && !parent_dir.exists()
                     {
                         std::fs::create_dir_all(parent_dir).map_err(|e| {
-                            format!("Failed to create global config directory: {e}")
+                            format!(
+                                "Failed to create {label} config directory '{}': {e}{}",
+                                parent_dir.display(),
+                                if matches!(self, ConfigScope::System) {
+                                    " (writing system config usually requires elevated privileges)"
+                                } else {
+                                    ""
+                                }
+                            )
                         })?;
                     }
                     if !config_path.exists() {
                         let config_path_str = config_path.to_string_lossy();
-                        create_database(&config_path_str)
-                            .await
-                            .map_err(|e| format!("Failed to create global config database: {e}"))?;
+                        create_database(&config_path_str).await.map_err(|e| {
+                            format!("Failed to create {label} config database: {e}")
+                        })?;
                     }
                     Ok(())
                 } else {
-                    Err(
-                        "Could not determine global config path: home directory not available"
-                            .to_string(),
-                    )
+                    Err(format!(
+                        "Could not determine {label} config path: home directory not available"
+                    ))
                 }
             }
         }
@@ -130,6 +155,9 @@ impl ScopedConfig {
             }
             ConfigScope::Global => {
                 Self::get_or_create_cached_connection(&GLOBAL_CONFIG_CONN, scope, "global").await
+            }
+            ConfigScope::System => {
+                Self::get_or_create_cached_connection(&SYSTEM_CONFIG_CONN, scope, "system").await
             }
         }
     }
@@ -319,7 +347,10 @@ pub struct ConfigArgs {
     /// Use global user config
     #[clap(long, global = true, group("scope"))]
     pub global: bool,
-    /// System scope (removed — always errors)
+    /// Use system-wide config (`/etc/libra/config.db`, overridable via
+    /// `LIBRA_CONFIG_SYSTEM_DB`). Lowest cascade precedence; writing it usually
+    /// requires elevated privileges. Vault-encrypted secrets are not supported
+    /// in this scope.
     #[clap(long, global = true, group("scope"))]
     pub system: bool,
 
@@ -489,15 +520,6 @@ pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    // Reject --system early. config.md treats this as a CLI usage error
-    // (exit 2 fine / 129 coarse) — the user picked an unsupported scope at
-    // the argument level, not at runtime.
-    if args.system {
-        return Err(CliError::command_usage(
-            "--system scope is not supported\n\nhint: use --local or --global",
-        ));
-    }
-
     let scope = get_scope(&args);
     let use_cascade = !has_explicit_scope(&args);
 
@@ -969,6 +991,27 @@ async fn handle_set(
         .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
+    // System-scope vault preflight: reject any write that would touch the vault
+    // BEFORE any `ScopedConfig` access, so a rejected `--system` vault write
+    // never creates or touches `/etc/libra/config.db`. The system scope has no
+    // vault (its unseal key would be root-owned and either unreadable to users
+    // or world-readable). The post-`get_all` guard below covers the rarer
+    // encryption-inheritance edge.
+    // The entire `vault.*` namespace is vault-related (incl. non-sensitive
+    // pubkeys like `vault.signing`/`vault.ssh.*.pubkey`/`vault.gpg.pubkey` that
+    // `is_sensitive_key` does not flag), so reject the whole prefix here. Git
+    // section names are case-insensitive, so match `Vault.*` too.
+    if scope == ConfigScope::System
+        && (encrypt
+            || key.to_ascii_lowercase().starts_with("vault.")
+            || (is_sensitive_key(key) && !plaintext))
+    {
+        return Err(CliError::command_usage(
+            "vault-encrypted secrets are not supported in --system scope",
+        )
+        .with_hint("use --global or --local for vault.* keys and --encrypt values"));
+    }
+
     // Check encryption state inheritance from existing entries.
     let existing_entries = ScopedConfig::get_all(scope, key).await.map_err(|e| {
         config_read_cli_error(format!(
@@ -979,6 +1022,19 @@ async fn handle_set(
     })?;
     let has_encrypted = existing_entries.iter().any(|e| e.encrypted);
     let has_plaintext = existing_entries.iter().any(|e| !e.encrypted);
+
+    // The system scope holds no vault, so an existing encrypted row should never
+    // be there. If one is (e.g. a hand-crafted DB), refuse to write the key at
+    // all — even with `--plaintext`, since `set_with_conn` would preserve the
+    // row's `encrypted=1` flag while storing a new plaintext value. This catches
+    // the edge the encrypt-time preflight above cannot (it runs regardless of
+    // `--encrypt`/`--plaintext`).
+    if scope == ConfigScope::System && has_encrypted {
+        return Err(CliError::command_usage(
+            "vault-encrypted secrets are not supported in --system scope",
+        )
+        .with_hint("this key already has an encrypted value; use --global or --local"));
+    }
 
     // Resolve the value
     let resolved_value = if stdin {
@@ -1062,6 +1118,15 @@ async fn handle_set(
 
     // Encrypt the value if needed
     let store_value = if should_encrypt {
+        // Vault-encrypted secrets are not supported in the system scope: its
+        // unseal key would live under a root-owned `/etc/libra` path readable by
+        // every user, defeating the encryption, and writing it needs root.
+        if scope == ConfigScope::System {
+            return Err(CliError::command_usage(
+                "vault-encrypted secrets are not supported in --system scope",
+            )
+            .with_hint("use --global or --local for vault.* keys and --encrypt values"));
+        }
         let sn = scope_name(scope);
         let unseal_key = match load_unseal_key_for_scope(sn).await {
             Some(key) => key,
@@ -2063,6 +2128,27 @@ async fn handle_rename_section(
         .with_exit_code(128));
     }
 
+    // System scope holds no vault: refuse a rename that would either carry an
+    // encrypted source row into it or land a key under a vault/secret namespace
+    // (which direct `set --system` also rejects).
+    if scope == ConfigScope::System {
+        for e in &source {
+            let name = e.key.strip_prefix(&old_prefix).unwrap_or(&e.key);
+            let new_key = format!("{new}.{name}");
+            if e.encrypted
+                || new_key.to_ascii_lowercase().starts_with("vault.")
+                || is_sensitive_key(&new_key)
+            {
+                return Err(CliError::command_usage(
+                    "vault-encrypted secrets are not supported in --system scope",
+                )
+                .with_hint(
+                    "rename into a vault/secret namespace is rejected in --system; use --global or --local",
+                ));
+            }
+        }
+    }
+
     for e in &source {
         // Exact members all begin with `{old}.`; the remainder is the key name
         // under the section (which itself may contain dots for nested names).
@@ -2103,6 +2189,19 @@ async fn handle_rename_section(
 }
 
 async fn handle_import(scope: ConfigScope, output: &OutputConfig) -> CliResult<()> {
+    // Import auto-encrypts sensitive keys (`is_sensitive_key`), but the system
+    // scope does not support the vault, so importing into it could silently
+    // store a plaintext value flagged as encrypted. Reject it up front for the
+    // same reason `--encrypt`/`vault.*` writes are rejected in this scope.
+    if scope == ConfigScope::System {
+        return Err(CliError::command_usage(
+            "config import is not supported in --system scope",
+        )
+        .with_hint(
+            "import would encrypt sensitive keys, which the system scope does not support; import into --global or --local",
+        ));
+    }
+
     let summary = import_git_config(scope)
         .await
         .map_err(CliError::from_legacy_string)?;
@@ -2138,8 +2237,11 @@ async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()>
             })?;
             storage.join(DATABASE)
         }
-        ConfigScope::Global => scope.get_config_path().ok_or_else(|| {
-            CliError::from_legacy_string("error: could not determine global config path")
+        ConfigScope::Global | ConfigScope::System => scope.get_config_path().ok_or_else(|| {
+            CliError::from_legacy_string(format!(
+                "error: could not determine {} config path",
+                scope_name(scope)
+            ))
         })?,
     };
 
@@ -2429,10 +2531,11 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
     let git_flag = match scope {
         ConfigScope::Local => "--local",
         ConfigScope::Global => "--global",
+        ConfigScope::System => "--system",
     };
 
     let mut git_args = vec!["config", git_flag, "--list", "-z"];
-    if scope == ConfigScope::Global {
+    if matches!(scope, ConfigScope::Global | ConfigScope::System) {
         git_args.push("--no-includes");
     }
 
@@ -2636,9 +2739,15 @@ async fn get_all_cascaded(key: &str) -> Result<Vec<(ConfigKvEntry, ConfigScope)>
 
 fn should_skip_config_scope_read_error(scope: ConfigScope, error: &str) -> bool {
     // Out-of-date schemas are now upgraded automatically on connect; the only
-    // surviving incompatibility is a global config DB whose schema is newer
-    // than this binary supports — skip that scope rather than failing the read.
-    scope == ConfigScope::Global && error.contains("is newer than this Libra binary supports")
+    // surviving incompatibility is a global/system config DB whose schema is
+    // newer than this binary supports — skip that scope rather than failing the
+    // read. A system config that is present but unreadable (e.g. permissions) is
+    // also skipped so a stray `/etc/libra/config.db` cannot break every read.
+    match scope {
+        ConfigScope::Global => error.contains("is newer than this Libra binary supports"),
+        ConfigScope::System => true,
+        ConfigScope::Local => false,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2649,11 +2758,14 @@ fn scope_name(scope: ConfigScope) -> &'static str {
     match scope {
         ConfigScope::Local => "local",
         ConfigScope::Global => "global",
+        ConfigScope::System => "system",
     }
 }
 
 fn get_scope(args: &ConfigArgs) -> ConfigScope {
-    if args.global {
+    if args.system {
+        ConfigScope::System
+    } else if args.global {
         ConfigScope::Global
     } else {
         ConfigScope::Local
