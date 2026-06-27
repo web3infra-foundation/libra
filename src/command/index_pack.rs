@@ -58,6 +58,14 @@ pub struct IndexPackArgs {
 
     #[arg(long, help = "Read pack data from standard input; requires -o")]
     pub stdin: bool,
+
+    #[arg(
+        long = "fix-thin",
+        help = "Accept Git's --fix-thin (thin-pack completion) flag as a no-op: Libra requires \
+                self-contained packs and does not resolve external delta bases, and never \
+                produces thin packs, so on the packs it indexes there is nothing to complete"
+    )]
+    pub fix_thin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +89,17 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
         keep,
         index_version,
         stdin,
+        fix_thin,
     } = args;
+
+    // `--fix-thin` is accepted for Git CLI compatibility but is a no-op. A thin
+    // pack carries `REF_DELTA` objects whose base objects live outside the pack;
+    // completing it means resolving those bases from the repository and appending
+    // them. Libra's pack decoder (git-internal) has no external-base resolver — it
+    // requires self-contained packs — and Libra never produces thin packs, so any
+    // pack that indexes successfully already had no external delta bases to add.
+    // This matches Git, where `--fix-thin` on a complete pack does nothing.
+    let _ = fix_thin;
 
     let index_file = match index_file {
         Some(index_file) => index_file,

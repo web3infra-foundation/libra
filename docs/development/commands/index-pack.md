@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra index-pack` 的目标是为已有 pack 归档或 stdin pack stream 构建或校验 pack index，是对象传输与 pack 处理的隐藏 plumbing 能力。实现需要继承 SHA-256、pack index handling 和错误码治理，同时把 thin pack 列为未完成差异；Git-style `--progress` / `--no-progress` 已作为兼容入口接收。
+`libra index-pack` 的目标是为已有 pack 归档或 stdin pack stream 构建或校验 pack index，是对象传输与 pack 处理的隐藏 plumbing 能力。实现需要继承 SHA-256、pack index handling 和错误码治理；Git-style `--progress` / `--no-progress` 与 `--fix-thin` 已作为兼容入口接收（`--fix-thin` 为接受式 no-op，见下）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。hidden plumbing command；pack file 到 idx 的基础路径已支持，`--stdin` 已支持并要求 `-o <INDEX_FILE>`；`--keep[=<MSG>]` 已支持；`--progress` / `--no-progress` 已接收并映射到现有全局进度模式；`--fix-thin` 尚未公开。
+- 兼容级别：`partial`。hidden plumbing command；pack file 到 idx 的基础路径已支持，`--stdin` 已支持并要求 `-o <INDEX_FILE>`；`--keep[=<MSG>]` 已支持；`--progress` / `--no-progress` 已接收并映射到现有全局进度模式；`--fix-thin` 已作为接受式 no-op 公开（libra 的 pack decoder（git-internal）无外部 delta-base 解析器、要求自包含 pack，且 libra 从不产出 thin pack，故能成功建索引的 pack 必无需补全的外部 base——与 Git 在完整 pack 上 `--fix-thin` 为 no-op 一致；真正的 thin-pack 补全不支持）。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -52,14 +52,14 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/index-pack.md`。
 - Synopsis：`libra index-pack [OPTIONS] [<PACK_FILE>]`。
-- 公开参数/子命令包括：`<PACK_FILE>`、`--stdin`、`-o <INDEX_FILE>`、`--keep[=<MSG>]`、`--index-version <INDEX_VERSION>`、`--progress`、`--no-progress`。
+- 公开参数/子命令包括：`<PACK_FILE>`、`--stdin`、`-o <INDEX_FILE>`、`--keep[=<MSG>]`、`--index-version <INDEX_VERSION>`、`--progress`、`--no-progress`、`--fix-thin`（接受式 no-op，见“还未实现的功能”✅ 行）。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容差异项 | --fix-thin (add bases for thin packs) | 原始对照：未实现；相关参数/替代：是；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现（接受式 no-op） | `--fix-thin` (add bases for thin packs) | `IndexPackArgs.fix_thin: bool`，接受但为 no-op：thin pack 的 `REF_DELTA` base 在 pack 之外，补全需从仓库解析这些 base 并追加。libra 的 pack decoder（git-internal `Pack::decode`）无外部-base 解析器——其 waitlist 在解码结束时 `assert_eq!(map_ref.len(), 0)`，要求自包含 pack——且 libra 从不产出 thin pack，故任何能成功建索引的 pack 都没有需要补全的外部 base。与 Git 在完整 pack 上 `--fix-thin` 为 no-op 一致；真正的 thin-pack 补全（手工解析 pack + 追加 base 对象 + 重算 trailer）属高风险 pack 手术、且受 git-internal 限制，未实现。带回归测试 `index_pack_fix_thin_is_noop_on_complete_pack`（带/不带 `--fix-thin` 产出字节相同的 idx）。 |
 
 ## 维护要求
 

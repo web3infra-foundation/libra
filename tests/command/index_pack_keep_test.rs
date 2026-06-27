@@ -93,3 +93,40 @@ fn index_pack_keep_without_message_writes_empty_keep_file() {
         0
     );
 }
+
+/// `--fix-thin` is accepted but a no-op: indexing a complete pack with it
+/// produces the exact same index as without it. Libra never produces thin packs
+/// and its pack decoder requires self-contained packs, so a pack that indexes
+/// successfully had no external delta bases to complete — matching Git, where
+/// `--fix-thin` on a complete pack does nothing.
+#[test]
+#[serial]
+fn index_pack_fix_thin_is_noop_on_complete_pack() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let dir_plain = tempdir().unwrap();
+    let plain_pack = copy_pack_to_dir("small-sha1", dir_plain.path());
+    let plain_idx = plain_pack.with_extension("idx");
+    let out = run_libra_command(&["index-pack", plain_pack.to_str().unwrap()], repo.path());
+    assert_cli_success(&out, "plain index-pack should succeed");
+
+    let dir_fix = tempdir().unwrap();
+    let fix_pack = copy_pack_to_dir("small-sha1", dir_fix.path());
+    let fix_idx = fix_pack.with_extension("idx");
+    let out = run_libra_command(
+        &["index-pack", "--fix-thin", fix_pack.to_str().unwrap()],
+        repo.path(),
+    );
+    assert_cli_success(
+        &out,
+        "index-pack --fix-thin should succeed (no-op on a complete pack)",
+    );
+
+    let plain_bytes = fs::read(&plain_idx).expect("plain idx readable");
+    let fix_bytes = fs::read(&fix_idx).expect("fix-thin idx readable");
+    assert_eq!(
+        plain_bytes, fix_bytes,
+        "--fix-thin must produce an identical index on a complete pack"
+    );
+}
