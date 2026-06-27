@@ -7,6 +7,7 @@ Revert some existing commits.
 ```
 libra revert [-n | --no-commit] [-m | --mainline <parent-number>] [-s | --signoff] [-e | --edit] [--no-edit] [--no-rerere-autoupdate] [--json] [--quiet] <commit>...
 libra revert --continue
+libra revert --skip
 libra revert --abort
 ```
 
@@ -22,9 +23,11 @@ To revert a **merge commit** (one with more than one parent), pass `-m <parent-n
 
 The command requires an active branch (not detached HEAD). It accepts one or more
 commit references, reverting them in order (each as its own revert commit); a
-conflict stops the sequence, to be finished with `libra revert --continue` or
-undone with `libra revert --abort`. `-n/--no-commit` and `-m/--mainline` apply
-only to a single commit.
+conflict stops the sequence, to be finished with `libra revert --continue`,
+skipped with `libra revert --skip`, or undone with `libra revert --abort`. When a
+conflict interrupts a multi-commit revert, the commits still pending behind it are
+remembered and reverted automatically once `--continue`/`--skip` resumes the
+sequence. `-n/--no-commit` and `-m/--mainline` apply only to a single commit.
 
 ## Options
 
@@ -60,7 +63,7 @@ libra revert -m 1 <merge-commit>
 
 One or more commit references to revert, applied in the given order. Each can be a
 full SHA-1 hash, an abbreviated hash, a branch name, `HEAD`, or any ref that
-resolves to a commit. (The positional is optional only with `--continue`/`--abort`.)
+resolves to a commit. (The positional is optional only with `--continue`/`--skip`/`--abort`.)
 
 ```bash
 # Revert the most recent commit
@@ -178,10 +181,13 @@ When `--no-commit` is used, `new_commit` and `short_new` are `null`:
 
 `libra revert <commit1> <commit2> ...` reverts a sequence of commits in order,
 each as its own revert commit relative to the previous result. If a revert in the
-sequence conflicts, the operation stops there; already-completed reverts are kept,
-and you finish the conflicting one with `libra revert --continue` (or undo it with
-`--abort`). Note that `-n/--no-commit` and `-m/--mainline` apply only to a single
-commit and are rejected when multiple commits are given.
+sequence conflicts, the operation stops there; already-completed reverts are kept
+and the commits still pending behind the conflict are remembered. You then finish
+the conflicting one with `libra revert --continue` (after resolving), discard it
+with `libra revert --skip`, or undo with `libra revert --abort`; `--continue` and
+`--skip` automatically revert the remembered pending commits before completing.
+Note that `-n/--no-commit` and `-m/--mainline` apply only to a single commit and
+are rejected when multiple commits are given.
 
 ### Merge commit support (`--mainline`)
 
@@ -192,17 +198,23 @@ Git's `--mainline <parent-number>` selects which parent of a merge commit to dif
 
 The generated revert commit still records a single parent (the current `HEAD`), matching Git.
 
-### Conflict handling (`--continue`, `--abort`)
+### Conflict handling (`--continue`, `--skip`, `--abort`)
 
 A revert that conflicts writes three-way conflict markers to the working tree,
 records revert state in `revert-state.json`, and returns `LBR-CONFLICT-001`. You
-then resolve the conflicts and run `libra revert --continue` to finish, or
+then resolve the conflicts and run `libra revert --continue` to finish,
+`libra revert --skip` to discard the current commit and move on, or
 `libra revert --abort` to restore the pre-revert state.
 
 1. **Explicit, agent-friendly errors.** The specific path and error code are
    reported so an agent can resolve the conflict programmatically and continue.
 2. **Predictable state.** Revert state lives in a single `revert-state.json`
    file rather than scattered implicit markers.
+3. **Sequence-aware.** When the conflict interrupts a multi-commit revert, the
+   still-pending commits are stored in the state file (`remaining`), so
+   `--continue` (after resolving) and `--skip` (discarding the current commit)
+   both finish the rest of the sequence automatically. `--skip` with nothing left
+   simply clears the state without creating a commit.
 
 ### Conflict model (three-way merge)
 
@@ -210,8 +222,8 @@ Libra's revert applies the inverse change with a path-level three-way merge. Whe
 the result is unambiguous the file is updated cleanly; when it overlaps with later
 changes, standard conflict markers are written to the working tree, the unmerged
 state and revert progress are saved in `revert-state.json`, and `LBR-CONFLICT-001`
-is returned. You resolve the markers and run `libra revert --continue` (or
-`libra revert --abort`).
+is returned. You resolve the markers and run `libra revert --continue`, skip the
+commit with `libra revert --skip`, or unwind with `libra revert --abort`.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -223,9 +235,9 @@ is returned. You resolve the markers and run `libra revert --continue` (or
 | No rerere autoupdate | `--no-rerere-autoupdate` | N/A | `--no-rerere-autoupdate` (accepted no-op; no rerere) |
 | Edit message | `-e`/`--edit` | N/A | `-e`/`--edit` (open the editor on the message; unlike Git, Libra does not open one by default — opt-in) |
 | Mainline parent | `--mainline <n>` / `-m <n>` | N/A | `--mainline <n>` / `-m <n>` (required for merge commits) |
-| Continue after conflict | `--continue` | N/A | `--continue` (after resolving conflicts) |
+| Continue after conflict | `--continue` | N/A | `--continue` (after resolving; auto-continues remaining commits) |
 | Abort in-progress | `--abort` | N/A | `--abort` (restores the pre-revert state) |
-| Skip current commit | `--skip` | N/A | Not supported |
+| Skip current commit | `--skip` | N/A | `--skip` (discards the conflicted commit, continues the sequence) |
 | Strategy | `--strategy <s>` | N/A | Not supported |
 | Strategy option | `-X <option>` | N/A | Not supported |
 | GPG sign | `--gpg-sign` / `-S` | N/A | Not supported (planned) |
@@ -243,6 +255,6 @@ is returned. You resolve the markers and run `libra revert --continue` (or
 | `LBR-REPO-003` | HEAD is detached (not on a branch) | Switch to a branch with `libra switch <branch>` |
 | `LBR-CLI-003` | Cannot resolve the commit reference | Use `libra log` to find valid commit references |
 | `LBR-CLI-002` | Merge commit without `-m`, `-m` on a non-merge commit, or out-of-range parent number (exit 128); or, with `-e`/`--edit`, no editor configured, the editor aborted, or an empty message (exit 129) | Pass a valid `-m <parent-number>` for merge commits (omit it for non-merge commits); for `--edit`, set `$GIT_EDITOR`/`core.editor` and save a non-empty message |
-| `LBR-CONFLICT-001` | File was modified by a later commit, creating a conflict | Resolve conflicts, then `libra revert --continue` (or `libra revert --abort`) |
+| `LBR-CONFLICT-001` | File was modified by a later commit, creating a conflict | Resolve conflicts then `libra revert --continue`, skip the commit with `libra revert --skip`, or cancel with `libra revert --abort` |
 | `LBR-IO-001` | Failed to load object (commit, tree, blob) | Check repository integrity |
 | `LBR-IO-002` | Failed to save object, index, or update HEAD | Check filesystem permissions and repository writability |

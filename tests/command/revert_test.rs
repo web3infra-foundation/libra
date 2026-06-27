@@ -164,6 +164,7 @@ async fn test_basic_revert() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        skip: false,
         edit: false,
         no_edit: false,
     })
@@ -288,6 +289,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        skip: false,
         edit: false,
         no_edit: false,
     })
@@ -375,6 +377,7 @@ async fn test_revert_root_commit() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        skip: false,
         edit: false,
         no_edit: false,
     })
@@ -399,6 +402,109 @@ async fn test_revert_root_commit() {
         "No files should exist after reverting root commit"
     );
     println!("Root commit revert test passed");
+}
+
+/// Regression: reverting a root commit (with auto-commit) must actually
+/// produce an empty-tree revert commit rather than erroring out.
+///
+/// Previously `create_empty_revert_commit` built the empty tree via
+/// `Tree::from_tree_items(Vec::new())`, which git-internal rejects with
+/// "When export tree object to meta, the items is empty" (LBR-IO-002, exit
+/// 128). Because the working tree is cleared *before* the commit is created,
+/// the older `test_revert_root_commit` still passed even though no commit was
+/// ever recorded. This test asserts on the commit itself: `execute_safe` must
+/// succeed, HEAD must advance to a new commit whose parent is the root and
+/// whose tree is Git's canonical empty tree.
+#[tokio::test]
+#[serial]
+async fn test_revert_root_commit_creates_empty_tree_commit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::write("initial.txt", "initial content").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["initial.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Initial commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+        ..Default::default()
+    })
+    .await;
+
+    let root_hash = Head::current_commit()
+        .await
+        .expect("Should have current commit");
+
+    // `execute_safe` surfaces the real error; before the fix this returned the
+    // "items is empty" SaveObject failure instead of `Ok(())`.
+    revert::execute_safe(
+        revert::RevertArgs {
+            no_rerere_autoupdate: false,
+            commit: vec![root_hash.to_string()],
+            no_commit: false,
+            mainline: None,
+            signoff: false,
+            continue_revert: false,
+            abort: false,
+            skip: false,
+            edit: false,
+            no_edit: false,
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("reverting a root commit should produce an empty-tree commit");
+
+    // HEAD must advance to a freshly created revert commit.
+    let revert_hash = Head::current_commit()
+        .await
+        .expect("HEAD should point at the revert commit");
+    assert_ne!(
+        revert_hash, root_hash,
+        "revert should create a new commit, not leave HEAD at the root"
+    );
+
+    let revert_commit: Commit = load_object(&revert_hash).expect("failed to load revert commit");
+    assert_eq!(
+        revert_commit.parent_commit_ids,
+        vec![root_hash],
+        "the revert commit's only parent should be the reverted root commit"
+    );
+
+    // The revert commit's tree is Git's canonical empty tree
+    // (4b825dc642cb6eb9a060e54bf8d69288fbee4904 under SHA-1).
+    let expected_empty_tree = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+    assert_eq!(
+        revert_commit.tree_id, expected_empty_tree,
+        "the revert commit should reference the canonical empty tree"
+    );
+
+    // The empty tree object must be retrievable and contain zero entries.
+    let tree: Tree = load_object(&revert_commit.tree_id).expect("empty tree should be stored");
+    assert!(
+        tree.tree_items.is_empty(),
+        "the stored revert tree should have no entries"
+    );
 }
 
 #[test]
@@ -703,6 +809,7 @@ async fn test_revert_errors() {
         signoff: false,
         continue_revert: false,
         abort: false,
+        skip: false,
         edit: false,
         no_edit: false,
     })
@@ -1101,5 +1208,312 @@ fn test_revert_edit_failure_during_continue_keeps_state() {
     assert!(
         p.join(".libra/revert-state.json").exists(),
         "revert state remains after a failed --continue editor"
+    );
+}
+
+/// Build a repo where reverting `c2` conflicts (f.txt's middle line is changed
+/// again by c4 after c2) but `c3` (which adds g.txt) reverts cleanly. Returns
+/// `(c2_hash, c3_hash)`.
+fn setup_conflict_then_clean(p: &std::path::Path) -> (String, String) {
+    use super::run_libra_command;
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    let commit = |body: Option<&str>, g: Option<&str>, msg: &str| {
+        if let Some(b) = body {
+            fs::write(p.join("f.txt"), b).expect("write f");
+            run_libra_command(&["add", "f.txt"], p);
+        }
+        if let Some(gc) = g {
+            fs::write(p.join("g.txt"), gc).expect("write g");
+            run_libra_command(&["add", "g.txt"], p);
+        }
+        assert!(
+            run_libra_command(&["commit", "-m", msg, "--no-verify"], p)
+                .status
+                .success(),
+            "commit {msg}"
+        );
+    };
+    commit(Some("L1\nL2\nL3\n"), None, "c1");
+    commit(Some("L1\nL2mod\nL3\n"), None, "c2");
+    let c2 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    commit(None, Some("g1\n"), "c3");
+    let c3 = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    commit(Some("L1\nL2again\nL3\n"), None, "c4");
+    (c2, c3)
+}
+
+/// `revert <c2> <c3>` where c2 conflicts: after resolving and `--continue`, the
+/// remaining commit c3 must ALSO be reverted (regression: previously the pending
+/// commits behind a conflict were silently dropped).
+#[test]
+#[serial]
+fn test_revert_continue_drains_remaining_commits() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, c3) = setup_conflict_then_clean(p);
+
+    let out = run_libra_command(&["revert", &c2, &c3], p);
+    assert!(!out.status.success(), "c2 revert conflicts");
+    assert!(p.join("g.txt").exists(), "c3 not reverted yet");
+
+    // Resolve the conflict and continue.
+    fs::write(p.join("f.txt"), "L1\nRESOLVED\nL3\n").expect("resolve");
+    run_libra_command(&["add", "f.txt"], p);
+    let cont = run_libra_command(&["revert", "--continue"], p);
+    assert!(
+        cont.status.success(),
+        "--continue: {}",
+        String::from_utf8_lossy(&cont.stderr)
+    );
+    // c3 was drained from the sequence and reverted -> g.txt removed.
+    assert!(
+        !p.join("g.txt").exists(),
+        "remaining commit c3 reverted on --continue"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "state cleared after the whole sequence completes"
+    );
+}
+
+/// `revert --skip` discards the current (conflicted) commit and continues with
+/// the remaining ones: c2 stays un-reverted, c3 is reverted.
+#[test]
+#[serial]
+fn test_revert_skip_continues_with_remaining() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, c3) = setup_conflict_then_clean(p);
+
+    let out = run_libra_command(&["revert", &c2, &c3], p);
+    assert!(!out.status.success(), "c2 revert conflicts");
+
+    let skip = run_libra_command(&["revert", "--skip"], p);
+    assert!(
+        skip.status.success(),
+        "--skip: {}",
+        String::from_utf8_lossy(&skip.stderr)
+    );
+    // c2 was skipped (f.txt keeps its latest content, no conflict markers).
+    let f = fs::read_to_string(p.join("f.txt")).unwrap();
+    assert_eq!(
+        f, "L1\nL2again\nL3\n",
+        "skipped commit's changes discarded cleanly"
+    );
+    assert!(!f.contains("<<<<<<<"), "no conflict markers remain");
+    // c3 (the remaining commit) was still reverted.
+    assert!(
+        !p.join("g.txt").exists(),
+        "remaining commit c3 reverted after --skip"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "state cleared"
+    );
+}
+
+/// `revert --skip` when nothing remains after the skipped commit clears the
+/// in-progress state and creates no commit (HEAD unchanged).
+#[test]
+#[serial]
+fn test_revert_skip_with_nothing_remaining() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, _c3) = setup_conflict_then_clean(p);
+
+    let head_before = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    let out = run_libra_command(&["revert", &c2], p);
+    assert!(!out.status.success(), "single c2 revert conflicts");
+
+    let skip = run_libra_command(&["revert", "--skip"], p);
+    assert!(skip.status.success(), "--skip with nothing left succeeds");
+    let head_after = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    assert_eq!(head_before, head_after, "no revert commit created");
+    assert!(
+        !fs::read_to_string(p.join("f.txt"))
+            .unwrap()
+            .contains("<<<<<<<"),
+        "conflict markers discarded"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "state cleared"
+    );
+}
+
+/// Build a repo like `setup_conflict_then_clean` but also create a 2-parent
+/// merge commit `M` (merging a side branch into main). Reverting `c2` conflicts;
+/// `M` is a merge, so reverting it without `-m` during a sequence drain fails
+/// with a non-conflict error. Returns `(c2_hash, merge_hash)`.
+fn setup_conflict_then_merge(p: &std::path::Path) -> (String, String) {
+    use super::run_libra_command;
+    assert!(run_libra_command(&["init"], p).status.success(), "init");
+    run_libra_command(&["config", "set", "user.name", "t"], p);
+    run_libra_command(&["config", "set", "user.email", "t@t"], p);
+    let rev_parse = |p: &std::path::Path| {
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+            .trim()
+            .to_string()
+    };
+
+    fs::write(p.join("f.txt"), "L1\nL2\nL3\n").expect("write f");
+    run_libra_command(&["add", "f.txt"], p);
+    run_libra_command(&["commit", "-m", "c1", "--no-verify"], p);
+    // A side branch off c1 with a disjoint file, for a clean merge later.
+    run_libra_command(&["branch", "side"], p);
+
+    fs::write(p.join("f.txt"), "L1\nL2mod\nL3\n").expect("modify f");
+    run_libra_command(&["add", "f.txt"], p);
+    run_libra_command(&["commit", "-m", "c2", "--no-verify"], p);
+    let c2 = rev_parse(p);
+
+    fs::write(p.join("f.txt"), "L1\nL2again\nL3\n").expect("re-modify f");
+    run_libra_command(&["add", "f.txt"], p);
+    run_libra_command(&["commit", "-m", "c3", "--no-verify"], p);
+
+    run_libra_command(&["switch", "side"], p);
+    fs::write(p.join("s.txt"), "s\n").expect("write s");
+    run_libra_command(&["add", "s.txt"], p);
+    run_libra_command(&["commit", "-m", "sideC", "--no-verify"], p);
+    run_libra_command(&["switch", "main"], p);
+    assert!(
+        run_libra_command(&["merge", "side"], p).status.success(),
+        "merge side into main"
+    );
+    let merge = rev_parse(p);
+    (c2, merge)
+}
+
+/// `revert` resolves every commit spec up front: a bad ref later in the list
+/// fails before any revert is applied (no partial work, no in-progress state).
+#[test]
+#[serial]
+fn test_revert_rejects_bad_ref_up_front() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, _c3) = setup_conflict_then_clean(p);
+    let f_before = fs::read_to_string(p.join("f.txt")).unwrap();
+
+    let out = run_libra_command(&["revert", &c2, "this-ref-does-not-exist"], p);
+    assert!(
+        !out.status.success(),
+        "a bad ref in the list fails the whole revert"
+    );
+    // c2 must NOT have been reverted (no partial application).
+    assert_eq!(
+        fs::read_to_string(p.join("f.txt")).unwrap(),
+        f_before,
+        "no commit reverted when a later ref is invalid"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "no in-progress state from an up-front validation failure"
+    );
+}
+
+/// The pending queue persists resolved commit IDs, not the raw refs, so a ref
+/// that moves during the conflict pause cannot change what gets reverted.
+#[test]
+#[serial]
+fn test_revert_remaining_persists_resolved_ids() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, c3) = setup_conflict_then_clean(p);
+    // A branch pointing at c3, used as the pending spec.
+    run_libra_command(&["branch", "target", &c3], p);
+
+    let out = run_libra_command(&["revert", &c2, "target"], p);
+    assert!(!out.status.success(), "c2 conflicts");
+    let state = fs::read_to_string(p.join(".libra/revert-state.json")).expect("state");
+    // The stored remaining entry is c3's resolved hash, not the branch name.
+    assert!(
+        state.contains(&c3),
+        "remaining stores the resolved id {c3}, got: {state}"
+    );
+    assert!(
+        !state.contains("target"),
+        "remaining must not store the raw ref name, got: {state}"
+    );
+}
+
+/// Regression: a non-conflict error while draining the remaining queue on
+/// `--continue` (here a merge commit needing `-m`) must clear the state, so the
+/// already-finished conflict is not left lingering as in-progress.
+#[test]
+#[serial]
+fn test_revert_continue_clears_state_on_drain_error() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, merge) = setup_conflict_then_merge(p);
+
+    let out = run_libra_command(&["revert", &c2, &merge], p);
+    assert!(!out.status.success(), "c2 revert conflicts");
+    assert!(
+        p.join(".libra/revert-state.json").exists(),
+        "conflict records state"
+    );
+
+    fs::write(p.join("f.txt"), "L1\nRESOLVED\nL3\n").expect("resolve");
+    run_libra_command(&["add", "f.txt"], p);
+    // --continue finishes c2, then fails to revert the merge commit (needs -m).
+    let cont = run_libra_command(&["revert", "--continue"], p);
+    assert!(
+        !cont.status.success(),
+        "the merge commit in the queue fails the drain"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "stale state must not point at the already-committed conflict"
+    );
+    let retry = run_libra_command(&["revert", "--continue"], p);
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("no revert in progress"),
+        "retry reports no in-progress revert"
+    );
+}
+
+/// Regression (skip side): a non-conflict drain error after `--skip` must also
+/// clear the state.
+#[test]
+#[serial]
+fn test_revert_skip_clears_state_on_drain_error() {
+    use super::run_libra_command;
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    let (c2, merge) = setup_conflict_then_merge(p);
+
+    let out = run_libra_command(&["revert", &c2, &merge], p);
+    assert!(!out.status.success(), "c2 revert conflicts");
+
+    let skip = run_libra_command(&["revert", "--skip"], p);
+    assert!(
+        !skip.status.success(),
+        "the merge commit in the queue fails the drain"
+    );
+    assert!(
+        !p.join(".libra/revert-state.json").exists(),
+        "skip must not leave stale state after a drain error"
+    );
+    let retry = run_libra_command(&["revert", "--skip"], p);
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("no revert in progress"),
+        "retry reports no in-progress revert"
     );
 }

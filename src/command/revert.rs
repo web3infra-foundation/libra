@@ -13,9 +13,11 @@ use git_internal::{
     internal::{
         index::{Index, IndexEntry},
         object::{
+            ObjectTrait,
             blob::Blob,
             commit::Commit,
             tree::{Tree, TreeItemMode},
+            types::ObjectType,
         },
     },
 };
@@ -75,7 +77,7 @@ enum RevertError {
     Conflicts { paths: String },
 
     #[error(
-        "a revert is already in progress; resolve it with 'libra revert --continue' or cancel with '--abort'"
+        "a revert is already in progress; finish it with 'libra revert --continue', skip the current commit with '--skip', or cancel with '--abort'"
     )]
     RevertInProgress,
 
@@ -213,6 +215,7 @@ impl From<RevertError> for CliError {
             RevertError::Conflicts { .. } => CliError::failure(message)
                 .with_stable_code(stable_code)
                 .with_hint("resolve the conflicts, then run 'libra revert --continue'")
+                .with_hint("or skip this commit with 'libra revert --skip'")
                 .with_hint("or cancel with 'libra revert --abort'"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
@@ -241,16 +244,21 @@ pub struct RevertOutput {
 pub struct RevertArgs {
     /// Commits to revert, in order (commit hash, branch name, or HEAD). Multiple
     /// commits are reverted sequentially, each as its own revert commit.
-    #[clap(required_unless_present_any = ["continue_revert", "abort"], num_args = 0..)]
+    #[clap(required_unless_present_any = ["continue_revert", "abort", "skip"], num_args = 0..)]
     pub commit: Vec<String>,
 
     /// Continue an in-progress revert after resolving conflicts.
-    #[clap(long = "continue", conflicts_with_all = ["abort", "no_commit", "mainline"])]
+    #[clap(long = "continue", conflicts_with_all = ["abort", "skip", "no_commit", "mainline"])]
     pub continue_revert: bool,
 
     /// Abort an in-progress revert and restore the pre-revert state.
-    #[clap(long, conflicts_with_all = ["continue_revert", "no_commit", "mainline"])]
+    #[clap(long, conflicts_with_all = ["continue_revert", "skip", "no_commit", "mainline"])]
     pub abort: bool,
+
+    /// Skip the current (conflicted) commit and continue the revert sequence
+    /// with the remaining commits, discarding the current commit's changes.
+    #[clap(long, conflicts_with_all = ["continue_revert", "abort", "no_commit", "mainline"])]
+    pub skip: bool,
 
     /// Don't automatically commit the revert, just stage the changes
     #[clap(short = 'n', long)]
@@ -312,6 +320,9 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
     if args.continue_revert {
         return run_revert_continue().await;
     }
+    if args.skip {
+        return run_revert_skip().await;
+    }
 
     // A conflicted revert must be resolved (`--continue`) or unwound (`--abort`)
     // before a new revert can start.
@@ -339,17 +350,91 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
         }
     }
 
-    // Revert each commit in order; each revert is applied relative to (and
-    // committed onto) the HEAD produced by the previous one. A conflict stops the
-    // sequence and records state for `--continue`/`--abort`.
-    let mut last: Option<(String, Option<ObjectHash>)> = None;
-    let mut total_files_changed = 0usize;
+    // Resolve every commit spec to a stable commit ID up front (failing fast on
+    // a bad ref before any revert is applied). The pending queue persisted on a
+    // conflict then holds commit IDs, not refs — so a branch/`HEAD` that moves
+    // while the revert is paused cannot make `--continue`/`--skip` revert a
+    // different commit than the one originally named (matching Git's sequencer).
+    let mut resolved: Vec<ObjectHash> = Vec::with_capacity(args.commit.len());
     for spec in &args.commit {
-        let commit_id = resolve_commit(spec)
+        let id = resolve_commit(spec)
             .await
             .map_err(|_| RevertError::InvalidCommit(spec.clone()))?;
+        resolved.push(id);
+    }
+
+    // Revert each commit in order; each revert is applied relative to (and
+    // committed onto) the HEAD produced by the previous one. A conflict stops the
+    // sequence and records state (with the still-pending commit IDs) so
+    // `--continue`/`--skip` can finish the rest.
+    let params = RevertParams {
+        mainline: args.mainline,
+        no_commit: args.no_commit,
+        signoff: args.signoff,
+        edit: args.edit,
+    };
+    let outcome = revert_sequence(&resolved, &params, None, 0).await?;
+    // A clean run leaves no in-progress state to clear (cleanup is a no-op then).
+    RevertState::cleanup()?;
+    // INVARIANT: control reached here only past the abort/continue/skip
+    // short-circuits, so clap's `required_unless_present_any` guarantees
+    // `args.commit` (and thus `resolved`) is non-empty; `revert_sequence` over a
+    // non-empty slice always yields `Some` (each iteration sets `last` or returns
+    // early).
+    let (commit_str, revert_commit_id, total_files_changed) =
+        outcome.expect("non-empty commit list yields a sequence result");
+    Ok(RevertOutput {
+        reverted_commit: commit_str.clone(),
+        short_reverted: short_display_hash(&commit_str).to_string(),
+        new_commit: revert_commit_id.as_ref().map(|id| id.to_string()),
+        short_new: revert_commit_id
+            .as_ref()
+            .map(|id| short_display_hash(&id.to_string()).to_string()),
+        no_commit: args.no_commit,
+        files_changed: total_files_changed,
+    })
+}
+
+/// Revert the already-resolved commit `ids` in order against the current HEAD
+/// using `params`. `seed` is the already-completed
+/// `(reverted_commit, revert_commit_id)` from a resumed sequence (so an empty
+/// `ids` after `--continue` still reports a result), and `seed_files_changed`
+/// accumulates onto it.
+///
+/// The queue carries resolved [`ObjectHash`] values (never re-run through the ref
+/// resolver) so a branch/tag that moves while the revert is paused cannot
+/// redirect the operation. On the first conflict, persists [`RevertState`]
+/// carrying the **still-pending** commit IDs (as hex strings) as `remaining` and
+/// returns `Conflicts`. On full success returns
+/// `Some((last_reverted, last_revert_commit, total_files_changed))`, or `None`
+/// only when both `ids` and `seed` are empty.
+/// Parse the persisted `remaining` queue (hex commit IDs) back into
+/// [`ObjectHash`] values WITHOUT going through the ref resolver, so a branch/tag
+/// created with the same name as a stored hash cannot redirect a resumed revert.
+fn parse_remaining_ids(remaining: &[String]) -> Result<Vec<ObjectHash>, RevertError> {
+    remaining
+        .iter()
+        .map(|s| {
+            ObjectHash::from_str(s).map_err(|e| {
+                RevertError::LoadObject(format!(
+                    "invalid pending commit id '{s}' in revert state: {e}"
+                ))
+            })
+        })
+        .collect()
+}
+
+async fn revert_sequence(
+    ids: &[ObjectHash],
+    params: &RevertParams,
+    seed: Option<(String, Option<ObjectHash>)>,
+    seed_files_changed: usize,
+) -> Result<Option<(String, Option<ObjectHash>, usize)>, RevertError> {
+    let mut last = seed;
+    let mut total_files_changed = seed_files_changed;
+    for (i, commit_id) in ids.iter().enumerate() {
         let orig_head = Head::current_commit().await.map(|h| h.to_string());
-        match revert_single_commit(&commit_id, &args).await? {
+        match revert_single_commit(commit_id, params).await? {
             SingleRevertOutcome::Committed {
                 revert_commit_id,
                 files_changed,
@@ -362,8 +447,9 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
                     RevertState {
                         orig_head,
                         reverted_commit: commit_id.to_string(),
-                        signoff: args.signoff,
-                        edit: args.edit,
+                        signoff: params.signoff,
+                        edit: params.edit,
+                        remaining: ids[(i + 1)..].iter().map(|h| h.to_string()).collect(),
                         conflicted_paths: conflicted_paths.clone(),
                     }
                     .save()?;
@@ -374,19 +460,7 @@ async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
             }
         }
     }
-
-    let (commit_str, revert_commit_id) =
-        last.expect("clap guarantees at least one commit argument");
-    Ok(RevertOutput {
-        reverted_commit: commit_str.clone(),
-        short_reverted: short_display_hash(&commit_str).to_string(),
-        new_commit: revert_commit_id.as_ref().map(|id| id.to_string()),
-        short_new: revert_commit_id
-            .as_ref()
-            .map(|id| short_display_hash(&id.to_string()).to_string()),
-        no_commit: args.no_commit,
-        files_changed: total_files_changed,
-    })
+    Ok(last.map(|(c, id)| (c, id, total_files_changed)))
 }
 
 /// `revert --continue`: require every conflict resolved (no markers staged),
@@ -425,26 +499,91 @@ async fn run_revert_continue() -> Result<RevertOutput, RevertError> {
     let tree_id = build_tree_from_map(tree_items).await?;
     let message = resolve_revert_message(&reverted_commit_id, state.signoff, state.edit).await?;
     let revert_commit_id = create_revert_commit(&orig_head, &tree_id, &message).await?;
-    RevertState::cleanup()?;
 
-    let commit_str = reverted_commit_id.to_string();
+    // The conflicted commit is now finished. Clear its state BEFORE draining the
+    // rest of the sequence: if a remaining commit fails with a non-conflict error
+    // (bad ref, merge without `-m`, editor failure), we must not leave stale
+    // state pointing at the already-committed conflict (which a retry would
+    // re-process). A remaining *conflict* re-saves fresh state inside
+    // `revert_sequence`; a clean drain leaves no state behind.
+    RevertState::cleanup()?;
+    let remaining = parse_remaining_ids(&state.remaining)?;
+    let params = RevertParams::for_sequence(state.signoff, state.edit);
+    let seed = Some((state.reverted_commit.clone(), Some(revert_commit_id)));
+    let outcome = revert_sequence(&remaining, &params, seed, files_changed).await?;
+
+    // INVARIANT: `seed` is `Some` (the just-finished conflict commit), so
+    // `revert_sequence` initialises `last` to `Some` and always returns `Some`.
+    let (commit_str, last_revert_commit, total_files_changed) =
+        outcome.expect("seeded sequence result is always populated");
     Ok(RevertOutput {
         reverted_commit: commit_str.clone(),
         short_reverted: short_display_hash(&commit_str).to_string(),
-        new_commit: Some(revert_commit_id.to_string()),
-        short_new: Some(short_display_hash(&revert_commit_id.to_string()).to_string()),
+        new_commit: last_revert_commit.as_ref().map(|id| id.to_string()),
+        short_new: last_revert_commit
+            .as_ref()
+            .map(|id| short_display_hash(&id.to_string()).to_string()),
         no_commit: false,
-        files_changed,
+        files_changed: total_files_changed,
     })
 }
 
-/// `revert --abort`: reset HEAD/index/worktree to the pre-revert commit and clear
-/// the state.
-async fn run_revert_abort() -> Result<RevertOutput, RevertError> {
+/// `revert --skip`: discard the current (conflicted) commit's partial changes by
+/// restoring the working tree/index to the commit's start point, then continue
+/// the sequence with the remaining commits.
+async fn run_revert_skip() -> Result<RevertOutput, RevertError> {
     let state = RevertState::load_optional()?.ok_or(RevertError::NoRevertInProgress)?;
-    let orig_head = ObjectHash::from_str(&state.orig_head)
-        .map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
+    // HEAD is already at `orig_head` (the conflict stopped before committing), so
+    // restoring the index/worktree to its tree drops the conflict markers.
+    restore_to_orig_head(&state.orig_head).await?;
+
+    // Clear the skipped commit's state before draining the rest, so a non-conflict
+    // error among the remaining commits cannot leave stale state (see
+    // `run_revert_continue`). A remaining conflict re-saves fresh state.
+    RevertState::cleanup()?;
+
+    if state.remaining.is_empty() {
+        // Nothing left after the skipped commit: the sequence is complete.
+        let commit_str = state.reverted_commit.clone();
+        return Ok(RevertOutput {
+            reverted_commit: commit_str.clone(),
+            short_reverted: short_display_hash(&commit_str).to_string(),
+            new_commit: None,
+            short_new: None,
+            no_commit: false,
+            files_changed: 0,
+        });
+    }
+
+    let remaining = parse_remaining_ids(&state.remaining)?;
+    let params = RevertParams::for_sequence(state.signoff, state.edit);
+    let outcome = revert_sequence(&remaining, &params, None, 0).await?;
+
+    // INVARIANT: the empty-`remaining` case returned above, so `remaining`
+    // is non-empty here and `revert_sequence` over a non-empty slice yields `Some`.
+    let (commit_str, last_revert_commit, total_files_changed) =
+        outcome.expect("non-empty remaining yields a sequence result");
+    Ok(RevertOutput {
+        reverted_commit: commit_str.clone(),
+        short_reverted: short_display_hash(&commit_str).to_string(),
+        new_commit: last_revert_commit.as_ref().map(|id| id.to_string()),
+        short_new: last_revert_commit
+            .as_ref()
+            .map(|id| short_display_hash(&id.to_string()).to_string()),
+        no_commit: false,
+        files_changed: total_files_changed,
+    })
+}
+
+/// Reset the index and working tree to `orig_head`'s tree and point HEAD there.
+/// Shared by `--abort` (which then clears state) and `--skip` (which then
+/// continues with the remaining commits). HEAD is already `orig_head` during a
+/// conflict, so the `update_head` is a no-op for `--skip` and the reset target
+/// for `--abort`.
+async fn restore_to_orig_head(orig_head_str: &str) -> Result<(), RevertError> {
+    let orig_head =
+        ObjectHash::from_str(orig_head_str).map_err(|e| RevertError::LoadObject(e.to_string()))?;
     let commit: Commit =
         load_object(&orig_head).map_err(|e| RevertError::LoadObject(e.to_string()))?;
     let tree: Tree =
@@ -456,7 +595,14 @@ async fn run_revert_abort() -> Result<RevertOutput, RevertError> {
     new_index
         .save(path::index())
         .map_err(|e| RevertError::IndexSave(e.to_string()))?;
-    update_head(&state.orig_head).await?;
+    update_head(orig_head_str).await
+}
+
+/// `revert --abort`: reset HEAD/index/worktree to the pre-revert commit and clear
+/// the state.
+async fn run_revert_abort() -> Result<RevertOutput, RevertError> {
+    let state = RevertState::load_optional()?.ok_or(RevertError::NoRevertInProgress)?;
+    restore_to_orig_head(&state.orig_head).await?;
     RevertState::cleanup()?;
 
     let commit_str = state.reverted_commit.clone();
@@ -483,8 +629,13 @@ fn render_revert_output(result: &RevertOutput, output: &OutputConfig) -> CliResu
 
     if let Some(short_new) = &result.short_new {
         println!("[{}] Revert commit {}", short_new, result.short_reverted,);
-    } else {
+    } else if result.no_commit {
+        // `-n`/`--no-commit`: the inverse changes are staged for a manual commit.
         println!("Changes staged for revert. Use 'libra commit' to finalize.");
+    } else {
+        // A control verb (`--abort`, or `--skip` with nothing left in the
+        // sequence) finished without creating a revert commit.
+        println!("Revert finished; no revert commit created.");
     }
     Ok(())
 }
@@ -509,6 +660,11 @@ struct RevertState {
     /// Whether `--edit` was requested, so `--continue` opens the editor too.
     #[serde(default)]
     edit: bool,
+    /// Commit specs still to revert after the current (conflicted) one — drained
+    /// by `--continue`/`--skip`. Empty when the conflict was the last in the
+    /// sequence. `#[serde(default)]` keeps older state files loadable.
+    #[serde(default)]
+    remaining: Vec<String>,
     /// Paths left with conflict markers for the user to resolve.
     conflicted_paths: Vec<String>,
 }
@@ -592,9 +748,34 @@ fn three_way_revert_blob(
 
 // ── Internal logic ───────────────────────────────────────────────────
 
+/// The per-commit knobs that drive a single revert, decoupled from `RevertArgs`
+/// so the same logic serves the initial run and the `--continue`/`--skip`
+/// sequence drain (where `mainline`/`no_commit` never apply and `signoff`/`edit`
+/// come from the persisted [`RevertState`]).
+#[derive(Clone, Copy)]
+struct RevertParams {
+    mainline: Option<usize>,
+    no_commit: bool,
+    signoff: bool,
+    edit: bool,
+}
+
+impl RevertParams {
+    /// Knobs for draining a `--continue`/`--skip` sequence: always commit, never
+    /// a mainline, carrying the original `--signoff`/`--edit` choices.
+    fn for_sequence(signoff: bool, edit: bool) -> Self {
+        Self {
+            mainline: None,
+            no_commit: false,
+            signoff,
+            edit,
+        }
+    }
+}
+
 async fn revert_single_commit(
     commit_id: &ObjectHash,
-    args: &RevertArgs,
+    params: &RevertParams,
 ) -> Result<SingleRevertOutcome, RevertError> {
     let reverted_commit: Commit =
         load_object(commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
@@ -603,8 +784,8 @@ async fn revert_single_commit(
     // requires `-m <n>` to pick the mainline; a non-merge commit rejects `-m`.
     // The generated revert still records a single parent (the current HEAD).
     let parents = &reverted_commit.parent_commit_ids;
-    let parent_commit_id = match (parents.len(), args.mainline) {
-        (0, None) => return revert_root_commit(args).await,
+    let parent_commit_id = match (parents.len(), params.mainline) {
+        (0, None) => return revert_root_commit(params).await,
         (0, Some(_)) | (1, Some(_)) => {
             return Err(RevertError::MainlineForNonMerge(commit_id.to_string()));
         }
@@ -696,8 +877,8 @@ async fn revert_single_commit(
     // working tree, so an editor failure on a clean revert leaves nothing
     // applied. Conflicts defer the message to `--continue`; `--no-commit` needs
     // no message.
-    let prepared_message = if conflicted_paths.is_empty() && !args.no_commit {
-        Some(resolve_revert_message(commit_id, args.signoff, args.edit).await?)
+    let prepared_message = if conflicted_paths.is_empty() && !params.no_commit {
+        Some(resolve_revert_message(commit_id, params.signoff, params.edit).await?)
     } else {
         None
     };
@@ -778,20 +959,20 @@ async fn build_tree_from_map(
     Ok(root_tree.id)
 }
 
-async fn revert_root_commit(args: &RevertArgs) -> Result<SingleRevertOutcome, RevertError> {
+async fn revert_root_commit(params: &RevertParams) -> Result<SingleRevertOutcome, RevertError> {
     let new_index = Index::new();
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
     let files_changed = current_index.tracked_files().len();
 
     // Resolve the HEAD + (possibly `--edit`-ed) message BEFORE clearing the
     // working tree, so an editor failure leaves nothing applied.
-    let prepared = if args.no_commit {
+    let prepared = if params.no_commit {
         None
     } else {
         let current_head = Head::current_commit()
             .await
             .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
-        let message = resolve_root_revert_message(args.signoff, args.edit).await?;
+        let message = resolve_root_revert_message(params.signoff, params.edit).await?;
         Some((current_head, message))
     };
 
@@ -979,8 +1160,12 @@ async fn create_empty_revert_commit(
     parent_id: &ObjectHash,
     message: &str,
 ) -> Result<ObjectHash, RevertError> {
-    let empty_tree =
-        Tree::from_tree_items(Vec::new()).map_err(|e| RevertError::SaveObject(e.to_string()))?;
+    // `Tree::from_tree_items` rejects an empty item list, but reverting a root
+    // commit legitimately yields the empty tree (Git's well-known
+    // 4b825dc642cb6eb9a060e54bf8d69288fbee4904). Build it directly from empty
+    // bytes — `to_data()` serialises a zero-item tree fine — so the object is
+    // stored under the canonical empty-tree id rather than erroring out.
+    let empty_tree = empty_tree().map_err(RevertError::SaveObject)?;
     save_object(&empty_tree, &empty_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
 
     let commit = Commit::from_tree_id(
@@ -992,6 +1177,15 @@ async fn create_empty_revert_commit(
     save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     update_head(&commit.id.to_string()).await?;
     Ok(commit.id)
+}
+
+/// Build Git's canonical empty tree (id `4b825dc642cb6eb9a060e54bf8d69288fbee4904`
+/// under SHA-1). `Tree::from_tree_items` refuses a zero-length item list, so we
+/// parse it from empty bytes instead — the resulting hash is computed from the
+/// empty serialisation, matching what Git uses for an empty directory tree.
+fn empty_tree() -> Result<Tree, String> {
+    let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+    Tree::from_bytes(&[], empty_id).map_err(|e| e.to_string())
 }
 
 async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
