@@ -108,6 +108,7 @@ Already up to date with 'origin'
 - `url`: normalized remote URL/path
 - `refs_updated[]`: updated remote-tracking refs
 - `objects_fetched`: object count parsed from the received pack
+- `bytes_received`: byte size of the received pack stream (0 when nothing was transferred)
 
 ### Refs Updated Schema
 
@@ -136,7 +137,8 @@ Example (single remote):
             "new_oid": "def5678..."
           }
         ],
-        "objects_fetched": 32
+        "objects_fetched": 32,
+        "bytes_received": 4096
       }
     ]
   }
@@ -158,7 +160,8 @@ Example (already up to date):
         "remote": "origin",
         "url": "git@github.com:user/repo.git",
         "refs_updated": [],
-        "objects_fetched": 0
+        "objects_fetched": 0,
+        "bytes_received": 0
       }
     ]
   }

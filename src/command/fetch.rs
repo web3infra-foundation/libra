@@ -605,6 +605,9 @@ pub struct FetchRepositoryResult {
     pub url: String,
     pub refs_updated: Vec<FetchRefUpdate>,
     pub objects_fetched: usize,
+    /// Bytes received in the fetch pack stream (the `.pack` payload size). Zero
+    /// when nothing was transferred (already up to date / nothing to fetch).
+    pub bytes_received: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1316,6 +1319,7 @@ pub(crate) async fn fetch_repository_with_result(
             url: normalized_url,
             refs_updated: Vec::new(),
             objects_fetched: 0,
+            bytes_received: 0,
         });
     }
 
@@ -1375,6 +1379,7 @@ pub(crate) async fn fetch_repository_with_result(
             url: normalized_url,
             refs_updated,
             objects_fetched: 0,
+            bytes_received: 0,
         });
     }
 
@@ -1398,6 +1403,7 @@ pub(crate) async fn fetch_repository_with_result(
     let task = format!("fetch {}", remote_config.name);
     let fetch_data = read_fetch_stream(&mut result_stream, output, &task).await?;
     let objects_fetched = pack_object_count(&fetch_data.pack_data);
+    let bytes_received = fetch_data.pack_data.len();
     let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
@@ -1455,6 +1461,7 @@ pub(crate) async fn fetch_repository_with_result(
         url: normalized_url,
         refs_updated,
         objects_fetched,
+        bytes_received,
     })
 }
 
@@ -2778,6 +2785,7 @@ mod tests {
                 remote: "origin".to_string(),
                 url: "https://example.com/x.git".to_string(),
                 objects_fetched: 2,
+                bytes_received: 64,
                 refs_updated: vec![
                     FetchRefUpdate {
                         remote_ref: "refs/remotes/origin/main".to_string(),
@@ -2825,6 +2833,7 @@ mod tests {
                 remote: "origin".to_string(),
                 url: "https://example.com/x.git".to_string(),
                 objects_fetched: 1,
+                bytes_received: 32,
                 refs_updated: vec![FetchRefUpdate {
                     remote_ref: "refs/remotes/origin/main".to_string(),
                     old_oid: None,

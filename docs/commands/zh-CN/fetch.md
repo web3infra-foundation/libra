@@ -81,6 +81,7 @@ Already up to date with 'origin'
 - `url`：规范化远程 URL/路径
 - `refs_updated[]`：已更新的远程跟踪引用
 - `objects_fetched`：从收到的 pack 解析出的对象数量
+- `bytes_received`：收到的 pack 流字节大小（无传输时为 0）
 
 ### Refs Updated Schema
 
@@ -109,7 +110,8 @@ Already up to date with 'origin'
             "new_oid": "def5678..."
           }
         ],
-        "objects_fetched": 32
+        "objects_fetched": 32,
+        "bytes_received": 4096
       }
     ]
   }
@@ -131,7 +133,8 @@ Already up to date with 'origin'
         "remote": "origin",
         "url": "git@github.com:user/repo.git",
         "refs_updated": [],
-        "objects_fetched": 0
+        "objects_fetched": 0,
+        "bytes_received": 0
       }
     ]
   }

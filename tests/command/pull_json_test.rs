@@ -135,6 +135,7 @@ fn json_pull_fast_forward_returns_structured_data() {
     assert!(data["fetch"]["url"].is_string());
     assert!(data["fetch"]["refs_updated"].is_array());
     assert!(data["fetch"]["objects_fetched"].is_number());
+    assert!(data["fetch"]["bytes_received"].is_number());
     assert!(data["merge"]["old_commit"].is_null());
     assert_eq!(data["merge"]["strategy"], "fast-forward");
     assert!(data["merge"]["commit"].is_string());

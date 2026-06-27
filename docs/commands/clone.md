@@ -360,7 +360,10 @@ Example:
     "vault_signing": true,
     "ssh_key_detected": "/Users/eli/.ssh/id_ed25519",
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": [".libraignore"],
+    "objects_fetched": 42,
+    "bytes_received": 4096
   }
 }
 ```
@@ -384,7 +387,10 @@ Empty remote returns `"branch": null` and a warning:
     "shallow": false,
     "warnings": [
       "You appear to have cloned an empty repository."
-    ]
+    ],
+    "gitignore_converted": [],
+    "objects_fetched": 0,
+    "bytes_received": 0
   }
 }
 ```
@@ -394,9 +400,10 @@ Empty remote returns `"branch": null` and a warning:
 - `remote_name` is the configured remote's name (`origin` by default, or the `-o`/`--origin` value for standard clones)
 - `branch` is the actual checked-out branch; `null` when the remote has no refs
 - `shallow` is `true` when `--depth` was used
+- `gitignore_converted` lists the worktree-relative `.libraignore` files written from converted `.gitignore` files; always present (empty for bare clones or when the source has no `.gitignore`)
 - `source_kind` and `cloud_site` are omitted for ordinary Git/local clones; `libra+cloud://` clones add them with clone domain, site id, slug, repo id, selected ref, and restored revision
 - `ref_format` and `converted_from` from init are intentionally excluded
-- `objects_fetched` / `bytes_received` are not exposed until the fetch improvement lands
+- `objects_fetched` / `bytes_received` report the fetch pack's object count and byte size for Git sources; they are omitted for `libra+cloud://` restores (which download indexed objects from R2 rather than a pack stream)
 
 ## Design Rationale
 

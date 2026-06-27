@@ -498,6 +498,12 @@ async fn test_fetch_json_output_reports_updated_refs() {
             .expect("objects_fetched should be a number")
             > 0
     );
+    assert!(
+        json["data"]["remotes"][0]["bytes_received"]
+            .as_u64()
+            .expect("bytes_received should be a number")
+            > 0
+    );
 }
 
 #[tokio::test]
@@ -1071,6 +1077,7 @@ async fn test_fetch_dry_run_previews_without_writing() {
     );
     // Dry-run downloads nothing.
     assert_eq!(json["data"]["remotes"][0]["objects_fetched"], 0);
+    assert_eq!(json["data"]["remotes"][0]["bytes_received"], 0);
 
     // No remote-tracking ref was written, and no FETCH_HEAD was created.
     assert!(
@@ -1313,6 +1320,10 @@ async fn test_fetch_tags_creates_local_tags_and_is_idempotent() {
     assert_eq!(
         second_json["data"]["remotes"][0]["objects_fetched"], 0,
         "second --tags fetch must download nothing (no re-download): {second_json}"
+    );
+    assert_eq!(
+        second_json["data"]["remotes"][0]["bytes_received"], 0,
+        "second --tags fetch transfers no bytes: {second_json}"
     );
 }
 

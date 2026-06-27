@@ -1251,3 +1251,58 @@ fn test_clone_unsupported_fetch_optimizations_warn_and_full_clone() {
         "--shallow-exclude warns"
     );
 }
+
+/// A Git clone reports the fetch transfer counts `objects_fetched` and
+/// `bytes_received` in its `--json` output (both > 0 for a non-empty source).
+#[test]
+#[serial]
+fn test_clone_json_reports_fetch_transfer_counts() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    fs::write(sp.join("f.txt"), "hello\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], sp).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], sp)
+            .status
+            .success(),
+        "commit"
+    );
+    let source_str = sp.to_str().unwrap();
+
+    let dest_root = tempdir().expect("dest root");
+    let dest = dest_root.path().join("clone");
+    let out = run_libra_command(
+        &["clone", "--json", source_str, dest.to_str().unwrap()],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "clone --json should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("clone --json emits valid JSON");
+    let data = &json["data"];
+    let objects = data["objects_fetched"]
+        .as_u64()
+        .expect("objects_fetched is present and numeric");
+    let bytes = data["bytes_received"]
+        .as_u64()
+        .expect("bytes_received is present and numeric");
+    assert!(
+        objects > 0,
+        "a non-empty source transfers objects: {objects}"
+    );
+    assert!(bytes > 0, "a non-empty source transfers bytes: {bytes}");
+}

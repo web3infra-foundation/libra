@@ -353,6 +353,15 @@ pub struct CloneOutput {
     /// Cloudflare publish metadata for `libra+cloud://` sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_site: Option<CloudCloneSiteOutput>,
+    /// Number of objects received in the fetch pack (Git sources only; omitted
+    /// for `libra+cloud://` restores, which download indexed objects from R2
+    /// rather than a pack stream).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objects_fetched: Option<usize>,
+    /// Bytes received in the fetch pack stream (Git sources only; omitted for
+    /// `libra+cloud://` restores).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_received: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1750,6 +1759,10 @@ async fn clone_cloud_publish_into_destination(
             ref_name: restore_plan.checkout.ref_name.clone(),
             revision: restore_plan.checkout.revision_oid.clone(),
         }),
+        // Cloud restores download indexed objects from R2, not a pack stream, so
+        // the Git fetch transfer counts do not apply.
+        objects_fetched: None,
+        bytes_received: None,
     })
 }
 
@@ -3158,12 +3171,17 @@ async fn clone_into_destination(
     } else {
         fetch::TagFetchMode::All
     };
-    fetch::fetch_repository_safe(
+    // Capture the fetch result so the clone can report transfer counts
+    // (`objects_fetched`/`bytes_received`) in its structured output. `dry_run`
+    // and `force` are always false for a clone into a fresh repository.
+    let fetch_result = fetch::fetch_repository_with_result(
         remote_config.clone(),
         args.branch.clone(),
         args.single_branch,
         args.depth,
+        false,
         Some(clone_tag_mode),
+        false,
         &child_output,
     )
     .await
@@ -3249,6 +3267,8 @@ async fn clone_into_destination(
         gitignore_converted,
         source_kind: None,
         cloud_site: None,
+        objects_fetched: Some(fetch_result.objects_fetched),
+        bytes_received: Some(fetch_result.bytes_received),
     })
 }
 
@@ -5090,12 +5110,18 @@ mod tests {
             gitignore_converted: vec![".libraignore".to_string(), "sub/.libraignore".to_string()],
             source_kind: None,
             cloud_site: None,
+            objects_fetched: Some(42),
+            bytes_received: Some(4096),
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");
         let map = value
             .as_object()
             .expect("CloneOutput serializes to an object");
+
+        // Git fetch transfer counts are present (Some) for ordinary Git sources.
+        assert_eq!(map.get("objects_fetched"), Some(&serde_json::json!(42)));
+        assert_eq!(map.get("bytes_received"), Some(&serde_json::json!(4096)));
 
         // gitignore_converted is always present (no skip) and carries the
         // converted-file list verbatim.
@@ -5156,6 +5182,8 @@ mod tests {
             gitignore_converted: Vec::new(),
             source_kind: None,
             cloud_site: None,
+            objects_fetched: Some(0),
+            bytes_received: Some(0),
         };
 
         let value = serde_json::to_value(&output).expect("CloneOutput must serialize");

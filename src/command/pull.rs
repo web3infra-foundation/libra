@@ -114,6 +114,8 @@ pub struct PullFetchResult {
     pub url: String,
     pub refs_updated: Vec<PullRefUpdate>,
     pub objects_fetched: usize,
+    /// Bytes received in the fetch pack stream (0 when nothing was transferred).
+    pub bytes_received: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +314,7 @@ pub(crate) async fn run_pull(
             })
             .collect(),
         objects_fetched: fetch_result.objects_fetched,
+        bytes_received: fetch_result.bytes_received,
     };
 
     // `--autostash`: stash tracked changes before integrating so a dirty tree

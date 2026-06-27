@@ -255,7 +255,10 @@ warning: You appear to have cloned an empty repository.
     "vault_signing": true,
     "ssh_key_detected": "/Users/eli/.ssh/id_ed25519",
     "shallow": false,
-    "warnings": []
+    "warnings": [],
+    "gitignore_converted": [".libraignore"],
+    "objects_fetched": 42,
+    "bytes_received": 4096
   }
 }
 ```
@@ -279,7 +282,10 @@ warning: You appear to have cloned an empty repository.
     "shallow": false,
     "warnings": [
       "You appear to have cloned an empty repository."
-    ]
+    ],
+    "gitignore_converted": [],
+    "objects_fetched": 0,
+    "bytes_received": 0
   }
 }
 ```
@@ -288,10 +294,11 @@ warning: You appear to have cloned an empty repository.
 
 - `remote_name` 是配置的远端名称（默认 `origin`，标准克隆下为 `-o`/`--origin` 的值）
 - `branch` 是实际检出的分支；远程没有 refs 时为 `null`
+- `gitignore_converted` 列出从 `.gitignore` 转换写出的 `.libraignore` 文件（工作区相对路径）；始终存在（裸克隆或源无 `.gitignore` 时为空）
 - 使用 `--depth` 时，`shallow` 为 `true`
 - 普通 Git/本地克隆会省略 `source_kind` 和 `cloud_site`；`libra+cloud://` 克隆会加入它们，包含 clone domain、site id、slug、repo id、选中 ref 和恢复的 revision
 - init 中的 `ref_format` 和 `converted_from` 被有意排除
-- `objects_fetched` / `bytes_received` 在 fetch 改进落地前不暴露
+- `objects_fetched` / `bytes_received` 给出 Git 源 fetch pack 的对象数与字节大小；`libra+cloud://` 恢复（从 R2 下载索引对象而非 pack 流）会省略这两个字段
 
 ## 设计动机
 

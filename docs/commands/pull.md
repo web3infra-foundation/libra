@@ -122,7 +122,8 @@ Successfully rebased 2 commits onto 'origin/main' (1111111..2222222).
           "new_oid": "def5678..."
         }
       ],
-      "objects_fetched": 12
+      "objects_fetched": 12,
+      "bytes_received": 2048
     },
     "merge": {
       "strategy": "three-way",
@@ -149,7 +150,8 @@ Rebase output omits `merge` and includes `rebase`:
       "remote": "origin",
       "url": "git@github.com:user/repo.git",
       "refs_updated": [],
-      "objects_fetched": 0
+      "objects_fetched": 0,
+      "bytes_received": 0
     },
     "rebase": {
       "status": "completed",
