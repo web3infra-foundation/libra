@@ -1352,6 +1352,49 @@ fn numeric_run_cmp(left: &str, right: &str) -> std::cmp::Ordering {
         .then_with(|| left.len().cmp(&right.len()))
 }
 
+/// Validate a full reference name against Git's `check-ref-format` rules.
+///
+/// Accepts `HEAD` and any `refs/<...>` name; rejects names that Git would
+/// reject: an empty/leading-slash/trailing-slash body, a trailing `.`, a
+/// `.lock` suffix, `//`, `..`, `@{`, any path component that is empty / starts
+/// with `.` / ends with `.lock`, and ASCII control bytes, the ASCII space, or
+/// any of `: \ ~ ^ ? * [`. Bytes above ASCII (incl. Unicode whitespace) are
+/// accepted, matching Git. Used wherever a user supplies a ref name (e.g.
+/// `show-ref --exclude-existing`, `format-patch --notes=<ref>`).
+pub fn is_valid_refname(refname: &str) -> bool {
+    if refname == "HEAD" {
+        return true;
+    }
+
+    let Some(short) = refname.strip_prefix("refs/") else {
+        return false;
+    };
+    if short.is_empty()
+        || short.starts_with('/')
+        || short.ends_with('/')
+        || short.ends_with('.')
+        || short.ends_with(".lock")
+        || short.contains("//")
+        || short.contains("..")
+        || short.contains("@{")
+    {
+        return false;
+    }
+    if short.split('/').any(|component| {
+        component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+    }) {
+        return false;
+    }
+
+    // Git's `check-ref-format` forbids ASCII control bytes and the ASCII space,
+    // plus the punctuation below — but it accepts bytes above ASCII, so Unicode
+    // whitespace (NBSP, EM SPACE, …) is allowed. Use an ASCII-only space test
+    // rather than `char::is_whitespace`, which would over-reject those.
+    !short.chars().any(|c| {
+        c.is_ascii_control() || c == ' ' || matches!(c, ':' | '\\' | '~' | '^' | '?' | '*' | '[')
+    })
+}
+
 #[cfg(test)]
 mod test {
     use std::{env, path::PathBuf};
@@ -1374,6 +1417,32 @@ mod test {
         internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
         utils::test,
     };
+
+    #[test]
+    fn is_valid_refname_matches_git_check_ref_format() {
+        // Accepted.
+        assert!(is_valid_refname("HEAD"));
+        assert!(is_valid_refname("refs/heads/main"));
+        assert!(is_valid_refname("refs/notes/commits"));
+        assert!(is_valid_refname("refs/notes/team/review"));
+        assert!(is_valid_refname("refs/notes/my-notes"));
+        // Git accepts bytes above ASCII, including Unicode whitespace.
+        assert!(is_valid_refname("refs/notes/foo\u{a0}bar"));
+        assert!(is_valid_refname("refs/notes/foo\u{2003}bar"));
+
+        // Rejected: not under refs/, structural, and forbidden punctuation.
+        assert!(!is_valid_refname("main"));
+        assert!(!is_valid_refname("refs/"));
+        assert!(!is_valid_refname("refs/notes/"));
+        assert!(!is_valid_refname("refs/heads/bad name")); // ASCII space
+        assert!(!is_valid_refname("refs/notes/bad..ref"));
+        assert!(!is_valid_refname("refs/notes/bad~ref"));
+        assert!(!is_valid_refname("refs/notes/.hidden"));
+        assert!(!is_valid_refname("refs/notes/foo.lock"));
+        assert!(!is_valid_refname("refs/notes/bad@{ref"));
+        assert!(!is_valid_refname("refs/notes/foo/"));
+        assert!(!is_valid_refname("refs/notes/foo."));
+    }
 
     fn test_tag_object(object_hash: ObjectHash, object_type: ObjectType, name: &str) -> GitTag {
         GitTag::new(

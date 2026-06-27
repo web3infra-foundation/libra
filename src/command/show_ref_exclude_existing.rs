@@ -10,6 +10,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         output::{OutputConfig, emit_json_data},
+        util::is_valid_refname,
     },
 };
 
@@ -85,38 +86,6 @@ fn normalize_refname(refname: &str) -> String {
     refname.strip_suffix("^{}").unwrap_or(refname).to_string()
 }
 
-fn is_valid_refname(refname: &str) -> bool {
-    if refname == "HEAD" {
-        return true;
-    }
-
-    let Some(short) = refname.strip_prefix("refs/") else {
-        return false;
-    };
-    if short.is_empty()
-        || short.starts_with('/')
-        || short.ends_with('/')
-        || short.ends_with('.')
-        || short.ends_with(".lock")
-        || short.contains("//")
-        || short.contains("..")
-        || short.contains("@{")
-    {
-        return false;
-    }
-    if short.split('/').any(|component| {
-        component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
-    }) {
-        return false;
-    }
-
-    !short.chars().any(|c| {
-        c.is_ascii_control()
-            || c.is_whitespace()
-            || matches!(c, ':' | '\\' | '~' | '^' | '?' | '*' | '[')
-    })
-}
-
 fn write_entries(entries: &[ExcludeExistingEntry]) -> CliResult<()> {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
@@ -129,7 +98,8 @@ fn write_entries(entries: &[ExcludeExistingEntry]) -> CliResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_refname, parse_candidate_refname};
+    use super::parse_candidate_refname;
+    use crate::utils::util::is_valid_refname;
 
     #[test]
     fn parse_candidate_refname_uses_last_field_and_strips_peel_suffix() {

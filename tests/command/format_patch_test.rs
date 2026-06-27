@@ -263,6 +263,133 @@ fn stdout_output_prints_all_patches() {
 }
 
 // ---------------------------------------------------------------------------
+// --notes
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn notes_appends_block_after_separator() {
+    let repo = repo_with_commits(2);
+    // Attach a multi-line note to the tip commit.
+    let note = run_libra_command(
+        &["notes", "add", "-m", "review line 1\nreview line 2", "HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&note, "notes add");
+
+    // With --notes: the block appears after `---`, before the diffstat, with the
+    // `Notes:` header and four-space indentation (matching Git).
+    let with = run_libra_command(
+        &["format-patch", "--stdout", "--notes", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&with, "format-patch --notes");
+    let body = String::from_utf8_lossy(&with.stdout);
+    assert!(
+        body.contains("---\n\nNotes:\n    review line 1\n    review line 2\n\n"),
+        "notes block must match Git's layout: {body}"
+    );
+
+    // Without --notes: no Notes block is emitted.
+    let without = run_libra_command(&["format-patch", "--stdout", "HEAD~1..HEAD"], repo.path());
+    assert_cli_success(&without, "format-patch (no notes)");
+    assert!(
+        !String::from_utf8_lossy(&without.stdout).contains("Notes:"),
+        "no Notes block without --notes"
+    );
+}
+
+#[test]
+#[serial]
+fn notes_custom_ref_uses_parenthesized_header() {
+    let repo = repo_with_commits(2);
+    let note = run_libra_command(
+        &[
+            "notes",
+            "--ref",
+            "review",
+            "add",
+            "-m",
+            "custom-ref note",
+            "HEAD",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&note, "notes --ref review add");
+
+    // A non-default ref is rendered as `Notes (<short>):`.
+    let out = run_libra_command(
+        &["format-patch", "--stdout", "--notes=review", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "format-patch --notes=review");
+    let body = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        body.contains("Notes (review):\n    custom-ref note\n"),
+        "custom ref must use parenthesized header: {body}"
+    );
+
+    // The default ref (which has no note here) yields no block.
+    let default = run_libra_command(
+        &["format-patch", "--stdout", "--notes", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&default, "format-patch --notes (default ref, no note)");
+    assert!(
+        !String::from_utf8_lossy(&default.stdout).contains("Notes"),
+        "commit with no note on the default ref emits no block"
+    );
+}
+
+#[test]
+#[serial]
+fn notes_malformed_ref_is_a_usage_error() {
+    let repo = repo_with_commits(2);
+
+    // A malformed notes ref must fail loudly (exit 129), not silently produce an
+    // ordinary patch with no notes block. Covers Git `check-ref-format` rules:
+    // empty, whitespace, trailing slash, `..`, `~`, leading-dot component,
+    // `.lock` suffix, and `@{`.
+    for bad in [
+        "--notes=",
+        "--notes=bad ref",
+        "--notes=refs/notes/",
+        "--notes=bad..ref",
+        "--notes=bad~ref",
+        "--notes=refs/notes/.hidden",
+        "--notes=refs/notes/foo.lock",
+        "--notes=bad@{ref",
+    ] {
+        let out = run_libra_command(
+            &["format-patch", "--stdout", bad, "HEAD~1..HEAD"],
+            repo.path(),
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "malformed `{bad}` should exit 129, got: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    // A valid hierarchical / hyphenated ref is NOT rejected (no note present →
+    // succeeds with no block, not a usage error). A hierarchical ref must be the
+    // full `refs/notes/...` form — `normalize_notes_ref` only auto-prefixes bare
+    // single-segment names.
+    for ok in ["--notes=my-notes", "--notes=refs/notes/team/review"] {
+        let out = run_libra_command(
+            &["format-patch", "--stdout", ok, "HEAD~1..HEAD"],
+            repo.path(),
+        );
+        assert_cli_success(&out, ok);
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Notes"),
+            "valid noteless ref `{ok}` should emit no block"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // JSON output
 // ---------------------------------------------------------------------------
 

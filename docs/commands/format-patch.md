@@ -40,6 +40,7 @@ commits, the command exits with an error.
 | `--from[=<IDENT>]` | | Use `<IDENT>` in the `From:` header instead of the commit author (bare `--from` uses the committer's configured identity). When it differs from the author, the original author is preserved as an in-body `From:` line so `git am` can restore it | author |
 | `--reroll-count <N>` | `-v` | Mark as version `N` (changes `[PATCH]` to `[PATCH vN]`) | none |
 | `--signoff` | `-s` | Append a `Signed-off-by` trailer to each commit message | false |
+| `--notes[=<REF>]` | | Append each commit's notes after the `---` line, before the diffstat. Bare `--notes` uses the default ref (`refs/notes/commits`); `--notes=<ref>` reads `<ref>`. Rendered as `Notes:` (default ref) or `Notes (<ref>):`, each line indented four spaces; commits without a note are emitted unchanged | off |
 | `--full-index` | | Show full object IDs in diff index header lines | false |
 | `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |

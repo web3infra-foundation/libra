@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::{
     command::log,
     common_utils::parse_commit_msg,
-    internal::config::ConfigKv,
+    internal::{config::ConfigKv, notes},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
@@ -60,6 +60,10 @@ Examples:
 
   # Signature footer from a file, RFC 2047-encoding non-ASCII headers
   libra format-patch --signature-file SIGNATURE --encode-email-headers HEAD~2..HEAD
+
+  # Append each commit's notes after the --- line (default ref, then a custom ref)
+  libra format-patch --notes --stdout HEAD~2..HEAD
+  libra format-patch --notes=review --stdout HEAD~2..HEAD
 ";
 
 // ---------------------------------------------------------------------------
@@ -151,6 +155,12 @@ pub struct FormatPatchArgs {
     /// Append a Signed-off-by trailer to each commit message.
     #[arg(short = 's', long = "signoff")]
     pub signoff: bool,
+
+    /// Append each commit's notes after the `---` line. With no value the
+    /// default notes ref (`refs/notes/commits`) is used; `--notes=<ref>` reads
+    /// the given ref. Commits without a note are emitted unchanged.
+    #[arg(long = "notes", value_name = "REF", num_args = 0..=1, require_equals = true)]
+    pub notes: Option<Option<String>>,
 
     /// Show full object IDs in diff index header lines.
     #[arg(long = "full-index")]
@@ -622,6 +632,11 @@ async fn format_patch_body(
     // ---- "---" separator ----
     out.push_str("---\n");
 
+    // ---- Notes (after `---`, before the diffstat — matching Git) ----
+    if let Some(block) = render_notes_block(&args.notes, &commit.id.to_string()).await? {
+        out.push_str(&block);
+    }
+
     // ---- Diffstat ----
     if !args.no_stat
         && let Ok(stats) = log::compute_commit_stat(commit, vec![]).await
@@ -641,6 +656,61 @@ async fn format_patch_body(
     push_signature(&mut out, args);
 
     Ok(out)
+}
+
+/// Render the `--notes` block for one commit, or `None` when notes are not
+/// requested or the commit has no note on the resolved ref.
+///
+/// Matches Git's format-patch output exactly: a blank line, a `Notes:` header
+/// (or `Notes (<short-ref>):` for any ref other than the default
+/// `refs/notes/commits`), each note line indented by four spaces (blank lines
+/// become the bare indent, as Git does), then a trailing blank line. The caller
+/// emits this immediately after the `---` separator and before the diffstat.
+async fn render_notes_block(
+    notes_arg: &Option<Option<String>>,
+    commit_id: &str,
+) -> Result<Option<String>, CliError> {
+    // `--notes` not given → nothing; `--notes` (no value) → default ref.
+    let Some(opt) = notes_arg else {
+        return Ok(None);
+    };
+    let raw_ref = opt.as_deref().unwrap_or("commits");
+    let notes_ref = notes::normalize_notes_ref(raw_ref)
+        .map_err(|e| CliError::command_usage(format!("invalid --notes ref: {e}")))?;
+
+    // `normalize_notes_ref` only checks the `refs/notes/` prefix, so a malformed
+    // value (`--notes=`, `--notes='bad ref'`, `--notes=bad..ref`,
+    // `--notes=refs/notes/.hidden`, …) would expand to an invalid ref and then
+    // read as `NotFound`, silently producing an ordinary patch. Reject anything
+    // that fails Git's `check-ref-format` rules as a usage error instead.
+    if !util::is_valid_refname(&notes_ref) {
+        return Err(CliError::command_usage(format!(
+            "invalid --notes ref '{raw_ref}'"
+        )));
+    }
+
+    match notes::show(&notes_ref, Some(commit_id)).await {
+        Ok((_, _, text)) => {
+            let short = notes_ref.strip_prefix("refs/notes/").unwrap_or(&notes_ref);
+            let header = if short == "commits" {
+                "Notes:".to_string()
+            } else {
+                format!("Notes ({short}):")
+            };
+            // Git trims the note's trailing newline, then indents every line
+            // (including blanks) by four spaces.
+            let indented = text
+                .trim_end_matches('\n')
+                .split('\n')
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(Some(format!("\n{header}\n{indented}\n\n")))
+        }
+        // No note for this commit (or the ref is empty) → emit nothing, like Git.
+        Err(notes::NotesError::NotFound { .. }) => Ok(None),
+        Err(e) => Err(CliError::fatal(format!("failed to read notes: {e}"))),
+    }
 }
 
 /// Append the patch signature footer (`-- \n<sig>\n`), mirroring Git:
