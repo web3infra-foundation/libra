@@ -203,6 +203,18 @@ pub struct CloneArgs {
     /// fully self-contained — there is nothing to dissociate.
     #[clap(long = "dissociate")]
     pub dissociate: bool,
+
+    /// Set up a mirror of the source repository (Git's `--mirror`). Implies
+    /// `--bare`; maps the fetched branches into `refs/heads/*` and keeps tags in
+    /// `refs/tags/*` verbatim (no `refs/remotes/*` tracking refs), and records
+    /// `remote.<name>.mirror=true`. NARROWING vs Git: Libra mirrors only what it
+    /// fetches — `refs/notes/*` and other un-fetched namespaces are not mirrored,
+    /// and because fetch collapses `refs/mr/*` into the branch tracking namespace
+    /// any such refs become `refs/heads/mr/*`; the mirror marker is informational
+    /// (`libra fetch` is not yet mirror-aware). Not supported for `libra+cloud://`
+    /// sources.
+    #[clap(long = "mirror")]
+    pub mirror: bool,
 }
 
 /// `--reject-shallow`: refuse a clone that ended up shallow without the user
@@ -1192,12 +1204,19 @@ pub async fn execute(args: CloneArgs) {
 ///
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.
-pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(mut args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
     // `-o`/`--origin` becomes a config key and a `refs/remotes/<name>/*` ref
     // component, so reject invalid names up front (before touching the
     // filesystem) rather than writing a malformed key/ref.
     if let Some(name) = &args.origin {
         validate_remote_name(name)?;
+    }
+
+    // `--mirror` implies `--bare`: the mirror is a bare repository whose refs
+    // mirror the source. Set it before dispatch so every bare-aware code path
+    // (layout, no checkout, cloud rejection) treats a mirror as bare.
+    if args.mirror {
+        args.bare = true;
     }
 
     let original_dir = util::cur_dir();
@@ -2381,6 +2400,13 @@ fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), Clo
             hint: "`--single-branch` is only supported for Git remotes; use `?ref=<branch|tag|full-ref>` to select the checkout target.",
         });
     }
+    if args.mirror {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--mirror",
+            reason: "Cloudflare restore targets a non-bare working repository and cannot mirror refs verbatim",
+            hint: "`--mirror` is only supported for Git remotes; clone a libra+cloud:// source without it.",
+        });
+    }
     if args.bare {
         return Err(CloneError::UnsupportedCloudCloneOption {
             option: "--bare",
@@ -3078,6 +3104,15 @@ async fn clone_into_destination(
     )
     .await?;
 
+    // `--mirror`: turn the standard tracking-ref layout into a mirror — every
+    // fetched branch becomes a local `refs/heads/*` ref and the
+    // `refs/remotes/<name>/*` tracking refs are dropped — and record the
+    // informational `remote.<name>.mirror=true` marker (Libra's fetch is not yet
+    // mirror-aware, so refreshing the mirror is not automatic).
+    if args.mirror {
+        normalize_mirror_refs(&remote_name).await?;
+    }
+
     // `--reject-shallow`: if the fetch left a shallow boundary that the user did
     // not request via `--depth`, the source repository was shallow — refuse it
     // (matching `git clone --reject-shallow`). The cwd is still the new repo
@@ -3143,6 +3178,86 @@ async fn clone_into_destination(
 /// (if any) so that `CloneOutput` can report it.
 pub(crate) struct SetupResult {
     pub branch_name: Option<String>,
+}
+
+/// Normalize a freshly-cloned repository into a `--mirror` layout: promote every
+/// remote-tracking branch (`refs/remotes/<remote>/<name>`) to a verbatim local
+/// `refs/heads/<name>` branch, drop the tracking namespace, and record
+/// `remote.<remote>.mirror=true`. Tags (`refs/tags/*`) are already in place and
+/// are left untouched.
+///
+/// `setup_repository` has already created the default branch in `refs/heads/*`
+/// and pointed `HEAD` at it; this promotes the remaining branches and removes the
+/// remote-tracking refs that a mirror does not keep.
+///
+/// NARROWING vs Git: Git's `--mirror` mirrors `refs/*:refs/*` verbatim and makes
+/// future fetches force-update every ref. Libra mirrors only what its fetch
+/// transfers — every fetched tracking ref is promoted into `refs/heads/*` and
+/// tags are kept — so:
+/// - ref namespaces Libra does not fetch (e.g. `refs/notes/*`) are not mirrored;
+/// - because Libra's fetch collapses both `refs/heads/mr/*` and `refs/mr/*` into
+///   one `refs/remotes/<remote>/mr/*` tracking namespace, any such refs are
+///   promoted to `refs/heads/mr/*` (provenance is not preserved);
+/// - `mirror=true` is recorded only as a marker; `libra fetch` is not yet
+///   mirror-aware, so refreshing the mirror is not automatic (and no inert
+///   `+refs/*:refs/*` refspec is written).
+async fn normalize_mirror_refs(remote_name: &str) -> Result<(), CloneError> {
+    let db = get_db_conn_instance().await;
+    let tracking = Branch::list_branches_result_with_conn(&db, Some(remote_name))
+        .await
+        .map_err(|source| CloneError::LocalBranchState { source })?;
+
+    let tracking_prefix = format!("refs/remotes/{remote_name}/");
+    for branch in &tracking {
+        // Tracking branches are stored under their full `refs/remotes/<remote>/`
+        // path; strip it to get the short name for the local `refs/heads/` ref.
+        let short_name = branch
+            .name
+            .strip_prefix(&tracking_prefix)
+            .unwrap_or(&branch.name);
+        // Promote every fetched tracking ref to a verbatim local branch
+        // (idempotent: the default branch already exists from setup_repository
+        // and is simply re-affirmed). We promote ALL tracking rows rather than
+        // trying to filter by namespace: Libra's fetch collapses both real
+        // branches (`refs/heads/mr/*`) and merge-request refs (`refs/mr/*`) into
+        // the same `refs/remotes/<remote>/mr/*` tracking namespace, so the
+        // provenance needed to filter is gone — skipping would silently drop real
+        // branches. Such refs are therefore mirrored as `refs/heads/mr/*`.
+        Branch::update_branch_with_conn(&db, short_name, &branch.commit.to_string(), None)
+            .await
+            .map_err(|error| CloneError::SetupFailed {
+                message: format!("failed to create mirror branch '{short_name}': {error}"),
+            })?;
+        // A mirror keeps no remote-tracking refs.
+        Branch::delete_branch_result_with_conn(&db, &branch.name, Some(remote_name))
+            .await
+            .map_err(|source| CloneError::LocalBranchState { source })?;
+    }
+
+    // The fetch also caches the remote's HEAD as a `Head` row
+    // (`refs/remotes/<remote>/HEAD`), which is a tracking ref a mirror must not
+    // keep. It is not a `Branch` row, so delete it directly.
+    {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        use crate::internal::model::reference;
+
+        reference::Entity::delete_many()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+            .filter(reference::Column::Remote.eq(remote_name))
+            .exec(&db)
+            .await
+            .map_err(|error| CloneError::SetupFailed {
+                message: format!("failed to drop mirror remote HEAD: {error}"),
+            })?;
+    }
+
+    // Record the mirror marker (matching Git's `remote.<name>.mirror=true`). We
+    // deliberately do NOT write a `+refs/*:refs/*` fetch refspec: Libra's fetch
+    // does not honor it, so recording it would falsely imply mirror-aware
+    // refreshes.
+    let _ = ConfigKv::set(&format!("remote.{remote_name}.mirror"), "true", false).await;
+    Ok(())
 }
 
 /// Sets up the local repository after a clone by configuring the remote,
@@ -3644,6 +3759,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3743,6 +3859,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_mirror_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.mirror = true;
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--mirror must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--mirror");
+                assert!(
+                    hint.contains("--mirror"),
+                    "mirror hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
     /// Verifies the mapping from `UnsupportedCloudCloneOption` into the CLI
     /// error envelope: stable code must be `CliInvalidArguments`, exit code
     /// must be 129 (parameter error), and the structured `option` detail
@@ -3814,6 +3948,78 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn normalize_mirror_refs_promotes_branches_and_clears_tracking() {
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        let hash = ObjectHash::zero_str(get_hash_kind()).to_string();
+
+        // Simulate a post-fetch state: two remote-tracking branches plus the
+        // cached remote HEAD (a `Head` row, not a `Branch` row).
+        Branch::update_branch_with_conn(&db, "refs/remotes/origin/main", &hash, Some("origin"))
+            .await
+            .expect("seed tracking main");
+        Branch::update_branch_with_conn(&db, "refs/remotes/origin/feature", &hash, Some("origin"))
+            .await
+            .expect("seed tracking feature");
+        Head::update_with_conn(&db, Head::Branch("main".to_string()), Some("origin")).await;
+        assert!(
+            Head::remote_current_with_conn(&db, "origin")
+                .await
+                .is_some(),
+            "sanity: remote HEAD seeded"
+        );
+
+        normalize_mirror_refs("origin")
+            .await
+            .expect("mirror normalization succeeds");
+
+        // Every tracking branch is promoted to a local branch.
+        let local: Vec<String> = Branch::list_branches_result_with_conn(&db, None)
+            .await
+            .expect("list local branches")
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(
+            local.iter().any(|n| n == "main"),
+            "main promoted: {local:?}"
+        );
+        assert!(
+            local.iter().any(|n| n == "feature"),
+            "feature promoted: {local:?}"
+        );
+
+        // No remote-tracking branches and no cached remote HEAD remain.
+        let tracking = Branch::list_branches_result_with_conn(&db, Some("origin"))
+            .await
+            .expect("list tracking branches");
+        assert!(
+            tracking.is_empty(),
+            "no tracking branches remain: {tracking:?}"
+        );
+        assert!(
+            Head::remote_current_with_conn(&db, "origin")
+                .await
+                .is_none(),
+            "remote HEAD tracking ref removed"
+        );
+
+        // The mirror marker is recorded.
+        assert_eq!(
+            config_value("remote.origin.mirror").await.as_deref(),
+            Some("true"),
+            "mirror marker recorded"
+        );
+    }
+
+    #[tokio::test]
     async fn cloud_clone_restore_plan_fails_when_r2_object_is_missing() {
         let source = CloudPublishSource {
             clone_domain: "code.example.com".to_string(),
@@ -3864,6 +4070,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3962,6 +4169,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4048,6 +4256,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -4124,6 +4333,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4197,6 +4407,7 @@ mod tests {
             reference_if_able: vec![],
             shared: false,
             dissociate: false,
+            mirror: false,
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),

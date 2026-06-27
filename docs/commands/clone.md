@@ -53,7 +53,7 @@ For `libra+cloud://`, the authority is the configured clone domain. The path mus
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
 The first Cloudflare restore surface does not accept Git transport shaping flags:
-`--branch`, `--depth`, `--single-branch`, and `--bare` return `LBR-CLI-002`
+`--branch`, `--depth`, `--single-branch`, `--bare`, and `--mirror` return `LBR-CLI-002`
 before clone-domain config lookup and before creating the destination directory.
 Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
 
@@ -120,6 +120,28 @@ currently rejects `--bare` explicitly.
 
 ```bash
 libra clone --bare git@github.com:user/repo.git
+```
+
+### `--mirror`
+
+Set up a mirror of the source repository (like `git clone --mirror`). Implies
+`--bare`, and maps the fetched branches verbatim into `refs/heads/*` and keeps
+tags in `refs/tags/*` — without any `refs/remotes/*` tracking refs — then records
+the `remote.<name>.mirror=true` marker. Useful for serving or backing up a
+repository. Not supported for `libra+cloud://` sources (rejected with
+`LBR-CLI-002`).
+
+Narrowings vs Git: (1) Git mirrors `refs/*:refs/*` verbatim; Libra mirrors only
+what its fetch transfers — every fetched branch is promoted to `refs/heads/*` and
+tags are kept, but ref namespaces Libra does not fetch (e.g. `refs/notes/*`) are
+not mirrored. (2) Because Libra's fetch collapses `refs/heads/mr/*` and
+`refs/mr/*` into one tracking namespace, any such refs are mirrored as
+`refs/heads/mr/*` (provenance is not preserved). (3) The `mirror=true` marker is
+informational — no `+refs/*:refs/*` refspec is recorded and `libra fetch` is not
+yet mirror-aware, so refreshing the mirror is not automatic.
+
+```bash
+libra clone --mirror git@github.com:user/repo.git repo-mirror.git
 ```
 
 ### `-l, --local` / `--no-local`
@@ -429,7 +451,7 @@ not, because its operation-log model fetches all refs by design.
 | Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
 | Shallow since date | `--shallow-since=<date>` | N/A | N/A |
 | Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
-| Mirror clone | `--mirror` | N/A | N/A |
+| Mirror clone | `--mirror` | N/A | `--mirror` (implies `--bare`; mirrors fetched branches into `refs/heads/*`, keeps tags, no tracking refs, sets `remote.<name>.mirror` marker; narrowed — only fetched branches/tags, refresh not mirror-aware) |
 | Reference repository | `--reference <repo>` / `--reference-if-able <repo>` | N/A | accepted no-op (Libra always copies objects, no alternates); `--reference` warns, `--reference-if-able` silent |
 | Shared object store | `--shared` / `-s` | N/A | accepted no-op (always copies); warns |
 | Dissociate from reference | `--dissociate` | N/A | accepted no-op (already self-contained); silent |
@@ -494,7 +516,7 @@ If checkout fails, the clone reports failure -- it does not silently succeed wit
 ## Compatibility Notes
 
 - `--recurse-submodules` is not supported; Libra does not implement submodules
-- `--mirror` is not supported; `--reference`/`--reference-if-able`/`--shared`/`--dissociate` are accepted no-ops (Libra has no object alternates — it always copies objects — so a clone is already self-contained; `--reference`/`--shared` warn, the others are silent)
+- `--reference`/`--reference-if-able`/`--shared`/`--dissociate` are accepted no-ops (Libra has no object alternates — it always copies objects — so a clone is already self-contained; `--reference`/`--shared` warn, the others are silent)
 - Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
 - The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
 - `--no-checkout` sets up objects/refs/HEAD but skips the working-tree checkout; use `--bare` instead when you want no working tree at all (no `.libra` worktree layout)

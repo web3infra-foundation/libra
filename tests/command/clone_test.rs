@@ -190,6 +190,7 @@ async fn test_clone_branch() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -234,6 +235,7 @@ async fn test_clone_bare_repository() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -293,6 +295,7 @@ async fn test_clone_branch_single_branch() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -336,6 +339,7 @@ async fn test_clone_default_branch() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -379,6 +383,7 @@ async fn test_clone_default_branch_single_branch() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -424,6 +429,7 @@ async fn test_clone_to_existing_empty_dir() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -472,6 +478,7 @@ async fn test_clone_to_existing_dir() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -516,6 +523,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -559,6 +567,7 @@ async fn test_clone_with_depth() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -602,6 +611,7 @@ async fn test_clone_with_depth_and_branch() {
         reference_if_able: vec![],
         shared: false,
         dissociate: false,
+        mirror: false,
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -1038,5 +1048,92 @@ fn test_clone_object_alternates_flags_are_noops() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("--reference/--shared have no effect"),
         "--shared warns it is a no-op"
+    );
+}
+
+/// `clone --mirror` produces a bare repository whose `refs/heads/*` mirror all of
+/// the fetched branches verbatim (no `refs/remotes/*` tracking refs), keeps tags,
+/// and records the `remote.origin.mirror=true` marker (but NOT an inert
+/// `+refs/*:refs/*` fetch refspec, which Libra's fetch would not honor).
+#[test]
+#[serial]
+fn test_clone_mirror_maps_all_refs_and_sets_config() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    fs::write(sp.join("f.txt"), "x\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], sp).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], sp)
+            .status
+            .success(),
+        "commit"
+    );
+    assert!(
+        run_libra_command(&["branch", "feature"], sp)
+            .status
+            .success(),
+        "branch"
+    );
+    assert!(
+        run_libra_command(&["tag", "v1"], sp).status.success(),
+        "tag"
+    );
+    let source_str = sp.to_str().unwrap();
+
+    let dest_root = tempdir().expect("dest root");
+    let mirror = dest_root.path().join("mirror");
+    let out = run_libra_command(
+        &["clone", "--mirror", source_str, mirror.to_str().unwrap()],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "mirror clone succeeds: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let refs =
+        String::from_utf8_lossy(&run_libra_command(&["show-ref"], &mirror).stdout).to_string();
+    assert!(
+        refs.contains("refs/heads/main"),
+        "main mirrored to refs/heads: {refs}"
+    );
+    assert!(
+        refs.contains("refs/heads/feature"),
+        "feature mirrored to refs/heads: {refs}"
+    );
+    assert!(refs.contains("refs/tags/v1"), "tag kept: {refs}");
+    assert!(
+        !refs.contains("refs/remotes/"),
+        "a mirror keeps no remote-tracking refs: {refs}"
+    );
+
+    let config = String::from_utf8_lossy(&run_libra_command(&["config", "--list"], &mirror).stdout)
+        .to_string();
+    assert!(
+        config.contains("remote.origin.mirror=true"),
+        "mirror marker config set: {config}"
+    );
+    // Libra deliberately records no `+refs/*:refs/*` fetch refspec (it would be
+    // inert — Libra's fetch does not honor it).
+    assert!(
+        !config.contains("+refs/*:refs/*"),
+        "no inert mirror fetch refspec is recorded: {config}"
+    );
+    // --mirror implies --bare: no working tree checked out.
+    assert!(
+        !mirror.join("f.txt").exists(),
+        "mirror is bare (no working-tree checkout)"
     );
 }

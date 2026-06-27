@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra clone` 的目标是从本地、SSH、HTTPS 或 Libra cloud 来源创建新仓库，并初始化对象、refs、配置和工作区。当前实现覆盖浅克隆（`--depth`）、单分支克隆（`--single-branch`）、裸仓库（`--bare`）、分支检出（`-b/--branch`）、URL 脱敏和安全边界检查，同时明确子模块与 sparse checkout 的延后决策；镜像（`--mirror`）与局部克隆过滤（`--filter`）等标准 Git clone 参数当前不在 `CloneArgs` 中，统一列于“还未实现的功能”缺口表（origin 命名 `-o`、引用仓库 `--reference`/`--shared`/`--dissociate` 已处理）。
+`libra clone` 的目标是从本地、SSH、HTTPS 或 Libra cloud 来源创建新仓库，并初始化对象、refs、配置和工作区。当前实现覆盖浅克隆（`--depth`）、单分支克隆（`--single-branch`）、裸仓库（`--bare`）、分支检出（`-b/--branch`）、URL 脱敏和安全边界检查，同时明确子模块与 sparse checkout 的延后决策；局部克隆过滤（`--filter`）与浅历史日期/排除（`--shallow-since`/`--shallow-exclude`）等标准 Git clone 参数当前不在 `CloneArgs` 中，统一列于“还未实现的功能”缺口表（origin 命名 `-o`、引用仓库 `--reference`/`--shared`/`--dissociate`、镜像 `--mirror` 已处理）。
 
 ## 对比 Git 与兼容性
 
@@ -66,7 +66,8 @@ flowchart TD
 | ✅ 已实现 | `-l`/`--local` 与 `--no-local` | 接受式 no-op（`CloneArgs.local`/`no_local`，`overrides_with` 互斥、last-wins，无 execute 逻辑）：git `--local` 请求本地优化（复制/硬链接代替传输）、`--no-local` 强制走传输避免硬链接。libra **从不硬链接**（始终复制），且读取本地源的方式由源类型决定（本地 Libra 源直接读对象，本地 Git 源经 `LocalClient` 的 `git-upload-pack` 获取）而非这两个 flag，故均按 no-op 接受、不影响结果。本地源 clone 用任一形式均成功（带集成测试 `test_clone_local_flag_accepted_for_local_source`）。 |
 | ✅ 已实现 | `--reject-shallow` | 拒绝未经请求即变浅的克隆（即源仓库为浅克隆），对齐 `git clone --reject-shallow`。fetch 后在新仓库 cwd 下读 `.libra/shallow`，纯判定 `clone_should_reject_shallow(reject, is_shallow, depth) = reject && is_shallow && depth.is_none()`（`--depth` 引入的浅克隆是预期的、不拒绝）；命中则恢复 cwd 后返回 `CloneError::RejectShallow`（exit 128），由既有 `cleanup_failed_clone` 删除半成品。**相对 Git 收窄**：Git 拒绝浅 SOURCE 与 `--depth` 无关，但 libra 无协议信号区分源浅与 `--depth` 浅（都只留 `.libra/shallow`），故带 `--depth` 时不拒绝（单元测试已固定该取舍）。带纯单元测试（判定四组合）+ 集成测试（正常源/`--depth` 源均放行）。注：libra 本地路径 clone 会重取完整历史、不传播源的浅标记，故 reject 主要对浅 remote 生效。 |
 | ✅ 已实现 | `--reference <repo>`/`--reference-if-able <repo>`/`--shared`/`-s`/`--dissociate` | 对象 alternates 族：Libra 无 alternates、总是把每个对象拷贝进克隆，故克隆天然自包含。均按 no-op 接受（`object_alternates_warning`）：`--reference`/`--shared` 追加一条说明性 warning（进 `CloneOutput.warnings`，human+JSON），`--reference-if-able`（Git 的优雅降级语义：引用不可用即忽略）与 `--dissociate`（已自包含，无可 dissociate）静默。`--reference`/`--reference-if-able` 为 `Vec<String>`（可多次）。带回归测试 `test_clone_object_alternates_flags_are_noops`。 |
-| 功能缺口 | 标准 Git clone 参数 `--filter <spec>`、`--mirror`、`--shallow-since <date>`、`--shallow-exclude <rev>` 均不在 `CloneArgs`（`src/command/clone.rs`）中，当前未实现（`--mirror` 需 fetch ref-namespace 改造，`--filter`/`--shallow-*` 需 fetch 协议扩展） | 后续实现时需要同步源码、测试和兼容矩阵。 |
+| ✅ 已实现（收窄） | `--mirror` | 隐含 `--bare`（`execute_safe` 入口设 `args.bare=true`）。fetch 后经 `normalize_mirror_refs`：把每个 remote-tracking 分支提升为 verbatim 本地 `refs/heads/<name>`（剥离 `refs/remotes/<remote>/` 前缀）、删除 tracking 命名空间、写 `remote.<remote>.mirror=true` 标记；tags（`refs/tags/*`）原样保留。**两点收窄 vs Git**：(1) Git 原样镜像 `refs/*:refs/*`，但 libra 只镜像其 fetch 传输的内容（每个 tracking ref 提升为 `refs/heads/*`）；`refs/notes/*` 等未 fetch 的命名空间不镜像。fetch 把 `refs/heads/mr/*` 与 `refs/mr/*` 折叠进同一 tracking 命名空间、出处丢失，故不过滤（过滤会静默丢掉真实的 `mr/*` 分支），这类 ref 一律镜像为 `refs/heads/mr/*`；(2) 不写 `+refs/*:refs/*` refspec（libra fetch 不会honor，写了会误导），`mirror=true` 仅为标记，`libra fetch` 尚不感知镜像。`libra+cloud://` 拒绝（`validate_cloud_clone_option_compatibility` 在 `--bare` 前先查 `--mirror`）。带 `test_clone_mirror_maps_all_refs_and_sets_config` + cloud 拒绝单测。注：默认分支/HEAD 选择沿用 clone 既有行为（pre-existing）。 |
+| 功能缺口 | 标准 Git clone 参数 `--filter <spec>`、`--shallow-since <date>`、`--shallow-exclude <rev>` 均不在 `CloneArgs`（`src/command/clone.rs`）中，当前未实现（需 fetch 协议扩展：partial-clone filter / deepen-since / deepen-not） | 后续实现时需要同步源码、测试和兼容矩阵。 |
 | 兼容差异项 | Malformed URL or 不支持 scheme | 原始对照：LBR-CLI-003；相关参数/替代：129；当前说明："check the clone URL or scheme"。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
 ## 维护要求
