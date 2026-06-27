@@ -39,6 +39,7 @@ async fn test_remote_add_creates_entry() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -64,6 +65,7 @@ async fn test_remote_add_duplicate_name_returns_error() {
             master: None,
             tags: false,
             no_tags: false,
+            mirror: false,
         },
         &OutputConfig::default(),
     )
@@ -79,6 +81,7 @@ async fn test_remote_add_duplicate_name_returns_error() {
             master: None,
             tags: false,
             no_tags: false,
+            mirror: false,
         },
         &OutputConfig::default(),
     )
@@ -262,6 +265,7 @@ async fn test_remote_remove_deletes_entry() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -290,6 +294,7 @@ async fn test_remote_remove_deletes_vault_ssh_keys() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -339,6 +344,7 @@ async fn test_remote_rename_updates_branch_tracking() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -401,6 +407,7 @@ async fn test_remote_rename_cascades_vault_ssh_keys() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -467,6 +474,7 @@ async fn test_remote_rename_refuses_existing_target_vault_ssh_namespace() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     ConfigKv::set("vault.ssh.origin.pubkey", "ssh-rsa origin", false)
@@ -613,6 +621,7 @@ async fn test_remote_rename_conflict_returns_error() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     remote::execute(RemoteCmds::Add {
@@ -623,6 +632,7 @@ async fn test_remote_rename_conflict_returns_error() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -647,6 +657,7 @@ async fn test_remote_set_url_add_appends_fetch_url() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -687,6 +698,7 @@ async fn test_remote_set_url_delete_removes_matching_url() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -735,6 +747,7 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 
@@ -787,6 +800,7 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
     remote::execute(RemoteCmds::SetUrl {
@@ -1493,6 +1507,7 @@ async fn test_remote_set_url_delete_no_match_returns_error() {
             master: None,
             tags: false,
             no_tags: false,
+            mirror: false,
         },
         &OutputConfig::default(),
     )
@@ -1620,6 +1635,7 @@ async fn test_remote_remove_works_after_deleting_last_url() {
             master: None,
             tags: false,
             no_tags: false,
+            mirror: false,
         },
         &OutputConfig::default(),
     )
@@ -1931,6 +1947,7 @@ async fn add_origin() {
         master: None,
         tags: false,
         no_tags: false,
+        mirror: false,
     })
     .await;
 }
@@ -2592,5 +2609,66 @@ async fn remote_update_prune_removes_stale_tracking_branches() {
             .expect("query tracking branch")
             .is_some(),
         "non-stale tracking branch origin/feature2 must survive `update -p`"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_add_mirror_writes_marker_and_conflicts_with_track() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let p = repo_dir.path();
+
+    // `--mirror` records the informational marker `remote.<name>.mirror=true`.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "remote",
+                "add",
+                "--mirror",
+                "backup",
+                "https://example.com/r.git",
+            ],
+            p,
+        ),
+        "remote add --mirror",
+    );
+    let marker = ConfigKv::get("remote.backup.mirror")
+        .await
+        .expect("read mirror marker")
+        .map(|e| e.value);
+    assert_eq!(marker.as_deref(), Some("true"), "mirror marker is written");
+
+    // NARROWING: no `+refs/*:refs/*` fetch refspec is written (fetch is not
+    // mirror-aware), matching `clone --mirror`.
+    let fetch = ConfigKv::get_all("remote.backup.fetch")
+        .await
+        .expect("read fetch")
+        .into_iter()
+        .map(|e| e.value)
+        .collect::<Vec<_>>();
+    assert!(
+        fetch.is_empty(),
+        "remote add --mirror writes no fetch refspec: {fetch:?}"
+    );
+
+    // `--mirror` is incompatible with `-t`/`--track` (clap conflict → usage error).
+    let conflict = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "--mirror",
+            "-t",
+            "main",
+            "m2",
+            "https://example.com/r.git",
+        ],
+        p,
+    );
+    assert!(
+        !conflict.status.success(),
+        "--mirror with -t must be rejected: {}",
+        String::from_utf8_lossy(&conflict.stderr)
     );
 }

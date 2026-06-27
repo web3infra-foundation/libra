@@ -35,6 +35,7 @@ async fn test_open_remote_origin() {
             master: None,
             tags: false,
             no_tags: false,
+            mirror: false,
         },
         &output,
     )

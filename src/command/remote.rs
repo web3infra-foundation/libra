@@ -81,6 +81,8 @@ EXAMPLES:
                                                    Register a remote and fetch from it
     libra remote add -t main --tags origin git@example.com:org/repo.git
                                                    Track only main and fetch all tags
+    libra remote add --mirror backup git@example.com:org/repo.git
+                                                   Register a mirror remote (writes remote.<name>.mirror=true)
     libra remote rename origin upstream            Rename an existing remote
     libra remote remove upstream                   Drop a remote and its tracking refs
     libra remote get-url --all origin              Print every URL configured for origin
@@ -121,6 +123,13 @@ pub enum RemoteCmds {
         /// Configure `remote.<name>.tagOpt = --no-tags` (fetch no tags).
         #[clap(long = "no-tags")]
         no_tags: bool,
+        /// Mark the remote as a mirror: write the `remote.<name>.mirror=true`
+        /// marker (like Git's `remote add --mirror=fetch`). Incompatible with
+        /// `-t`/`--track`. NARROWING vs Git: the marker is informational —
+        /// Libra does not write a `+refs/*:refs/*` refspec because `libra fetch`
+        /// is not yet mirror-aware (matching `libra clone --mirror`).
+        #[clap(long = "mirror", conflicts_with = "track")]
+        mirror: bool,
     },
     /// Remove a remote
     Remove {
@@ -553,6 +562,7 @@ async fn run_remote(
             master,
             tags,
             no_tags,
+            mirror,
         } => {
             run_add_remote(
                 AddRemoteArgs {
@@ -563,6 +573,7 @@ async fn run_remote(
                     master,
                     tags,
                     no_tags,
+                    mirror,
                 },
                 output,
             )
@@ -613,6 +624,7 @@ struct AddRemoteArgs {
     master: Option<String>,
     tags: bool,
     no_tags: bool,
+    mirror: bool,
 }
 
 async fn run_add_remote(
@@ -627,6 +639,7 @@ async fn run_add_remote(
         master,
         tags,
         no_tags,
+        mirror,
     } = args;
 
     if remote_exists(&name).await? {
@@ -640,6 +653,16 @@ async fn run_add_remote(
     ConfigKv::set(&format!("remote.{name}.url"), &url, false)
         .await
         .map_err(write_err)?;
+
+    // `--mirror`: record the informational `remote.<name>.mirror=true` marker
+    // (matching Git's `remote add --mirror=fetch` and `libra clone --mirror`).
+    // We deliberately do NOT write a `+refs/*:refs/*` fetch refspec: Libra's
+    // fetch is not yet mirror-aware, so the marker is informational only.
+    if mirror {
+        ConfigKv::set(&format!("remote.{name}.mirror"), "true", false)
+            .await
+            .map_err(write_err)?;
+    }
 
     // `-t <branch>`: track only the named branch(es) by writing a specific fetch
     // refspec per branch instead of the default wildcard (same format as

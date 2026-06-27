@@ -8,7 +8,7 @@ Manage configured remotes: list, add, remove, rename, inspect and mutate URLs, a
 libra remote <subcommand> [OPTIONS] [ARGS]
 libra remote show
 libra remote -v
-libra remote add [-f | --fetch] [-t | --track <branch>]... [-m | --master <branch>] [--tags | --no-tags] <name> <url>
+libra remote add [-f | --fetch] [-t | --track <branch>]... [-m | --master <branch>] [--tags | --no-tags] [--mirror] <name> <url>
 libra remote remove <name>
 libra remote rename <old> <new>
 libra remote get-url [--push] [--all] <name>
@@ -74,6 +74,9 @@ Register a new remote.
 | `-t`, `--track <branch>` | Track only the given branch — writes a specific `remote.<name>.fetch` refspec instead of the default wildcard. Repeatable. | `-t main -t dev` |
 | `-m`, `--master <branch>` | Point the remote's HEAD (`refs/remotes/<name>/HEAD`) at `<branch>` (written even before the tracking ref exists, like Git) | `-m main` |
 | `--tags` / `--no-tags` | Set `remote.<name>.tagOpt` to fetch all / no tags (mutually exclusive) | |
+| `--mirror` | Mark the remote as a mirror — writes the `remote.<name>.mirror=true` marker (like Git's `remote add --mirror=fetch`). Incompatible with `-t`/`--track`. | `--mirror` |
+
+The `--mirror` marker is informational: Libra does **not** write a `+refs/*:refs/*` fetch refspec because `libra fetch` is not yet mirror-aware (matching `libra clone --mirror`).
 
 ### Subcommand: `remove`
 
@@ -341,6 +344,7 @@ for both fetch and push, matching Git's behavior.
 | List with URLs | `libra remote -v` | `git remote -v` | `jj git remote list` (always verbose) |
 | Add remote | `libra remote add <n> <u>` | `git remote add <n> <u>` | `jj git remote add <n> <u>` |
 | Add remote + fetch | `libra remote add -f <n> <u>` | `git remote add -f <n> <u>` | N/A |
+| Add mirror remote | `libra remote add --mirror <n> <u>` (marker only) | `git remote add --mirror=fetch <n> <u>` | N/A |
 | Remove remote | `libra remote remove <n>` | `git remote remove <n>` | `jj git remote remove <n>` |
 | Rename remote | `libra remote rename <o> <n>` | `git remote rename <o> <n>` | `jj git remote rename <o> <n>` |
 | Get URL | `libra remote get-url <n>` | `git remote get-url <n>` | N/A |
