@@ -31,12 +31,15 @@ extension rather than a Git command. The current public surface supports:
 - `op show` resolves an operation id or `@{n}` reference and can print the
   captured view snapshot.
 - `op restore` restores HEAD and captured branch refs from a previous operation
-  view and records a new successful restore operation. `--dry-run` performs no
-  writes.
+  view and records a new successful restore operation. It also **prunes** local
+  branches that are absent from the target view, so restore reproduces that
+  operation's exact local-branch set rather than only updating named refs. Never
+  pruned: the restored HEAD branch, remote-tracking refs, the locked branches
+  (`main`/`intent`/`traces`/`agent-traces`), and the reserved `libra/` namespace
+  (AI history `libra/intent`, orchestrator `libra/src`/`libra/target`).
+  `--dry-run` previews the prune (and the restore) without writing.
 
 ## Remaining Gaps
 
-- Restore currently updates HEAD and captured branch refs; it does not prune refs
-  that were absent from the target view.
 - Broader command coverage is incremental. At present, branch creation is wired
   through operation logging as the first command integration target.

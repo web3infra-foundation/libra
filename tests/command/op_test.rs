@@ -158,6 +158,88 @@ fn test_op_log_json_page_two_returns_older_operation() {
 }
 
 #[test]
+/// `op restore` reproduces the target operation's exact branch set: a branch
+/// created after the target operation is pruned on restore, while the branch
+/// present in the target view (the default branch) survives.
+fn test_op_restore_prunes_branches_absent_from_target_view() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // The default branch present at the snapshot point must survive the restore.
+    let current = run_libra_command(&["branch", "--show-current"], p);
+    let default_branch = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    assert!(!default_branch.is_empty(), "expected a current branch");
+
+    // Establish a base operation whose view contains `keep` (and the default
+    // branch) but not the yet-to-be-created `ephemeral`. Operations are only
+    // recorded for ref-mutating commands, so a branch creation is the snapshot.
+    assert_cli_success(&run_libra_command(&["branch", "keep"], p), "branch keep");
+    let base_op = latest_operation_id(p);
+
+    // Create a branch that is absent from the base operation's view.
+    assert_cli_success(
+        &run_libra_command(&["branch", "ephemeral"], p),
+        "branch ephemeral",
+    );
+    let before = run_libra_command(&["branch"], p);
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("ephemeral"),
+        "the extra branch should exist before restore"
+    );
+
+    // Restore to the base operation — `ephemeral` must be pruned, while both the
+    // default branch and `keep` (present in the target view) survive.
+    let restore = run_json_op(p, &["restore", &base_op]);
+    assert_eq!(restore["data"]["action"], "restore");
+
+    let after = run_libra_command(&["branch"], p);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        !after_out.contains("ephemeral"),
+        "the branch absent from the target view should be pruned: {after_out}"
+    );
+    assert!(
+        after_out.contains(&default_branch),
+        "the default branch present in the target view should survive: {after_out}"
+    );
+    assert!(
+        after_out.contains("keep"),
+        "the non-HEAD branch present in the target view should survive: {after_out}"
+    );
+}
+
+#[test]
+/// `op restore --dry-run` previews the branches it would prune but performs no
+/// writes — the branch absent from the target view must still exist afterward.
+fn test_op_restore_dry_run_previews_prune_without_deleting() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    assert_cli_success(&run_libra_command(&["branch", "keep"], p), "branch keep");
+    let base_op = latest_operation_id(p);
+    assert_cli_success(
+        &run_libra_command(&["branch", "ephemeral"], p),
+        "branch ephemeral",
+    );
+
+    // Dry-run should NAME the branch it would prune...
+    let preview = run_libra_command(&["op", "restore", &base_op, "--dry-run"], p);
+    assert_cli_success(&preview, "op restore --dry-run");
+    let preview_out = String::from_utf8_lossy(&preview.stdout);
+    assert!(
+        preview_out.contains("would be pruned") && preview_out.contains("ephemeral"),
+        "dry-run should preview the prune of `ephemeral`: {preview_out}"
+    );
+
+    // ...but must NOT actually delete it.
+    let after = run_libra_command(&["branch"], p);
+    assert!(
+        String::from_utf8_lossy(&after.stdout).contains("ephemeral"),
+        "dry-run must not prune the branch"
+    );
+}
+
+#[test]
 /// Verifies that command filtering happens before pagination and preserves totals.
 fn test_op_log_json_command_filter_preserves_filtered_total_across_pages() {
     let repo = create_committed_repo_via_cli();

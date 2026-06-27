@@ -1,6 +1,6 @@
 //! Operation (op) command group for viewing and restoring command-level operation history.
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::{
     command::status,
     internal::{
-        branch::Branch,
+        branch::{Branch, is_locked_branch},
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
@@ -330,6 +330,59 @@ async fn handle_op_show(op_ref: String, show_view: bool, output: &OutputConfig) 
     Ok(())
 }
 
+/// The set of local branch names that an `op restore` to `graph` must KEEP: the
+/// local branches captured in the target view plus the restored HEAD branch.
+/// Any other (non-locked) local branch is pruned so the restore reproduces the
+/// operation's exact local-branch set.
+fn restore_keep_set(graph: &OperationGraphRecord) -> HashSet<String> {
+    let mut keep: HashSet<String> = graph
+        .refs
+        .iter()
+        .filter(|r| r.ref_kind == "branch" && r.ref_remote.is_none())
+        .map(|r| r.ref_name.clone())
+        .collect();
+    if graph.view.head_kind == "branch" {
+        keep.insert(graph.view.head_target.clone());
+    }
+    keep
+}
+
+/// List the local branches that an `op restore` would prune for the given
+/// `keep` set: present now, absent from the target view, and not a Libra-owned
+/// locked branch (`main`/`intent`/`traces`/`agent-traces`), which are never
+/// pruned so AI/session history and the trunk are preserved. Remote-tracking
+/// refs are excluded (the listing is local-only).
+async fn local_branches_to_prune<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    keep: &HashSet<String>,
+) -> Result<Vec<String>, DbErr> {
+    let current = Branch::list_branches_result_with_conn(db, None)
+        .await
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
+    Ok(prune_candidates(current.into_iter().map(|b| b.name), keep))
+}
+
+/// Pure prune predicate over local branch names. A name is a prune candidate
+/// unless it is in `keep`, is a Libra-owned locked branch
+/// (`main`/`intent`/`traces`/`agent-traces`), or lives in the reserved `libra/`
+/// namespace. The namespace guard protects AI-owned refs such as the history
+/// branch `libra/intent` and the orchestrator's `libra/src`/`libra/target`,
+/// which are stored as local `Branch` rows but must never be deleted by an
+/// `op restore`. Split out so the protection can be unit-tested without a
+/// database (the CLI refuses to create these refs, so an integration fixture
+/// cannot reproduce one).
+fn prune_candidates<I: IntoIterator<Item = String>>(
+    current: I,
+    keep: &HashSet<String>,
+) -> Vec<String> {
+    current
+        .into_iter()
+        .filter(|name| {
+            !keep.contains(name) && !is_locked_branch(name) && !name.starts_with("libra/")
+        })
+        .collect()
+}
+
 /// Restore the repository view referenced by one prior operation.
 async fn handle_op_restore(
     op_ref: String,
@@ -367,6 +420,18 @@ async fn handle_op_restore(
                 &ref_rec.target_oid[..7.min(ref_rec.target_oid.len())]
             );
         }
+        let keep = restore_keep_set(&target_graph);
+        let pruned = local_branches_to_prune(&db, &keep)
+            .await
+            .map_err(|e| CliError::fatal(format!("failed to inspect branches: {e}")))?;
+        if pruned.is_empty() {
+            println!("No branches would be pruned.");
+        } else {
+            println!("Branches that would be pruned (absent from the target view):");
+            for name in &pruned {
+                println!("  {name}");
+            }
+        }
         return Ok(());
     }
 
@@ -403,6 +468,20 @@ async fn handle_op_restore(
                     )
                     .await?;
                 }
+            }
+
+            // Prune local branches that are absent from the target view, so
+            // `op restore` reproduces that operation's exact local-branch set
+            // rather than only updating the branches it names. Libra-owned locked
+            // branches (`main`/`intent`/`traces`/`agent-traces`) and the restored
+            // HEAD branch are always kept; remote-tracking refs are left untouched
+            // (the listing below is local-only).
+            let keep = restore_keep_set(&restore_graph);
+            let to_prune = local_branches_to_prune(txn, &keep).await?;
+            for name in &to_prune {
+                Branch::delete_branch_result_with_conn(txn, name, None)
+                    .await
+                    .map_err(|e| DbErr::Custom(e.to_string()))?;
             }
 
             Ok::<(), DbErr>(())
@@ -546,4 +625,50 @@ fn format_timestamp(ts: i64) -> String {
         .single()
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| ts.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `prune_candidates` never proposes a Libra-owned locked branch
+    /// (`main`/`intent`/`traces`/`agent-traces`) for pruning, even when it is
+    /// absent from the target view's keep set — so `op restore` cannot orphan
+    /// AI/session history or delete the trunk. Ordinary branches absent from the
+    /// keep set are pruned; branches in the keep set are retained.
+    #[test]
+    fn prune_candidates_protects_locked_branches() {
+        let keep: HashSet<String> = ["keep".to_string()].into_iter().collect();
+        let current = [
+            "main".to_string(),
+            "intent".to_string(),
+            "traces".to_string(),
+            "agent-traces".to_string(),
+            // AI history + orchestrator refs live in the reserved `libra/` namespace.
+            "libra/intent".to_string(),
+            "libra/src".to_string(),
+            "libra/target".to_string(),
+            "keep".to_string(),
+            "ephemeral".to_string(),
+        ];
+        let pruned = prune_candidates(current.into_iter(), &keep);
+        // Only the ordinary, view-absent branch is a prune candidate; every
+        // locked branch and every `libra/`-namespaced internal ref is protected.
+        assert_eq!(pruned, vec!["ephemeral".to_string()]);
+    }
+
+    /// A branch in the keep set is never a prune candidate even if it shares a
+    /// name shape with user branches; an empty keep set still protects locked
+    /// branches.
+    #[test]
+    fn prune_candidates_respects_keep_and_locks_with_empty_keep() {
+        let empty: HashSet<String> = HashSet::new();
+        let current = ["main".to_string(), "feature".to_string()];
+        let pruned = prune_candidates(current.into_iter(), &empty);
+        assert_eq!(
+            pruned,
+            vec!["feature".to_string()],
+            "locked `main` is protected; `feature` is pruned"
+        );
+    }
 }

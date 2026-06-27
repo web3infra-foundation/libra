@@ -92,7 +92,13 @@ libra op show @{0} --view
 
 ## `libra op restore`
 
-Restore repository state to a previously captured operation view.
+Restore repository state to a previously captured operation view. HEAD and the
+captured branch refs are reset to the target view, and local branches that are
+absent from that view are pruned, so the restore reproduces the operation's
+exact local-branch set. The restored HEAD branch is always kept; remote-tracking
+refs and Libra-owned internal refs (the locked `main`/`intent`/`traces`
+branches and the reserved `libra/` namespace, e.g. the AI history branch
+`libra/intent`) are never pruned.
 
 ```bash
 libra op restore [--force] [--dry-run] <OP_REF>
@@ -139,6 +145,6 @@ libra op restore @{1} --dry-run
 
 - `op restore` records a new `op restore` operation on success.
 - `op restore --dry-run` does not write a new operation.
-- Current restore behavior resets HEAD and branch refs captured in the target
-  view, but it does not prune refs that exist now and were absent in the target
-  view.
+- Restore resets HEAD and the branch refs captured in the target view, and
+  prunes local branches that are absent from that view (the restored HEAD branch
+  is always kept; remote-tracking refs are left untouched).
