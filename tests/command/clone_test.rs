@@ -191,6 +191,9 @@ async fn test_clone_branch() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -236,6 +239,9 @@ async fn test_clone_bare_repository() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -296,6 +302,9 @@ async fn test_clone_branch_single_branch() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -340,6 +349,9 @@ async fn test_clone_default_branch() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -384,6 +396,9 @@ async fn test_clone_default_branch_single_branch() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -430,6 +445,9 @@ async fn test_clone_to_existing_empty_dir() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -479,6 +497,9 @@ async fn test_clone_to_existing_dir() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -524,6 +545,9 @@ async fn test_clone_to_dir_with_existing_file_name() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -568,6 +592,9 @@ async fn test_clone_with_depth() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -612,6 +639,9 @@ async fn test_clone_with_depth_and_branch() {
         shared: false,
         dissociate: false,
         mirror: false,
+        filter: None,
+        shallow_since: None,
+        shallow_exclude: vec![],
         no_checkout: false,
         no_progress: false,
         remote_repo: repo.https_url.clone(),
@@ -1135,5 +1165,89 @@ fn test_clone_mirror_maps_all_refs_and_sets_config() {
     assert!(
         !mirror.join("f.txt").exists(),
         "mirror is bare (no working-tree checkout)"
+    );
+}
+
+/// `--filter`/`--shallow-since`/`--shallow-exclude` are accepted but ignored
+/// (Libra has no partial-clone/promisor support and its fetch only does `--depth`
+/// shallow), so a COMPLETE clone is performed and each given flag emits a warning.
+#[test]
+#[serial]
+fn test_clone_unsupported_fetch_optimizations_warn_and_full_clone() {
+    use super::run_libra_command;
+
+    let source = tempdir().expect("source dir");
+    let sp = source.path();
+    assert!(
+        run_libra_command(&["init"], sp).status.success(),
+        "init source"
+    );
+    run_libra_command(&["config", "set", "user.name", "t"], sp);
+    run_libra_command(&["config", "set", "user.email", "t@t"], sp);
+    fs::write(sp.join("f.txt"), "x\n").expect("write f");
+    assert!(
+        run_libra_command(&["add", "f.txt"], sp).status.success(),
+        "add"
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "c1", "--no-verify"], sp)
+            .status
+            .success(),
+        "commit"
+    );
+    let source_str = sp.to_str().unwrap();
+    let dest_root = tempdir().expect("dest root");
+
+    // --filter: full clone (the blob is present) + a warning.
+    let d1 = dest_root.path().join("d1");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--filter",
+            "blob:none",
+            source_str,
+            d1.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(
+        out.status.success(),
+        "clone with --filter succeeds (full clone): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        d1.join("f.txt").exists(),
+        "a full clone is performed (the filtered-out blob is still present)"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--filter is ignored"),
+        "--filter warns it is ignored"
+    );
+
+    // --shallow-since + --shallow-exclude (multi): full clone + warnings.
+    let d2 = dest_root.path().join("d2");
+    let out = run_libra_command(
+        &[
+            "clone",
+            "--shallow-since",
+            "2020-01-01",
+            "--shallow-exclude",
+            "v1",
+            "--shallow-exclude",
+            "v2",
+            source_str,
+            d2.to_str().unwrap(),
+        ],
+        dest_root.path(),
+    );
+    assert!(out.status.success(), "clone with --shallow-* succeeds");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--shallow-since is ignored"),
+        "--shallow-since warns"
+    );
+    assert!(
+        stderr.contains("--shallow-exclude is ignored"),
+        "--shallow-exclude warns"
     );
 }

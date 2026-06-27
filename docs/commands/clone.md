@@ -53,7 +53,8 @@ For `libra+cloud://`, the authority is the configured clone domain. The path mus
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
 The first Cloudflare restore surface does not accept Git transport shaping flags:
-`--branch`, `--depth`, `--single-branch`, `--bare`, and `--mirror` return `LBR-CLI-002`
+`--branch`, `--depth`, `--single-branch`, `--bare`, `--mirror`, `--filter`,
+`--shallow-since`, and `--shallow-exclude` return `LBR-CLI-002`
 before clone-domain config lookup and before creating the destination directory.
 Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
 
@@ -142,6 +143,26 @@ yet mirror-aware, so refreshing the mirror is not automatic.
 
 ```bash
 libra clone --mirror git@github.com:user/repo.git repo-mirror.git
+```
+
+### `--filter <spec>` / `--shallow-since <date>` / `--shallow-exclude <rev>`
+
+Git's fetch-shaping flags that *reduce* what is transferred: `--filter` (e.g.
+`blob:none`) is a partial clone, and `--shallow-since`/`--shallow-exclude` bound
+shallow history by date or excluded ref. **Libra has no partial-clone/promisor
+support, and its fetch supports only `--depth` for shallow history**, so these
+flags are accepted but **ignored, with a warning** — the optimization is simply
+not applied (the clone still fetches everything those flags would have trimmed,
+subject only to `--depth` if also given). Without `--depth` that means a complete
+clone — a correct superset of a filtered or date-bounded clone, so the result is
+always usable; this mirrors Git itself, which warns and falls back to a full clone
+when a server cannot honor `--filter`. `--shallow-exclude` may be given
+multiple times. Not supported for `libra+cloud://` sources (rejected with
+`LBR-CLI-002`, like `--depth`).
+
+```bash
+libra clone --filter blob:none git@github.com:user/repo.git
+libra clone --shallow-since "2 weeks ago" git@github.com:user/repo.git
 ```
 
 ### `-l, --local` / `--no-local`
@@ -408,9 +429,10 @@ are preserved and surfaced as warnings; the original `.gitignore` files remain u
 Shallow clones are essential for CI/CD pipelines and large monorepos where full history is
 unnecessary. Libra supports `--depth N` with the same semantics as Git: the history is
 truncated to the specified number of commits. The depth value is validated at parse time
-(must be a positive integer) and propagated to the fetch protocol layer. Unlike Git, Libra
-does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
-shallow boundaries, keeping the initial implementation focused and predictable.
+(must be a positive integer) and propagated to the fetch protocol layer. Libra bounds
+shallow history **only** by `--depth`: the date/ref-based `--shallow-since` and
+`--shallow-exclude` flags are accepted but ignored with a warning (see their Options entry
+above) rather than rejected, so scripts that pass them still clone successfully.
 
 ### `--sparse` is intentionally unsupported
 
@@ -449,8 +471,8 @@ not, because its operation-log model fetches all refs by design.
 | No single branch | `--no-single-branch` | N/A | `--no-single-branch` (countermands `--single-branch`; all branches is the default) |
 | Bare clone | `--bare` | N/A | `--bare` |
 | Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
-| Shallow since date | `--shallow-since=<date>` | N/A | N/A |
-| Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
+| Shallow since date | `--shallow-since=<date>` | N/A | accepted no-op for Git remotes (ignored + warning; not applied, history bounded only by `--depth`); rejected for cloud |
+| Shallow exclude | `--shallow-exclude=<rev>` | N/A | accepted no-op for Git remotes (ignored + warning; not applied, history bounded only by `--depth`); rejected for cloud |
 | Mirror clone | `--mirror` | N/A | `--mirror` (implies `--bare`; mirrors fetched branches into `refs/heads/*`, keeps tags, no tracking refs, sets `remote.<name>.mirror` marker; narrowed — only fetched branches/tags, refresh not mirror-aware) |
 | Reference repository | `--reference <repo>` / `--reference-if-able <repo>` | N/A | accepted no-op (Libra always copies objects, no alternates); `--reference` warns, `--reference-if-able` silent |
 | Shared object store | `--shared` / `-s` | N/A | accepted no-op (always copies); warns |
@@ -464,7 +486,7 @@ not, because its operation-log model fetches all refs by design.
 | Verbose / progress | `--progress` / `--verbose` | N/A | Phased stderr progress (default) |
 | No checkout | `-n` / `--no-checkout` | N/A | `--no-checkout` |
 | Sparse checkout | `--sparse` | N/A | N/A |
-| Filter (partial clone) | `--filter=<spec>` | N/A | N/A |
+| Filter (partial clone) | `--filter=<spec>` | N/A | accepted no-op for Git remotes (ignored + warning; not applied, history bounded only by `--depth`); rejected for cloud |
 | Bundle URI | `--bundle-uri=<uri>` | N/A | N/A |
 | Vault signing bootstrap | N/A | N/A | Always enabled (matches init) |
 | SSH key detection | N/A | N/A | Automatic detection + hint |

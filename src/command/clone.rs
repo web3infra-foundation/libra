@@ -215,6 +215,31 @@ pub struct CloneArgs {
     /// sources.
     #[clap(long = "mirror")]
     pub mirror: bool,
+
+    /// Partial-clone object filter (Git's `--filter <spec>`, e.g. `blob:none`).
+    /// Accepted for compatibility but a no-op with a warning: Libra has no
+    /// partial-clone/promisor support, so the filter is ignored (no objects are
+    /// excluded) and a complete clone is performed (subject only to `--depth` if
+    /// also given) — mirroring Git's own behavior when a server does not advertise
+    /// filtering. Not supported for `libra+cloud://` sources.
+    #[clap(long = "filter", value_name = "spec")]
+    pub filter: Option<String>,
+
+    /// Deepen history to commits more recent than a date (Git's
+    /// `--shallow-since <date>`). Accepted for compatibility but a no-op with a
+    /// warning: Libra bounds shallow history only by `--depth`, so the date bound
+    /// is not applied (history is limited only by `--depth` if also given). Not
+    /// supported for `libra+cloud://` sources.
+    #[clap(long = "shallow-since", value_name = "date")]
+    pub shallow_since: Option<String>,
+
+    /// Deepen history, excluding commits reachable from a ref (Git's
+    /// `--shallow-exclude <rev>`). Accepted for compatibility but a no-op with a
+    /// warning: Libra bounds shallow history only by `--depth`, so the exclusion
+    /// is not applied (history is limited only by `--depth` if also given). May be
+    /// given multiple times. Not supported for `libra+cloud://` sources.
+    #[clap(long = "shallow-exclude", value_name = "rev")]
+    pub shallow_exclude: Vec<String>,
 }
 
 /// `--reject-shallow`: refuse a clone that ended up shallow without the user
@@ -242,6 +267,40 @@ fn object_alternates_warning(args: &CloneArgs) -> Option<String> {
          always copies every object into the clone, so it is already self-contained"
             .to_string(),
     )
+}
+
+/// Warnings for fetch-shaping flags Libra cannot honor (`--filter`,
+/// `--shallow-since`, `--shallow-exclude`). Libra has no partial-clone/promisor
+/// support and bounds shallow history only by `--depth`, so these flags are
+/// accepted but ignored — the optimization is simply not applied (the clone still
+/// fetches everything those flags would have trimmed, subject only to `--depth`
+/// if also given). Each given flag produces its own explanatory warning so the
+/// user knows it had no effect — mirroring Git, which warns and falls back to a
+/// full clone when a server cannot honor `--filter`.
+fn unsupported_fetch_optimization_warnings(args: &CloneArgs) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if args.filter.is_some() {
+        warnings.push(
+            "--filter is ignored: Libra has no partial-clone support, so the object filter is not \
+             applied (no objects are excluded)"
+                .to_string(),
+        );
+    }
+    if args.shallow_since.is_some() {
+        warnings.push(
+            "--shallow-since is ignored: Libra bounds shallow history only by --depth, so the date \
+             bound is not applied"
+                .to_string(),
+        );
+    }
+    if !args.shallow_exclude.is_empty() {
+        warnings.push(
+            "--shallow-exclude is ignored: Libra bounds shallow history only by --depth, so the \
+             exclusion is not applied"
+                .to_string(),
+        );
+    }
+    warnings
 }
 
 fn clone_should_reject_shallow(
@@ -1653,6 +1712,7 @@ async fn clone_cloud_publish_into_destination(
     let mut warnings = init_output.warnings.clone();
     warnings.extend(object_report.warnings);
     warnings.extend(object_alternates_warning(args));
+    warnings.extend(unsupported_fetch_optimization_warnings(args));
     let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
         .map_err(|source| CloneError::IgnoreFile { source })?;
     warnings.extend(summary.warnings);
@@ -2414,6 +2474,27 @@ fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), Clo
             hint: "`--bare` is only supported for Git remotes until libra+cloud:// restore grows bare-repository support.",
         });
     }
+    if args.filter.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--filter",
+            reason: "Cloudflare restore must download the complete published object set",
+            hint: "`--filter` (partial clone) is not supported for libra+cloud:// sources; omit it.",
+        });
+    }
+    if args.shallow_since.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--shallow-since",
+            reason: "Cloudflare restore must download the complete published object set",
+            hint: "`--shallow-since` is not supported for libra+cloud:// sources; omit it.",
+        });
+    }
+    if !args.shallow_exclude.is_empty() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--shallow-exclude",
+            reason: "Cloudflare restore must download the complete published object set",
+            hint: "`--shallow-exclude` is not supported for libra+cloud:// sources; omit it.",
+        });
+    }
     Ok(())
 }
 
@@ -3129,6 +3210,7 @@ async fn clone_into_destination(
 
     let mut warnings = init_output.warnings.clone();
     warnings.extend(object_alternates_warning(args));
+    warnings.extend(unsupported_fetch_optimization_warnings(args));
     let mut gitignore_converted = Vec::new();
     if !args.bare {
         let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
@@ -3760,6 +3842,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -3853,6 +3938,60 @@ mod tests {
                 assert!(
                     hint.contains("--bare"),
                     "bare hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_filter_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.filter = Some("blob:none".to_string());
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--filter must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--filter");
+                assert!(
+                    hint.contains("--filter"),
+                    "filter hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_shallow_since_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.shallow_since = Some("2020-01-01".to_string());
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--shallow-since must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--shallow-since");
+                assert!(
+                    hint.contains("--shallow-since"),
+                    "hint should name the flag: {hint}"
+                );
+            }
+            other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_cloud_clone_option_compatibility_rejects_shallow_exclude_flag() {
+        let mut args = cloud_clone_args_baseline();
+        args.shallow_exclude = vec!["v1".to_string()];
+        match validate_cloud_clone_option_compatibility(&args)
+            .expect_err("--shallow-exclude must be rejected for libra+cloud:// sources")
+        {
+            CloneError::UnsupportedCloudCloneOption { option, hint, .. } => {
+                assert_eq!(option, "--shallow-exclude");
+                assert!(
+                    hint.contains("--shallow-exclude"),
+                    "hint should name the flag: {hint}"
                 );
             }
             other => panic!("expected UnsupportedCloudCloneOption, got {other:?}"),
@@ -4071,6 +4210,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4170,6 +4312,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: true,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4257,6 +4402,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"
@@ -4334,6 +4482,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
@@ -4408,6 +4559,9 @@ mod tests {
             shared: false,
             dissociate: false,
             mirror: false,
+            filter: None,
+            shallow_since: None,
+            shallow_exclude: vec![],
             no_checkout: false,
             no_progress: false,
             remote_repo: "libra+cloud://code.example.com/kepler-ledger".to_string(),
