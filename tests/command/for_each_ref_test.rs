@@ -2174,3 +2174,97 @@ fn test_for_each_ref_commit_graph_atoms() {
         "commit-graph atoms are empty for a non-commit (annotated-tag) ref"
     );
 }
+
+/// `%(committerdate:<fmt>)` and friends honor date-format modifiers, reusing the
+/// shared timestamp formatter; `%(creatordate)` resolves (committer date for
+/// commits, tagger date for annotated tags); an inapplicable date is empty; and
+/// `:relative` produces git-style "… ago" output.
+#[test]
+#[serial]
+fn test_for_each_ref_date_format_modifiers() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    let stdout_trim = |a: &[&str]| String::from_utf8_lossy(&run(a).stdout).trim().to_string();
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+    run(&["tag", "annot", "-m", "annotated"]);
+
+    // unix modifier is a bare epoch integer; short is YYYY-MM-DD; iso-strict has a `T`.
+    let unix = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(committerdate:unix)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        unix.parse::<u64>().is_ok() && !unix.is_empty(),
+        "committerdate:unix is an epoch integer: {unix}"
+    );
+    let short = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(committerdate:short)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(short.len(), 10, "short date is YYYY-MM-DD: {short}");
+    assert_eq!(
+        short.matches('-').count(),
+        2,
+        "short date has two dashes: {short}"
+    );
+    let strict = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(committerdate:iso-strict)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        strict.contains('T'),
+        "iso-strict uses RFC3339 with T: {strict}"
+    );
+
+    // bare committerdate (default format) is unchanged and differs from :unix.
+    let default = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(committerdate)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        default.contains("2026") || default.contains("20"),
+        "default date: {default}"
+    );
+    assert_ne!(default, unix, "default format differs from :unix");
+
+    // creatordate resolves for the annotated tag (its tagger date).
+    let creator = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(creatordate:short)",
+        "refs/tags/annot",
+    ]);
+    assert_eq!(
+        creator.len(),
+        10,
+        "creatordate:short for an annotated tag: {creator}"
+    );
+
+    // authordate does not apply to an annotated tag → empty.
+    let auth_on_tag = stdout_trim(&[
+        "for-each-ref",
+        "--format=[%(authordate:iso)]",
+        "refs/tags/annot",
+    ]);
+    assert_eq!(
+        auth_on_tag, "[]",
+        "authordate is empty for a tag: {auth_on_tag}"
+    );
+
+    // :relative produces git-style "… ago" wording (the commit is fresh).
+    let rel = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(committerdate:relative)",
+        "refs/heads/main",
+    ]);
+    assert!(rel.ends_with("ago"), "relative date ends with 'ago': {rel}");
+}

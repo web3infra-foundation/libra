@@ -35,6 +35,7 @@ EXAMPLES:
     libra for-each-ref --sort=refname   Sort by ref name
     libra for-each-ref --sort=version:refname   Version-aware sort (v1.9 before v1.10)
     libra for-each-ref --sort=-committerdate    Most recently committed refs first
+    libra for-each-ref --format='%(refname:short) %(committerdate:relative)'  Date in a chosen format (iso/short/unix/relative/...)
     libra for-each-ref --sort=objectsize --format='%(objectsize) %(refname)'  Sort by object size
     libra for-each-ref --tags --format='%(refname:short) -> %(*objectname:short)'  Show each tag's dereferenced target
     libra for-each-ref --tags --format='%(refname:short) %(*objecttype) %(*objectsize)'  Dereferenced target type and size
@@ -1173,7 +1174,18 @@ fn render_format(
         "%(parent:short)",
         "%(numparent)",
     ];
-    let fields = if COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a)) {
+    // Date `:<format>` modifiers (e.g. `%(committerdate:iso)`) and bare
+    // `%(creatordate)` also need the loaded object but are not exact members of
+    // COMMIT_FIELD_ATOMS, so detect their prefixes too.
+    const DATE_ATOM_PREFIXES: [&str; 4] = [
+        "%(committerdate:",
+        "%(authordate:",
+        "%(taggerdate:",
+        "%(creatordate",
+    ];
+    let needs_fields = COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a))
+        || DATE_ATOM_PREFIXES.iter().any(|p| format.contains(p));
+    let fields = if needs_fields {
         commit_fields_for(entry)
     } else {
         CommitFields::default()
@@ -1217,7 +1229,8 @@ fn render_format(
         ("objectname", entry.objectname.as_str()),
         ("objecttype", entry.objecttype.as_str()),
     ];
-    render_fragment(format, &atoms, entry, quote)
+    let date_ctx = DateAtomContext::from_fields(&fields);
+    render_fragment(format, &atoms, entry, &date_ctx, quote)
 }
 
 /// Column position for a `%(align)` block.
@@ -1236,6 +1249,7 @@ fn render_fragment(
     fragment: &str,
     atoms: &[(&str, &str)],
     entry: &RefEntry,
+    date_ctx: &DateAtomContext,
     quote: Option<QuoteStyle>,
 ) -> CliResult<String> {
     let mut out = String::with_capacity(fragment.len());
@@ -1264,7 +1278,7 @@ fn render_fragment(
             // This matches Git, where under `--shell`/`--perl`/`--python`/`--tcl`
             // only the topmost align block is quoted as a single string literal —
             // nested align blocks and block literals do not quote separately.
-            let inner = render_fragment(&body[..end_start], atoms, entry, None)?;
+            let inner = render_fragment(&body[..end_start], atoms, entry, date_ctx, None)?;
             let padded = pad_aligned(&inner, width, position);
             push_field(&mut out, &padded, quote);
             rest = &body[after_end..];
@@ -1296,13 +1310,13 @@ fn render_fragment(
             };
             // The condition renders raw (it is tested, not emitted); the chosen
             // branch renders at the active quote level like any other output.
-            let cond_value = render_fragment(condition, atoms, entry, None)?;
+            let cond_value = render_fragment(condition, atoms, entry, date_ctx, None)?;
             let chosen = if eval_if_condition(cond_spec, &cond_value)? {
                 then_branch
             } else {
                 else_branch
             };
-            out.push_str(&render_fragment(chosen, atoms, entry, quote)?);
+            out.push_str(&render_fragment(chosen, atoms, entry, date_ctx, quote)?);
             rest = &body[after_end..];
             continue;
         }
@@ -1335,6 +1349,8 @@ fn render_fragment(
                 &entry.objectname.chars().take(n).collect::<String>(),
                 quote,
             );
+        } else if let Some(value) = date_atom_value(token, date_ctx) {
+            push_field(&mut out, &value, quote);
         } else {
             match atoms.iter().find(|(name, _)| *name == token) {
                 Some((_, value)) => push_field(&mut out, value, quote),
@@ -1550,6 +1566,14 @@ struct CommitFields {
     tagger_name: String,
     tagger_email: String,
     tagger_date: String,
+    /// Raw Unix timestamps backing the `:<format>` date modifiers (e.g.
+    /// `%(committerdate:iso)`). `None` when the field does not apply to the ref's
+    /// object type. `creator_ts` is the committer date for commits / lightweight
+    /// tags and the tagger date for annotated tags (`%(creatordate)`).
+    author_ts: Option<i64>,
+    committer_ts: Option<i64>,
+    tagger_ts: Option<i64>,
+    creator_ts: Option<i64>,
     /// `%(tree)` / `%(tree:short)`: the commit's tree id (empty for non-commits).
     tree: String,
     tree_short: String,
@@ -1595,6 +1619,9 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                     committer_email: format!("<{}>", c.committer.email),
                     author_date: format_timestamp_with(c.author.timestamp as i64, ""),
                     committer_date: format_timestamp_with(c.committer.timestamp as i64, ""),
+                    author_ts: Some(c.author.timestamp as i64),
+                    committer_ts: Some(c.committer.timestamp as i64),
+                    creator_ts: Some(c.committer.timestamp as i64),
                     tree,
                     tree_short,
                     parent,
@@ -1615,12 +1642,135 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                 tagger_name: t.tagger.name.clone(),
                 tagger_email: format!("<{}>", t.tagger.email),
                 tagger_date: format_timestamp_with(t.tagger.timestamp as i64, ""),
+                tagger_ts: Some(t.tagger.timestamp as i64),
+                creator_ts: Some(t.tagger.timestamp as i64),
                 ..CommitFields::default()
             },
             Err(_) => CommitFields::default(),
         },
         _ => CommitFields::default(),
     }
+}
+
+/// Resolve a date atom that carries a `:<format>` modifier
+/// (`%(committerdate:iso)`) or the `%(creatordate)` atom (bare or modified).
+/// Bare `committerdate`/`authordate`/`taggerdate` are served from the exact atom
+/// table (default format), so this returns `None` for them and for any non-date
+/// token. An empty string results when the date does not apply to the ref's
+/// object type (e.g. `authordate` on an annotated tag).
+/// The raw timestamps backing the date `:<format>` modifiers, carried into the
+/// fragment renderer (which otherwise only sees the pre-formatted atom table).
+#[derive(Clone, Copy, Default)]
+struct DateAtomContext {
+    author_ts: Option<i64>,
+    committer_ts: Option<i64>,
+    tagger_ts: Option<i64>,
+    creator_ts: Option<i64>,
+}
+
+impl DateAtomContext {
+    fn from_fields(fields: &CommitFields) -> Self {
+        Self {
+            author_ts: fields.author_ts,
+            committer_ts: fields.committer_ts,
+            tagger_ts: fields.tagger_ts,
+            creator_ts: fields.creator_ts,
+        }
+    }
+}
+
+fn date_atom_value(token: &str, ctx: &DateAtomContext) -> Option<String> {
+    let (base, modifier, has_modifier) = match token.split_once(':') {
+        Some((base, modifier)) => (base, modifier, true),
+        None => (token, "", false),
+    };
+    let ts = match base {
+        "committerdate" if has_modifier => ctx.committer_ts,
+        "authordate" if has_modifier => ctx.author_ts,
+        "taggerdate" if has_modifier => ctx.tagger_ts,
+        "creatordate" => ctx.creator_ts,
+        _ => return None,
+    };
+    Some(
+        ts.map(|t| format_for_each_ref_date(t, modifier))
+            .unwrap_or_default(),
+    )
+}
+
+/// Format a timestamp for a for-each-ref date atom. Reuses the shared
+/// `format_timestamp_with` for the deterministic formats it supports —
+/// `default`, `short`, `iso`/`iso8601`, `iso-strict`/`iso8601-strict`,
+/// `rfc`/`rfc2822`, `unix`, `raw` — and computes `relative` locally. `local`,
+/// `human`, and `format:<strftime>` are not yet supported and fall back to the
+/// default format (a documented narrowing).
+fn format_for_each_ref_date(ts: i64, modifier: &str) -> String {
+    if modifier == "relative" {
+        relative_date(ts)
+    } else {
+        format_timestamp_with(ts, modifier)
+    }
+}
+
+/// Git-compatible relative date (`%(committerdate:relative)` → "2 days ago"),
+/// mirroring git's `show_date_relative` thresholds and singular/plural wording.
+fn relative_date(ts: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(ts);
+    relative_date_at(now, ts)
+}
+
+/// Pure relative-date core (testable with an injected `now`); see [`relative_date`].
+fn relative_date_at(now: i64, ts: i64) -> String {
+    if ts > now {
+        return "in the future".to_string();
+    }
+    let unit = |n: u64, word: &str| {
+        if n == 1 {
+            format!("1 {word} ago")
+        } else {
+            format!("{n} {word}s ago")
+        }
+    };
+
+    let mut diff = (now - ts) as u64; // seconds
+    if diff < 90 {
+        return unit(diff, "second");
+    }
+    diff = (diff + 30) / 60; // minutes
+    if diff < 90 {
+        return unit(diff, "minute");
+    }
+    diff = (diff + 30) / 60; // hours
+    if diff < 36 {
+        return unit(diff, "hour");
+    }
+    let days = (diff + 12) / 24; // diff is hours here
+    if days < 14 {
+        return unit(days, "day");
+    }
+    if days < 70 {
+        return unit((days + 3) / 7, "week");
+    }
+    if days < 365 {
+        return unit((days + 15) / 30, "month");
+    }
+    if days < 365 * 5 {
+        // Give years and months for up to ~5 years, matching git's rounding.
+        let total_months = (days * 12 * 2 + 365) / (365 * 2);
+        let years = total_months / 12;
+        let months = total_months % 12;
+        if months > 0 {
+            let y = if years == 1 { "year" } else { "years" };
+            let m = if months == 1 { "month" } else { "months" };
+            return format!("{years} {y}, {months} {m} ago");
+        }
+        return unit(years, "year");
+    }
+    unit((days + 183) / 365, "year")
 }
 
 /// First non-empty line of a commit/tag message (messages can carry leading
@@ -1685,4 +1835,40 @@ fn refname_strip_atom(token: &str, refname: &str) -> Option<String> {
         (false, false) => comps.get(..(-n).min(len) as usize).unwrap_or(&comps),
     };
     Some(kept.join("/"))
+}
+
+#[cfg(test)]
+mod relative_date_tests {
+    use super::relative_date_at;
+
+    const HOUR: i64 = 3600;
+    const DAY: i64 = 86_400;
+
+    /// Mirrors git's `show_date_relative` thresholds + rounding. Note git's
+    /// `+30`/`+12` rounding offsets mean the minute/hour/day/week/month bands
+    /// effectively start at 2 (e.g. 90s rounds straight to "2 minutes ago"), so
+    /// "1 minute/hour/day ago" never appear — only "1 second ago" and the
+    /// year forms are singular.
+    #[test]
+    fn relative_date_matches_git_thresholds() {
+        let now = 1_000_000_000;
+        let ago = |secs: i64| relative_date_at(now, now - secs);
+
+        assert_eq!(ago(0), "0 seconds ago");
+        assert_eq!(ago(1), "1 second ago"); // singular
+        assert_eq!(ago(89), "89 seconds ago");
+        assert_eq!(ago(90), "2 minutes ago"); // (90+30)/60 = 2
+        assert_eq!(ago(3600), "60 minutes ago"); // 1h is still within the minutes band
+        assert_eq!(ago(2 * HOUR), "2 hours ago"); // 7200s → 120min → 2h
+        assert_eq!(ago(2 * DAY), "2 days ago");
+        assert_eq!(ago(20 * DAY), "3 weeks ago"); // (20+3)/7 = 3
+        assert_eq!(ago(100 * DAY), "3 months ago"); // (100+15)/30 = 3
+        assert_eq!(ago(400 * DAY), "1 year, 1 month ago"); // years+months branch
+        assert_eq!(ago(365 * 6 * DAY), "6 years ago"); // >5y: (days+183)/365
+    }
+
+    #[test]
+    fn relative_date_future_is_guarded() {
+        assert_eq!(relative_date_at(1000, 2000), "in the future");
+    }
 }
