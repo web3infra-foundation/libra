@@ -201,9 +201,12 @@ pub struct LogArgs {
     #[clap(long = "patch-with-stat")]
     pub patch_with_stat: bool,
 
-    /// Files to limit diff output (used with -p, --name-only, --name-status,
-    /// --stat, or --shortstat)
-    #[clap(value_name = "PATHS", num_args = 0..)]
+    /// Positional `[<revision-range>...] [<path>...]`: leading arguments are
+    /// revisions (a single rev, or a range `A..B` / `A...B` / `^A`) until the
+    /// first one that is not, after which the rest are pathspecs limiting diff
+    /// output. A bare name that is both a valid revision and an existing path is
+    /// rejected as ambiguous — use `--range` to force the revision.
+    #[clap(value_name = "REVISION_OR_PATH", num_args = 0..)]
     pathspec: Vec<String>,
 
     /// Filter commits whose message contains PATTERN (case-sensitive substring match)
@@ -709,10 +712,21 @@ async fn resolve_commitish(spec: &str) -> CliResult<ObjectHash> {
 enum RevisionExpr {
     Single(ObjectHash),
     Range {
-        /// Excluded start commit for A..B / A...B (None means no boundary).
+        /// Excluded start commit for A..B (None means no boundary).
         exclude: Option<ObjectHash>,
         /// Included end commit.
         include: ObjectHash,
+    },
+    /// `A...B`: the symmetric difference — commits reachable from either `left`
+    /// or `right` but not from BOTH. Both sides are included; `common` is the full
+    /// set of commits reachable from both (their shared history, already
+    /// ancestor-closed), which is excluded. `common` is empty when the two sides
+    /// have no common ancestor (disjoint histories), so both are shown in full,
+    /// and it correctly covers criss-cross histories with multiple merge bases.
+    SymmetricRange {
+        left: ObjectHash,
+        right: ObjectHash,
+        common: Vec<ObjectHash>,
     },
 }
 
@@ -729,11 +743,20 @@ async fn parse_revision_expr(spec: &str) -> CliResult<RevisionExpr> {
         } else {
             resolve_commitish(right).await?
         };
-        // A...B means commits reachable from B but not from merge-base(A,B).
-        let merge_base = find_merge_base(&left, &right).await?;
-        Ok(RevisionExpr::Range {
-            exclude: Some(merge_base),
-            include: right,
+        // A...B is the symmetric difference: commits reachable from A or B but
+        // not from BOTH. Compute the shared history as the intersection of the
+        // two reachable sets (this is correct for criss-cross histories with
+        // multiple merge bases, and empty for disjoint histories) and exclude it.
+        let left_reachable = reachable_commit_ids(left).await?;
+        let right_reachable = reachable_commit_ids(right).await?;
+        let common: Vec<ObjectHash> = left_reachable
+            .intersection(&right_reachable)
+            .copied()
+            .collect();
+        Ok(RevisionExpr::SymmetricRange {
+            left,
+            right,
+            common,
         })
     } else if let Some((left, right)) = spec.split_once("..") {
         let left = if left.is_empty() {
@@ -755,16 +778,14 @@ async fn parse_revision_expr(spec: &str) -> CliResult<RevisionExpr> {
     }
 }
 
-/// Find the best merge-base between two commits (closest ancestor of left reachable from right).
-async fn find_merge_base(left: &ObjectHash, right: &ObjectHash) -> CliResult<ObjectHash> {
-    if left == right {
-        return Ok(*left);
-    }
-    let mut left_ancestors: HashSet<ObjectHash> = HashSet::new();
+/// All commits reachable from `tip` (the commit itself plus every ancestor),
+/// used to compute the shared history for an `A...B` symmetric difference.
+async fn reachable_commit_ids(tip: ObjectHash) -> CliResult<HashSet<ObjectHash>> {
+    let mut reachable: HashSet<ObjectHash> = HashSet::new();
     let mut queue: VecDeque<ObjectHash> = VecDeque::new();
-    queue.push_back(*left);
+    queue.push_back(tip);
     while let Some(commit_id) = queue.pop_front() {
-        if !left_ancestors.insert(commit_id) {
+        if !reachable.insert(commit_id) {
             continue;
         }
         let commit = load_object::<Commit>(&commit_id).map_err(|e| {
@@ -774,33 +795,112 @@ async fn find_merge_base(left: &ObjectHash, right: &ObjectHash) -> CliResult<Obj
             queue.push_back(*parent);
         }
     }
+    Ok(reachable)
+}
 
-    let mut right_ancestors: HashSet<ObjectHash> = HashSet::new();
-    queue.push_back(*right);
-    while let Some(commit_id) = queue.pop_front() {
-        if left_ancestors.contains(&commit_id) {
-            return Ok(commit_id);
-        }
-        if !right_ancestors.insert(commit_id) {
+/// Whether a token using range syntax (`A..B` / `A...B`, or a leading `^`)
+/// actually resolves as a revision expression. Used to distinguish a genuine
+/// positional range from a pathspec that merely contains `..` (e.g. `../file`)
+/// or `^`. Returns `false` on any resolution failure so the caller falls back to
+/// treating the token as a path.
+async fn revision_syntax_resolves(arg: &str) -> bool {
+    // Lightweight endpoint check only — avoid the heavier merge-base/common-set
+    // computation that full `parse_revision_expr` does for `A...B`. An empty
+    // endpoint defaults to HEAD (e.g. `..B`, `A..`).
+    async fn endpoint_resolves(endpoint: &str) -> bool {
+        endpoint.is_empty() || resolve_commitish(endpoint).await.is_ok()
+    }
+    if let Some(rest) = arg.strip_prefix('^') {
+        return resolve_commitish(rest).await.is_ok();
+    }
+    // `...` must be checked before `..` since the former contains the latter.
+    if let Some((left, right)) = arg.split_once("...") {
+        return endpoint_resolves(left).await && endpoint_resolves(right).await;
+    }
+    if let Some((left, right)) = arg.split_once("..") {
+        return endpoint_resolves(left).await && endpoint_resolves(right).await;
+    }
+    resolve_commitish(arg).await.is_ok()
+}
+
+/// Split positional `log` arguments into revision specs and pathspecs, matching
+/// Git's `log [<revision>...] [[--] <path>...]`. Leading arguments are revisions
+/// until the first one that is not; from there everything remaining is a path.
+///
+/// An argument using range syntax (`A..B` / `A...B` or a leading `^`) is always a
+/// revision — its resolution (and any error) is deferred to
+/// [`resolve_log_start_commits`]. A bare name is a revision only if it resolves
+/// to a commit; a bare name that resolves to a commit AND also names an existing
+/// path is ambiguous and rejected (use `--range <rev>` to force the revision),
+/// matching Git's refusal to guess.
+async fn split_log_positionals(positionals: &[String]) -> CliResult<(Vec<String>, Vec<String>)> {
+    let mut revisions = Vec::new();
+    let mut paths = Vec::new();
+    let mut in_paths = false;
+
+    for arg in positionals {
+        if in_paths {
+            paths.push(arg.clone());
             continue;
         }
-        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
-            log_repo_corrupt_error(format!("failed to load commit {commit_id}: {e}"))
-        })?;
-        for parent in &commit.parent_commit_ids {
-            queue.push_back(*parent);
+
+        // Range syntax (`A..B`/`A...B`, or a leading `^`): if it resolves, it is
+        // a revision. If it does not resolve but names an existing path (e.g.
+        // `../file` or a file literally named `foo..bar`), treat it as a
+        // pathspec. Otherwise it is a typoed revision range — error rather than
+        // silently filtering by a non-existent path.
+        if arg.contains("..") || arg.starts_with('^') {
+            if revision_syntax_resolves(arg).await {
+                revisions.push(arg.clone());
+            } else if std::path::Path::new(arg).exists() {
+                in_paths = true;
+                paths.push(arg.clone());
+            } else {
+                return Err(CliError::command_usage(format!(
+                    "ambiguous argument '{arg}': unknown revision or path not in the working tree"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+            continue;
+        }
+
+        // A bare token is a revision only if it resolves to a commit.
+        match resolve_commitish(arg).await {
+            Ok(_) => {
+                if std::path::Path::new(arg).exists() {
+                    return Err(CliError::command_usage(format!(
+                        "ambiguous argument '{arg}': both a revision and a path; \
+                         use '--range {arg}' to select the revision"
+                    ))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+                }
+                revisions.push(arg.clone());
+            }
+            Err(_) => {
+                in_paths = true;
+                paths.push(arg.clone());
+            }
         }
     }
 
-    Err(
-        CliError::fatal(format!("no merge base found between {left} and {right}"))
-            .with_stable_code(StableErrorCode::CliInvalidTarget),
-    )
+    Ok((revisions, paths))
+}
+
+/// The effective revision specs (`--range` plus positional revisions) and the
+/// effective pathspecs, after splitting positional arguments Git-style.
+async fn resolve_log_inputs(args: &LogArgs) -> CliResult<(Vec<String>, Vec<String>)> {
+    let (positional_revisions, paths) = split_log_positionals(&args.pathspec).await?;
+    let mut ranges = args.ranges.clone();
+    ranges.extend(positional_revisions);
+    Ok((ranges, paths))
 }
 
 /// Resolve the starting commit(s) and optional exclusion set from CLI arguments.
+/// `ranges` carries the effective revision specs (`--range` plus any positional
+/// revisions) computed by [`resolve_log_inputs`].
 async fn resolve_log_start_commits(
     args: &LogArgs,
+    ranges: &[String],
 ) -> CliResult<(Vec<ObjectHash>, Option<HashSet<ObjectHash>>)> {
     let mut includes = Vec::new();
     let mut excludes: HashSet<ObjectHash> = HashSet::new();
@@ -808,11 +908,11 @@ async fn resolve_log_start_commits(
     if args.all {
         let all_refs = collect_all_reference_tips().await?;
         includes.extend(all_refs);
-    } else if args.ranges.is_empty() {
+    } else if ranges.is_empty() {
         let head = resolve_log_head_commit().await?;
         includes.push(head.1);
     } else {
-        for spec in &args.ranges {
+        for spec in ranges {
             // Support `^EXCLUDE` syntax.
             if let Some(excluded) = spec.strip_prefix('^') {
                 let hash = resolve_commitish(excluded).await?;
@@ -825,6 +925,15 @@ async fn resolve_log_start_commits(
                             excludes.insert(ex);
                         }
                         includes.push(include);
+                    }
+                    RevisionExpr::SymmetricRange {
+                        left,
+                        right,
+                        common,
+                    } => {
+                        includes.push(left);
+                        includes.push(right);
+                        excludes.extend(common);
                     }
                 }
             }
@@ -869,7 +978,25 @@ async fn get_reachable_commits_excluding(
     let mut queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
     let mut commit_set: HashSet<ObjectHash> = HashSet::new();
     let mut reachable_commits: Vec<Commit> = Vec::new();
-    let excludes = excludes.unwrap_or_default();
+    let exclude_tips = excludes.unwrap_or_default();
+
+    // Expand the exclude tips to their full ancestor closure: a range like
+    // `A..B` (or `^A B`) hides *everything reachable from A*, not just A itself,
+    // so any commit reachable from an excluded tip must also be excluded. (The
+    // closure ignores `--first-parent`/`depth`, which shape only the shown set.)
+    let mut excludes: HashSet<ObjectHash> = HashSet::new();
+    let mut exclude_queue: VecDeque<ObjectHash> = exclude_tips.into_iter().collect();
+    while let Some(commit_id) = exclude_queue.pop_front() {
+        if !excludes.insert(commit_id) {
+            continue;
+        }
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("storage broken, object not found: {e}"))
+        })?;
+        for parent_commit_id in &commit.parent_commit_ids {
+            exclude_queue.push_back(*parent_commit_id);
+        }
+    }
 
     for start in starts {
         queue.push_back((start, 0));
@@ -1113,7 +1240,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let (ranges, paths) = resolve_log_inputs(&args).await?;
+    let path_filters: Vec<PathBuf> = paths.iter().map(util::to_workdir_path).collect();
     let (min_parents, max_parents) = resolve_parent_bounds(
         args.merges,
         args.no_merges,
@@ -1135,7 +1263,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     .with_grep_options(args.ignore_case, args.invert_grep);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
-    let (start_commits, excludes) = resolve_log_start_commits(&args).await?;
+    let (start_commits, excludes) = resolve_log_start_commits(&args, &ranges).await?;
     if start_commits.is_empty() {
         return Err(log_no_commits_error(branch_name.as_deref()));
     }
@@ -1419,7 +1547,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let since = args.since.as_deref().map(parse_date_arg).transpose()?;
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
-    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let (ranges, paths) = resolve_log_inputs(args).await?;
+    let path_filters: Vec<PathBuf> = paths.iter().map(util::to_workdir_path).collect();
     let (min_parents, max_parents) = resolve_parent_bounds(
         args.merges,
         args.no_merges,
@@ -1441,7 +1570,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     .with_grep_options(args.ignore_case, args.invert_grep);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
-    let (start_commits, excludes) = resolve_log_start_commits(args).await?;
+    let (start_commits, excludes) = resolve_log_start_commits(args, &ranges).await?;
     if start_commits.is_empty() {
         return Err(log_no_commits_error(branch_name.as_deref()));
     }

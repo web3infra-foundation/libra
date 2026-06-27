@@ -7,7 +7,7 @@ Show commit history.
 ## Synopsis
 
 ```
-libra log [OPTIONS] [-- PATHS...]
+libra log [OPTIONS] [<revision-range>] [[--] <path>...]
 ```
 
 ## Description
@@ -234,16 +234,26 @@ libra log --graph
 libra log --oneline --graph
 ```
 
-### `--range <SPEC>`
+### Revision ranges (positional or `--range <SPEC>`)
 
-Limit history to a revision range. Supported forms:
+Limit history to a revision range. The range may be given **positionally**
+(Git-style) or with the explicit `--range` flag. Supported forms:
 - `A..B` — commits reachable from `B` but not `A`.
 - `A...B` — symmetric difference (commits in `A` or `B` but not their merge base).
+- `^A` (exclude) combined with an include, e.g. `^A B`.
 - Single ref, e.g. `main` or `HEAD~3`.
 
+Positionally, leading arguments are revisions until the first one that is not;
+everything after is treated as a pathspec, so `log A..B path/` filters the range
+to commits touching `path/`. A bare name that is **both** a valid revision and an
+existing path is rejected as ambiguous — use `--range <rev>` to select the
+revision.
+
 ```bash
-libra log --range main..feature
-libra log --range HEAD~3..HEAD
+libra log main..feature            # positional range
+libra log HEAD~3..HEAD src/        # positional range + pathspec
+libra log ^v1.0 HEAD               # exclude + include
+libra log --range main..feature    # explicit flag form
 ```
 
 ### `--all`
@@ -458,12 +468,21 @@ Graph format:
 
 ## Design Rationale
 
-### `--range` instead of positional revision syntax
+### Positional revision ranges and the `--range` alternative
 
-Git accepts `git log A..B` where the revision expression is a positional argument.
-Libra exposes the same semantics via `--range A..B` to keep positional arguments
-reserved for pathspecs and to avoid ambiguity with the existing `-- -N` test
-pattern.
+Git accepts `git log A..B` where the revision expression is a positional argument,
+optionally followed by pathspecs. Libra supports this positional form: leading
+arguments are classified as revisions (by resolving them) until the first
+non-revision, after which the rest are pathspecs. Because Libra cannot rely on a
+`--` separator (it is consumed before the command sees it), the split is by
+resolution: a range-syntax token (`A..B`/`A...B`/`^A`) is a revision when it
+resolves, a pathspec when it does not resolve but names an existing path (e.g.
+`../file`), and otherwise an error (a typoed revision is reported as an unknown
+revision/path rather than silently filtering by a missing path). A bare token is
+a revision only if it resolves to a commit; a bare name that is *both* a revision
+and an existing path is rejected as ambiguous. The explicit `--range A..B` flag
+remains as an unambiguous alternative and is the way to force a name that also
+matches a path to be treated as a revision.
 
 ### `--all` implementation
 
@@ -545,7 +564,7 @@ flag only affects the human rendering layer.
 | All refs | `git log --all` | `jj log -r 'all()'` | `libra log --all` |
 | Branches only | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | Remotes only | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
+| Revision range | `git log A..B` | `jj log -r 'A..B'` | `libra log A..B` (positional) or `libra log --range A..B` |
 | Grep message | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
 | Case-insensitive grep | `git log -i --grep=<pat>` | N/A | `libra log -i --grep <pat>` |
 | Invert grep | `git log --invert-grep --grep=<pat>` | N/A | `libra log --invert-grep --grep <pat>` |
@@ -574,8 +593,13 @@ flag only affects the human rendering layer.
 - `--branches` and `--remotes` are not yet implemented
 - `--all` traverses local branches and lightweight tags; remote tracking refs and
   stashes are not included
-- Revision range syntax is available via `--range A..B` and `--range A...B`;
-  positional `git log A..B` syntax is not supported
+- Revision range syntax is available both positionally (`libra log A..B` /
+  `A...B` / `^A`) and via the explicit `--range A..B` flag; because the `--`
+  separator is consumed before the command, the positional rev/path split is by
+  resolution. A range-syntax token that neither resolves nor names an existing
+  path is reported as an unknown revision/path (typo guard); a bare name that is
+  both a revision and a path is rejected as ambiguous (use `--range` to force the
+  revision)
 - `--follow` uses best-effort rename detection and may miss complex renames
 - `-L` is accepted but does not yet provide blame-level line precision
 - `--reverse` is supported

@@ -7,7 +7,7 @@
 ## 概要
 
 ```
-libra log [OPTIONS] [-- PATHS...]
+libra log [OPTIONS] [<revision-range>] [[--] <path>...]
 ```
 
 ## 说明
@@ -211,16 +211,21 @@ libra log --graph
 libra log --oneline --graph
 ```
 
-### `--range <SPEC>`
+### 修订范围（位置参数或 `--range <SPEC>`）
 
-限定提交历史到某个修订范围。支持形式：
+限定提交历史到某个修订范围。范围可**位置式**给出（Git 风格）或用显式 `--range` 标志。支持形式：
 - `A..B` — 从 `B` 可达但不可从 `A` 到达的提交。
 - `A...B` — 对称差（在 `A` 或 `B` 中但不在其合并基的提交）。
+- `^A`（排除）配合一个 include，例如 `^A B`。
 - 单个引用，例如 `main` 或 `HEAD~3`。
 
+位置式下，前导参数按解析结果作为 revision，直到第一个非 revision，其后均作 pathspec，故 `log A..B path/` 把范围限定到改动 `path/` 的提交。既是有效 revision 又是现有 path 的裸名会被判为歧义并报错——用 `--range <rev>` 选定 revision。
+
 ```bash
-libra log --range main..feature
-libra log --range HEAD~3..HEAD
+libra log main..feature            # 位置式范围
+libra log HEAD~3..HEAD src/        # 位置式范围 + pathspec
+libra log ^v1.0 HEAD               # 排除 + include
+libra log --range main..feature    # 显式标志形式
 ```
 
 ### `--all`
@@ -411,9 +416,9 @@ Graph 格式：
 
 ## 设计理由
 
-### 使用 `--range` 而非位置修订语法
+### 位置式修订范围与 `--range` 备选
 
-Git 接受 `git log A..B` 这种位置修订表达式。Libra 通过 `--range A..B` 暴露相同语义，从而把位置参数保留给路径规范，并避免与现有 `-- -N` 测试模式产生歧义。
+Git 接受 `git log A..B` 这种位置修订表达式（其后可跟 pathspec）。Libra 已支持该位置形式：前导参数按解析结果分流为 revision，直到第一个非 revision，其后为 pathspec。由于 Libra 看不到 `--` 分隔符（在命令前已被消费），分流按解析进行：range 语法 token（`A..B`/`A...B`/`^A`）能解析时为 revision，不能解析但命中现有 path（如 `../file`）时为 pathspec，否则报错（把拼错的 revision 报为未知 revision/path，而非按不存在的 path 静默过滤）。裸 token 仅在能解析为提交时才是 revision；既是 revision 又是现有 path 的裸名会报歧义。显式 `--range A..B` 标志作为无歧义备选保留，也是强制把与 path 同名的名字当作 revision 的方式。
 
 ### `--all` 实现
 
@@ -472,7 +477,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 | 所有 refs | `git log --all` | `jj log -r 'all()'` | `libra log --all` |
 | 仅分支 | `git log --branches` | `jj log -r 'branches()'` | N/A |
 | 仅远程 | `git log --remotes` | `jj log -r 'remote_branches()'` | N/A |
-| 修订范围 | `git log A..B` | `jj log -r 'A..B'` | `libra log --range A..B` |
+| 修订范围 | `git log A..B` | `jj log -r 'A..B'` | `libra log A..B`（位置式）或 `libra log --range A..B` |
 | Grep 消息 | `git log --grep=<pat>` | Revset `description()` | `libra log --grep <pat>` |
 | 大小写不敏感 grep | `git log -i --grep=<pat>` | N/A | `libra log -i --grep <pat>` |
 | 反向 grep | `git log --invert-grep --grep=<pat>` | N/A | `libra log --invert-grep --grep <pat>` |
@@ -502,7 +507,7 @@ Libra 将 `--graph` 实现为基于文本的 ASCII/Unicode 图渲染器，类似
 
 - `--branches` 和 `--remotes` 尚未实现
 - `--all` 遍历本地分支和轻量标签；远程跟踪引用和 stash 不包含在内
-- 修订范围语法通过 `--range A..B` 和 `--range A...B` 提供；Git 的位置 `git log A..B` 语法不支持
+- 修订范围语法支持位置式 `git log A..B`/`A...B`/`^A`（以及显式 `--range A..B`/`A...B`）
 - `--follow` 使用 best-effort 重命名检测，可能遗漏复杂重命名
 - `-L` 已被接受，但尚未提供 blame 级行精度
 - `--reverse` 已支持

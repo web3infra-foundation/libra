@@ -2879,3 +2879,212 @@ fn test_log_pretty_named_presets() {
         "medium shows body: {medium}"
     );
 }
+
+/// Helper: stage a file and commit it, returning the new HEAD commit hash.
+async fn commit_file(path: &str, content: &str, message: &str) -> String {
+    test::ensure_file(path, Some(content));
+    add::execute(AddArgs {
+        pathspec: vec![path.into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some(message.to_string()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+    Head::current_commit().await.unwrap().to_string()
+}
+
+/// `log` accepts a positional revision range (`A..B`, `A...B`), a positional
+/// single revision, `^EXCLUDE` plus an include, and a range followed by a
+/// pathspec — matching Git's `log [<revision>...] [<path>...]` (previously these
+/// only worked via the `--range` flag).
+#[tokio::test]
+#[serial]
+async fn test_log_positional_revision_range() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let base = commit_file("a.txt", "a\n", "base").await;
+    let _mid = commit_file("a.txt", "a\nb\n", "mid").await;
+    let _tip = commit_file("c.txt", "c\n", "tip").await;
+    let p = temp_path.path();
+
+    // Positional `A..HEAD` range: includes mid+tip, excludes base.
+    let (st, out, err) = run_log_cmd(&["--oneline", &format!("{base}..HEAD")], p);
+    assert!(st.success(), "positional range should succeed: {err}");
+    assert!(
+        out.contains("tip") && out.contains("mid"),
+        "range includes tip+mid: {out}"
+    );
+    assert!(!out.contains("base"), "range excludes base: {out}");
+
+    // Positional single revision: history from `base` back (just base here).
+    let (st, out, _) = run_log_cmd(&["--oneline", &base], p);
+    assert!(st.success(), "positional single rev should succeed");
+    assert!(out.contains("base"), "single rev shows base: {out}");
+    assert!(
+        !out.contains("tip"),
+        "single rev excludes later commits: {out}"
+    );
+
+    // Positional symmetric range `A...HEAD`.
+    let (st, out, _) = run_log_cmd(&["--oneline", &format!("{base}...HEAD")], p);
+    assert!(
+        st.success() && out.contains("tip"),
+        "symmetric range includes tip: {out}"
+    );
+
+    // `^EXCLUDE INCLUDE` positional form.
+    let (st, out, _) = run_log_cmd(&["--oneline", &format!("^{base}"), "HEAD"], p);
+    assert!(st.success(), "^exclude + include should succeed");
+    assert!(
+        out.contains("tip") && !out.contains("base"),
+        "^base HEAD excludes base: {out}"
+    );
+
+    // Range followed by a pathspec: only commits touching a.txt in the range.
+    let (st, out, _) = run_log_cmd(&["--oneline", &format!("{base}..HEAD"), "a.txt"], p);
+    assert!(st.success(), "range + pathspec should succeed");
+    assert!(out.contains("mid"), "a.txt changed in mid: {out}");
+    assert!(!out.contains("tip"), "tip did not touch a.txt: {out}");
+}
+
+/// A bare positional argument that is BOTH a valid revision and an existing path
+/// is rejected as ambiguous (matching Git's refusal to guess); `--range`
+/// disambiguates.
+#[tokio::test]
+#[serial]
+async fn test_log_positional_ambiguous_rev_and_path_errors() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit_file("a.txt", "a\n", "base").await;
+    // A worktree file literally named "HEAD": both a revision and a path.
+    test::ensure_file("HEAD", Some("not a ref\n"));
+
+    let p = temp_path.path();
+    let (st, _out, err) = run_log_cmd(&["HEAD"], p);
+    assert!(!st.success(), "ambiguous name should be rejected");
+    assert!(
+        err.contains("ambiguous") && err.contains("--range"),
+        "error should flag ambiguity and suggest --range: {err}"
+    );
+
+    // `--range HEAD` disambiguates to the revision and succeeds.
+    let (st, _out, err) = run_log_cmd(&["--oneline", "--range", "HEAD"], p);
+    assert!(
+        st.success(),
+        "--range HEAD should resolve the revision: {err}"
+    );
+}
+
+/// Positional `A...B` is a true symmetric difference and `A..B` / `^A` exclude
+/// the full ancestor closure of the excluded side, verified on a DIVERGENT
+/// history (a regression guard for both the symmetric-range and exclusion fixes).
+#[test]
+#[serial]
+fn test_log_positional_symmetric_and_exclusion_divergent() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let p = repo.path();
+    let run = |args: &[&str]| run_libra_command(args, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+
+    std::fs::write(p.join("f.txt"), "base\n").unwrap();
+    run(&["add", "f.txt"]);
+    run(&["commit", "-m", "base", "--no-verify"]);
+    run(&["branch", "side"]);
+    std::fs::write(p.join("f.txt"), "main1\n").unwrap();
+    run(&["add", "f.txt"]);
+    run(&["commit", "-m", "mainA", "--no-verify"]);
+    run(&["switch", "side"]);
+    std::fs::write(p.join("g.txt"), "side1\n").unwrap();
+    run(&["add", "g.txt"]);
+    run(&["commit", "-m", "sideA", "--no-verify"]);
+    run(&["switch", "main"]);
+
+    // A...B symmetric difference: both unique tips, never the shared base.
+    let out =
+        String::from_utf8_lossy(&run(&["log", "main...side", "--pretty=%s"]).stdout).to_string();
+    assert!(
+        out.contains("mainA") && out.contains("sideA"),
+        "symmetric includes both: {out}"
+    );
+    assert!(
+        !out.contains("base"),
+        "symmetric excludes shared base: {out}"
+    );
+
+    // A..B excludes everything reachable from A (including the shared base).
+    let out =
+        String::from_utf8_lossy(&run(&["log", "main..side", "--pretty=%s"]).stdout).to_string();
+    assert!(out.contains("sideA"), "main..side includes sideA: {out}");
+    assert!(
+        !out.contains("mainA") && !out.contains("base"),
+        "main..side excludes mainA+base: {out}"
+    );
+
+    // ^A B positional form behaves like A..B.
+    let out =
+        String::from_utf8_lossy(&run(&["log", "^main", "side", "--pretty=%s"]).stdout).to_string();
+    assert!(
+        out.contains("sideA") && !out.contains("base"),
+        "^main side excludes base: {out}"
+    );
+}
+
+/// A pathspec that merely contains `..` (a parent-directory path) is NOT
+/// misclassified as a revision range — it falls back to a pathspec filter.
+#[test]
+#[serial]
+fn test_log_positional_parent_dir_path_not_misclassified() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    let p = repo.path();
+    let run = |args: &[&str]| run_libra_command(args, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    std::fs::write(p.join("f.txt"), "1\n").unwrap();
+    run(&["add", "f.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+
+    // Run from a subdirectory with `../f.txt` as the pathspec: it contains `..`
+    // but is a path, not a range, so it must succeed and filter by that file.
+    let sub = p.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let out = run_libra_command(&["log", "../f.txt", "--pretty=%s"], &sub);
+    assert!(
+        out.status.success(),
+        "../f.txt pathspec should not error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("c1"),
+        "should list commits touching f.txt: {stdout}"
+    );
+
+    // A range-syntax token that is NEITHER a valid revision NOR an existing path
+    // is a typoed revision and must error (not silently filter by a missing path).
+    let out = run_libra_command(&["log", "definitely-not-a-ref..HEAD", "--pretty=%s"], p);
+    assert!(!out.status.success(), "typoed revision range should error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown revision or path"),
+        "typo error should mention unknown revision or path: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
