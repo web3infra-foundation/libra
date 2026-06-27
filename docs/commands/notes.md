@@ -6,8 +6,8 @@ without modifying the commits themselves.
 > Status: `partial`. `libra notes` is now registered in the public CLI. The core
 > operations (`add`, `append`, `copy`, `edit`, `list`, `show`, `remove`) and
 > `merge` (a 2-way merge of the flat note rows, with `--strategy`) are supported.
-> `prune` and `get-ref` are also supported; the interactive
-> editor are not implemented.
+> `prune` and `get-ref` are also supported. The interactive editor fallback
+> for `add`/`edit`/`append` (when no `-m`/`-F` is given) is supported.
 
 ## Synopsis
 
@@ -51,9 +51,9 @@ Omitting a subcommand defaults to `list`.
 
 | Subcommand | Description |
 |------------|-------------|
-| `add` | Add a note to an object. Fails if a note already exists; use `-f` to overwrite. Requires `-m` or `-F`. |
-| `append` | Append a message to an object's note (separated by a blank line), creating the note if absent. Requires `-m` or `-F`. |
-| `edit` | Set (replace) an object's note, creating it if absent — overwrites unconditionally, unlike `add`. Requires `-m` or `-F` (no interactive editor). |
+| `add` | Add a note to an object. Fails if a note already exists; use `-f` to overwrite. With no `-m`/`-F`, opens an editor — empty for a new note, or pre-filled with the existing note when `-f` is given (without `-f` on an existing note it aborts before opening the editor). |
+| `append` | Append a message to an object's note (separated by a blank line), creating the note if absent. With no `-m`/`-F`, opens an editor (empty buffer). |
+| `edit` | Set (replace) an object's note, creating it if absent — overwrites unconditionally, unlike `add`. With no `-m`/`-F`, opens an editor pre-filled with the existing note. |
 | `copy` | Copy the note from `<from-object>` to `<to-object>`. Fails if the source has no note, or if the target already has one (use `-f` to overwrite). |
 | `list` | List note objects and the commits they annotate (default subcommand). |
 | `show` | Show the note text for an object. |
@@ -201,12 +201,20 @@ When `<object>` is given and no note exists, `note_hash` is `null`.
 
 ## Design Rationale
 
-### Why no editor support?
+### Editor fallback
 
-Git opens an editor when `-m` / `-F` are not given. Libra omits editor
-invocations — editors assume an interactive user and are incompatible with
-headless or agent-driven workflows. `-m <message>` or `-F <file>` is required
-for note creation.
+Like Git, `add`/`edit`/`append` open an editor when neither `-m` nor `-F` is
+given. The editor is resolved from `GIT_EDITOR` → `core.editor` → `VISUAL` →
+`EDITOR` (falling back to `vi` only on a terminal); in a headless/non-terminal
+environment with no editor configured, the command fails with a clear "no editor
+configured" error. `edit` pre-fills the buffer with the existing note, as does
+`add -f` when a note already exists (plain `add` aborts before the editor opens
+if a note exists); `add` (new note) and `append` start empty. The saved buffer is cleaned with `git stripspace`
+whitespace rules but — unlike commit/tag messages — `#` lines are **preserved**,
+since a note may legitimately contain them. An empty result aborts.
+
+For headless or agent-driven workflows, prefer `-m <message>` or `-F <file>`
+(`-` for stdin), which never invoke the editor.
 
 ### `merge`, `prune`, and `get-ref`
 
@@ -242,19 +250,19 @@ scan), and concurrency safety via SQLite WAL mode.
 
 | Feature | Git | Libra | jj |
 |---------|-----|-------|----|
-| Add note | `git notes add [-m <msg>] [<obj>]` | `libra notes add -m <msg> [<obj>]` | N/A |
+| Add note | `git notes add [-m <msg>] [<obj>]` | `libra notes add [-m <msg>] [<obj>]` (editor fallback when no `-m`/`-F`) | N/A |
 | List notes | `git notes list [<obj>]` | `libra notes list [<obj>]` | N/A |
 | Show note | `git notes show [<obj>]` | `libra notes show [<obj>]` | N/A |
 | Remove note | `git notes remove [<obj>...]` | `libra notes remove [<obj>...]` | N/A |
 | Append | `notes append` | Supported | N/A |
 | Copy | `notes copy [-f] <from> <to>` | Supported | N/A |
-| Edit | `notes edit` (`-m`/`-F`) | Supported | N/A |
+| Edit | `notes edit` (`-m`/`-F` or editor) | Supported (editor pre-fills the existing note) | N/A |
 | Merge | `notes merge [-s <strategy>] <ref>` | `libra notes merge [-s <strategy>] <ref>` (2-way flat-row merge) | N/A |
 | Prune | `notes prune [-n] [-v]` | `libra notes prune [-n] [-v]` | N/A |
 | Get ref | `notes get-ref` | `libra notes get-ref` | N/A |
 | Custom ref | `--ref <ref>` | `--ref <ref>` | N/A |
 | File input | `-F <file>` | `-F <file>` | N/A |
-| Editor support | Interactive editor (default) | Not supported (`-m` / `-F` required) | N/A |
+| Editor support | Interactive editor (default) | Editor fallback when no `-m`/`-F` (`edit` pre-fills; `#` lines kept) | N/A |
 | Structured output | No | `--json` / `--machine` | N/A |
 | Ref storage | Loose files + packed-refs | SQLite (libra.db) | N/A |
 
@@ -266,7 +274,8 @@ Note: jj does not have a notes feature.
 |----------|-----------|------|
 | Object already has a note (add or copy target) | `LBR-CONFLICT-002` | "use '-f' to overwrite the existing note." |
 | Object has no note (show/remove) | `LBR-CLI-003` | "use 'libra notes list' to see which objects have notes." |
-| Neither `-m` nor `-F` provided (add) | `LBR-CLI-002` | "provide a message with '-m <msg>' or '-F <file>'." |
+| No editor configured and no `-m`/`-F` (non-terminal env) | `LBR-REPO-003` | "set GIT_EDITOR, core.editor, VISUAL, or EDITOR" / pass `-m`/`-F`. |
+| Edited note buffer is empty (no `-m`/`-F`) | `LBR-CLI-002` | "write some text in the editor, or pass -m/--message." |
 | Invalid object reference | `LBR-CLI-003` | "use 'libra log' to find valid commit references." |
 | Invalid notes ref name | `LBR-CLI-002` | "notes refs must start with 'refs/notes/'; e.g. 'refs/notes/commits'." |
 | `merge` conflict under the default `manual` strategy | `LBR-CONFLICT-002` | "re-run with --strategy=ours/theirs/union/cat_sort_uniq …" |

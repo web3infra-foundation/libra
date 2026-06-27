@@ -782,15 +782,17 @@ fn boundary_ref_exact_prefix() {
 // ── usage / argument errors ────────────────────────────────────────────
 
 #[test]
-fn error_add_without_message_or_file() {
+fn error_add_without_message_falls_back_to_editor_then_no_editor() {
     let repo = create_committed_repo_via_cli();
+    // No -m/-F: `notes add` now opens an editor. The test environment has no
+    // GIT_EDITOR/EDITOR and a non-terminal stdin, so it fails with a clear
+    // "no editor configured" error (exit 128) rather than the old usage error.
     let output = run_libra_command(&["notes", "add"], repo.path());
-    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    let (stderr, _report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(129));
-    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(output.status.code(), Some(128));
     assert!(
-        stderr.contains("provide a message"),
+        stderr.contains("no editor configured"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -802,12 +804,13 @@ fn error_add_json_without_message() {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("expected stderr JSON");
 
-    assert_eq!(output.status.code(), Some(129));
+    // No editor in the test env → the editor fallback reports a fatal error.
+    assert_eq!(output.status.code(), Some(128));
     assert!(
         output.stdout.is_empty(),
         "json error should keep stdout empty"
     );
-    assert_eq!(report["error_code"], "LBR-CLI-002");
+    assert_eq!(report["error_code"], "LBR-REPO-003");
 }
 
 #[test]
@@ -1738,5 +1741,174 @@ fn prune_aborts_on_unreadable_object_and_keeps_note() {
         String::from_utf8_lossy(&list.stdout).contains(&head[..7]),
         "the note survives the aborted prune: {}",
         String::from_utf8_lossy(&list.stdout)
+    );
+}
+
+// ── editor fallback (no -m/-F) ──────────────────────────────────────────
+
+/// Write an executable scripted editor that overwrites the buffer ($1) with
+/// `body`, returning its path.
+#[cfg(unix)]
+fn write_note_editor(dir: &std::path::Path, name: &str, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n")).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// `notes add` with no -m/-F opens an editor; the composed text becomes the
+/// note. A note may contain `#` lines (they are NOT stripped as comments).
+#[cfg(unix)]
+#[test]
+fn add_without_message_composes_via_editor() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let editor = write_note_editor(p, "compose.sh", "from editor\n# kept hash line\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["notes", "add"],
+        p,
+        "",
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&out, "notes add via editor");
+    let show = run_libra_command(&["notes", "show"], p);
+    let shown = String::from_utf8_lossy(&show.stdout);
+    assert!(shown.contains("from editor"), "composed note: {shown}");
+    assert!(
+        shown.contains("# kept hash line"),
+        "notes preserve # lines: {shown}"
+    );
+}
+
+/// `notes edit` with no -m/-F pre-fills the editor with the existing note.
+#[cfg(unix)]
+#[test]
+fn edit_without_message_prefills_existing_note_in_editor() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "original note"], p),
+        "seed note",
+    );
+
+    // A no-op editor (exit 0) leaves the pre-filled buffer untouched, so the
+    // existing note survives the edit — proving it was loaded into the editor.
+    let noop = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = p.join("noop.sh");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    let out = run_libra_command_with_stdin_and_env(
+        &["notes", "edit"],
+        p,
+        "",
+        &[("GIT_EDITOR", noop.as_str())],
+    );
+    assert_cli_success(&out, "notes edit via editor");
+    let show = run_libra_command(&["notes", "show"], p);
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains("original note"),
+        "edit pre-fills and keeps the existing note: {}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+}
+
+/// `notes append` with no -m/-F composes the appended text in an editor and
+/// concatenates it after the existing note (separated by a blank line).
+#[cfg(unix)]
+#[test]
+fn append_without_message_composes_via_editor() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "first line"], p),
+        "seed note",
+    );
+    let editor = write_note_editor(p, "append.sh", "appended line\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["notes", "append"],
+        p,
+        "",
+        &[("GIT_EDITOR", editor.as_str())],
+    );
+    assert_cli_success(&out, "notes append via editor");
+    let show = run_libra_command(&["notes", "show"], p);
+    let shown = String::from_utf8_lossy(&show.stdout);
+    assert!(shown.contains("first line"), "keeps original: {shown}");
+    assert!(shown.contains("appended line"), "appends new: {shown}");
+}
+
+/// Interactive `notes add` on an object that already has a note pre-fills the
+/// editor with that note (with -f) rather than opening an empty buffer.
+#[cfg(unix)]
+#[test]
+fn add_force_without_message_prefills_existing_note() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["notes", "add", "-m", "preexisting"], p),
+        "seed note",
+    );
+    // A no-op editor keeps the pre-filled buffer; with -f the note is upserted,
+    // so the pre-existing text survives — proving it was loaded.
+    let noop = write_note_editor(p, "noop_add.sh", "");
+    // (overwrite the script to be a true no-op rather than emptying the buffer)
+    std::fs::write(&noop, "#!/bin/sh\nexit 0\n").unwrap();
+    let out = run_libra_command_with_stdin_and_env(
+        &["notes", "add", "-f"],
+        p,
+        "",
+        &[("GIT_EDITOR", noop.as_str())],
+    );
+    assert_cli_success(&out, "notes add -f via editor");
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["notes", "show"], p).stdout)
+            .contains("preexisting"),
+        "add -f pre-fills and keeps the existing note"
+    );
+
+    // Without -f, interactive add on an existing note aborts early.
+    let out2 = run_libra_command_with_stdin_and_env(
+        &["notes", "add"],
+        p,
+        "",
+        &[("GIT_EDITOR", noop.as_str())],
+    );
+    assert!(
+        !out2.status.success(),
+        "interactive add without -f aborts on an existing note"
+    );
+    assert!(
+        String::from_utf8_lossy(&out2.stderr).contains("already exists"),
+        "abort message: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+}
+
+/// An editor that produces only blank/whitespace content aborts the note.
+#[cfg(unix)]
+#[test]
+fn add_with_empty_editor_buffer_aborts() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let blank = write_note_editor(p, "blank.sh", "   \n\n");
+    let out = run_libra_command_with_stdin_and_env(
+        &["notes", "add"],
+        p,
+        "",
+        &[("GIT_EDITOR", blank.as_str())],
+    );
+    assert!(!out.status.success(), "empty editor buffer aborts");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty note content"),
+        "abort message: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
