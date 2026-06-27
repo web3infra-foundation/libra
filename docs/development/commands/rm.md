@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。`--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; sparse-checkout flag unsupported; per-command `--quiet` not exposed (use global `--quiet`)
+- 兼容级别：`partial`。`--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` supported; `--sparse` accepted as a no-op (Libra has no sparse-checkout cone); per-command `--quiet` not exposed (use global `--quiet`)
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
@@ -45,15 +45,15 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rm.md`。
-- Synopsis：`libra rm [-r] [-f] [--cached] [--dry-run] [--ignore-unmatch] [--pathspec-from-file <file> [--pathspec-file-nul]] <pathspec>...`。
-- 公开参数/子命令包括：`<pathspec>...`、`--cached`、`-r, --recursive`、`-f, --force`、`--dry-run`、`--ignore-unmatch`、`--pathspec-from-file <PATHSPEC_FROM_FILE>`、`--pathspec-file-nul`。
+- Synopsis：`libra rm [-r] [-f] [--cached] [--dry-run] [--ignore-unmatch] [--sparse] [--pathspec-from-file <file> [--pathspec-file-nul]] <pathspec>...`。
+- 公开参数/子命令包括：`<pathspec>...`、`--cached`、`-r, --recursive`、`-f, --force`、`--dry-run`、`--ignore-unmatch`、`--sparse`（no-op，Libra 无 sparse-checkout cone）、`--pathspec-from-file <PATHSPEC_FROM_FILE>`、`--pathspec-file-nul`。
 
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` 支持; sparse-checkout 标志不支持; per-command `--quiet` 未公开暴露 (use global `--quiet`) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | `--force` / `--dry-run` / `--cached` / `--recursive` / `--ignore-unmatch` / `--pathspec-from-file` / `--pathspec-file-nul` 支持; `--sparse` 按 no-op 接受 (Libra 无 sparse-checkout cone); per-command `--quiet` 未公开暴露 (use global `--quiet`) | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 
 ## 维护要求
 

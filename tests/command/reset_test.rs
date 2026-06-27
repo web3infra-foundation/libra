@@ -1295,6 +1295,7 @@ async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     })
     .await;
     fs::write("tracked.txt", "tracked\nstill here\n").unwrap();

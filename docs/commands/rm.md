@@ -35,6 +35,7 @@ Aliases: `remove`, `delete`. All three names invoke the same command.
 | Ignore unmatch | | `--ignore-unmatch` | Exit with zero status even if no pathspec matched any file. |
 | Pathspec from file | | `--pathspec-from-file <FILE>` | Read pathspecs from a file, one per line. |
 | NUL separator | | `--pathspec-file-nul` | Pathspec file entries are separated by NUL bytes instead of newlines. |
+| Sparse | | `--sparse` | Accepted for Git compatibility as a no-op. Git uses it to allow removing index entries outside the sparse-checkout cone; Libra has no sparse-checkout state, so it changes nothing. |
 
 ### Option Details
 
@@ -180,6 +181,7 @@ warnings and errors.
 | Ignore unmatch | `--ignore-unmatch` | `--ignore-unmatch` | Not available |
 | Pathspec from file | `--pathspec-from-file` | `--pathspec-from-file` | Not available |
 | NUL separator | `--pathspec-file-nul` | `--pathspec-file-nul` | Not available |
+| Sparse | `--sparse` (accepted no-op) | `--sparse` | Not available |
 | Quiet | Global `--quiet` | `-q` / `--quiet` | Not available |
 | Aliases | `rm`, `remove`, `delete` | `rm` only | `file untrack` |
 

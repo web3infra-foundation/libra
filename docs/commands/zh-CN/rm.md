@@ -35,6 +35,7 @@ libra rm [--json|--machine] --dry-run <pathspec>...
 | Ignore unmatch | | `--ignore-unmatch` | 即使没有 pathspec 匹配任何文件，也以零状态退出。 |
 | Pathspec from file | | `--pathspec-from-file <FILE>` | 从文件读取 pathspec，每行一个。 |
 | NUL separator | | `--pathspec-file-nul` | Pathspec 文件条目使用 NUL 字节而不是换行分隔。 |
+| Sparse | | `--sparse` | 为 Git 兼容按 no-op 接受。Git 用它允许移除 sparse-checkout cone 之外的索引条目；Libra 没有 sparse-checkout 状态，故不改变任何行为。 |
 
 ### 选项细节
 
@@ -173,6 +174,7 @@ rm 'old_module/bar.rs'
 | Ignore unmatch | `--ignore-unmatch` | `--ignore-unmatch` | 不可用 |
 | 从文件读取 pathspec | `--pathspec-from-file` | `--pathspec-from-file` | 不可用 |
 | NUL 分隔符 | `--pathspec-file-nul` | `--pathspec-file-nul` | 不可用 |
+| Sparse | `--sparse`（按 no-op 接受） | `--sparse` | 不可用 |
 | Quiet | 全局 `--quiet` | `-q` / `--quiet` | 不可用 |
 | 别名 | `rm`, `remove`, `delete` | 仅 `rm` | `file untrack` |
 

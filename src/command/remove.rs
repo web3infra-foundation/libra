@@ -36,6 +36,7 @@ EXAMPLES:
     libra rm -f conflicted.txt              Force removal even if the file has unstaged changes
     libra rm --dry-run --cached '*.tmp'     Preview what would be untracked without applying
     libra rm --pathspec-from-file=todo.txt  Read NUL- or newline-separated pathspecs from a file
+    libra rm --sparse stale.txt             Accept Git's sparse-checkout flag as a no-op
     libra rm --json stale.txt               Structured JSON output for agents";
 
 #[derive(Parser, Debug, Clone)]
@@ -64,6 +65,12 @@ pub struct RemoveArgs {
     /// Pathspec file is NUL separated
     #[clap(long = "pathspec-file-nul")]
     pub pathspec_file_nul: bool,
+
+    /// Accept Git's `--sparse` flag. Git uses it to allow removing index
+    /// entries outside the sparse-checkout cone; Libra has no sparse-checkout
+    /// state (every path is always "in cone"), so this is a no-op.
+    #[clap(long)]
+    pub sparse: bool,
 }
 
 //  ==============================================

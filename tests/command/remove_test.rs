@@ -153,6 +153,7 @@ async fn test_remove_single_file() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args.clone()).await;
     assert!(
@@ -230,6 +231,7 @@ async fn test_remove_cached() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
 
@@ -291,6 +293,7 @@ async fn test_remove_directory_recursive() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args.clone()).await;
     // Verify the directory and files still exists if force is false
@@ -380,6 +383,7 @@ async fn test_remove_directory_without_recursive() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
     // Removing a directory without recursive should fail - the function should handle this internally
@@ -417,6 +421,7 @@ async fn test_remove_untracked_file() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args.clone()).await;
     // Removing an untracked file should return an error - the function should handle this internally
@@ -471,6 +476,7 @@ async fn test_remove_modified_file() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
 
@@ -545,6 +551,7 @@ async fn test_remove_multiple_files() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args.clone()).await;
     // Verify the specified files were removed
@@ -602,6 +609,7 @@ async fn test_remove_dry_run() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
 
@@ -663,6 +671,7 @@ async fn test_remove_dry_run_cached() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
 
@@ -718,6 +727,7 @@ async fn test_remove_dry_run_recursive() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args).await;
 
@@ -784,6 +794,7 @@ async fn test_remove_ignore_unmatch() {
         ignore_unmatch: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        sparse: false,
     };
     remove::execute(args.clone()).await;
 
@@ -836,6 +847,7 @@ async fn test_remove_pathspec_from_file_newline() {
         ignore_unmatch: false,
         pathspec_from_file: Some(String::from("paths.txt")),
         pathspec_file_nul: false,
+        sparse: false,
     };
 
     remove::execute(args).await;
@@ -884,6 +896,7 @@ async fn test_remove_pathspec_from_file_nul() {
         ignore_unmatch: false,
         pathspec_from_file: Some(String::from("paths.bin")),
         pathspec_file_nul: true,
+        sparse: false,
     };
 
     remove::execute(args).await;
@@ -928,6 +941,7 @@ async fn test_remove_pathspec_from_file_ignore_unmatch() {
         ignore_unmatch: false,
         pathspec_from_file: Some(String::from("paths.txt")),
         pathspec_file_nul: false,
+        sparse: false,
     };
 
     // Without --ignore-unmatch: should not remove
@@ -973,4 +987,33 @@ fn test_rm_help_lists_examples_banner() {
             "rm --help should include `{invocation}`, stdout: {stdout}"
         );
     }
+}
+
+/// `rm --sparse` is accepted on the CLI as a no-op (Libra has no
+/// sparse-checkout cone). Driven through the real binary so the clap flag is
+/// proven to parse; combined with `--cached`, the file is untracked from the
+/// index but kept on disk exactly as a plain `rm --cached` would.
+#[test]
+fn test_remove_sparse_flag_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    let tracked = repo.path().join("tracked.txt");
+    assert!(tracked.exists(), "tracked.txt exists before removal");
+
+    let output = run_libra_command(&["rm", "--cached", "--sparse", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "rm --cached --sparse should be accepted");
+
+    // Working-tree file is kept (--cached), proving --sparse changed nothing.
+    assert!(
+        tracked.exists(),
+        "rm --cached --sparse keeps the working-tree file"
+    );
+
+    // The index no longer tracks the file (the --cached removal still applied).
+    let ls = run_libra_command(&["ls-files"], repo.path());
+    assert_cli_success(&ls, "ls-files should succeed");
+    let tracked_list = String::from_utf8_lossy(&ls.stdout);
+    assert!(
+        !tracked_list.contains("tracked.txt"),
+        "rm --cached --sparse untracks the file from the index: {tracked_list}"
+    );
 }
