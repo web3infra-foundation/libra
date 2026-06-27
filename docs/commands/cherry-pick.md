@@ -10,7 +10,7 @@ Apply the changes introduced by some existing commits.
 libra cherry-pick [-n|--no-commit] [-x] [-s|--signoff] [-e|--edit]
                   [-m <n>|--mainline <n>] [--ff] [-S|--gpg-sign]
                   [--allow-empty] [--allow-empty-message] [--keep-redundant-commits]
-                  [--json] [--quiet] <commit>...
+                  [--cleanup=<mode>] [--json] [--quiet] <commit>...
 libra cherry-pick (--continue | --skip | --abort | --quit)
 ```
 
@@ -86,6 +86,10 @@ Allow the new commit to be created with an empty message. By default an empty me
 ### `--keep-redundant-commits`
 
 Keep a commit that becomes redundant after being replayed (its resulting tree is identical to the current HEAD). By default such redundant commits are rejected (`LBR-CLI-002`).
+
+### `--cleanup=<mode>`
+
+Clean up the replayed commit message. `<mode>` is `strip`/`whitespace`/`verbatim`/`scissors`/`default`. The picked body — and any `-e` edited buffer — is cleaned first, then the generated `-x`/`Signed-off-by` trailers are appended (so their separator is preserved). `default` and `scissors` fall back to `whitespace` when no editor opens (matching Git's "if the message is to be edited" clause). An unrecognized mode is a usage error (`LBR-CLI-002`, exit 129), validated before any commit (and before `--continue`/`--skip`/`--abort`/`--quit`). When omitted, the message is trim-only, as before.
 
 ## Conflict Sequencer
 
@@ -230,7 +234,7 @@ A divergent path is surfaced as a single whole-file conflict — ours between `<
 
 ### Unsupported Git options are rejected, not silently ignored
 
-`--strategy`, `-X/--strategy-option`, `--empty`, `--cleanup`, and `--rerere-autoupdate` are explicitly rejected with `LBR-UNSUPPORTED-001` (exit 128) rather than silently ignored, so a script never assumes an unimplemented behavior took effect. Libra uses a single built-in three-way merge; custom merge strategies are out of scope.
+`--cleanup=<mode>` (`strip`/`whitespace`/`verbatim`/`scissors`/`default`) cleans up the replayed commit message: the picked body (and any `-e` edited buffer) is cleaned first, then the generated `-x`/`Signed-off-by` trailers are appended (so their blank-line separator is preserved). `default`/`scissors` fall back to `whitespace` when no editor opens, matching Git's "if the message is to be edited" clause; an unrecognized mode is a usage error (`LBR-CLI-002`, exit 129). `--strategy`, `-X/--strategy-option`, `--empty`, and `--rerere-autoupdate` are explicitly rejected with `LBR-UNSUPPORTED-001` (exit 128) rather than silently ignored, so a script never assumes an unimplemented behavior took effect. Libra uses a single built-in three-way merge; custom merge strategies are out of scope.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -251,6 +255,7 @@ A divergent path is surfaced as a single whole-file conflict — ours between `<
 | Allow empty | `--allow-empty` | N/A | `--allow-empty` |
 | Allow empty message | `--allow-empty-message` | N/A | `--allow-empty-message` |
 | Keep redundant | `--keep-redundant-commits` | N/A | `--keep-redundant-commits` |
+| Cleanup mode | `--cleanup=<mode>` | N/A | `--cleanup=<mode>` (`strip`/`whitespace`/`verbatim`/`scissors`/`default`; cleans the body/edited buffer, then appends trailers) |
 | Strategy | `--strategy <s>` | N/A | Rejected (`LBR-UNSUPPORTED-001`) |
 | Strategy option | `-X <option>` | N/A | Rejected (`LBR-UNSUPPORTED-001`) |
 | Empty mode | `--empty=<how>` | N/A | Rejected (use `--allow-empty` / `--keep-redundant-commits`) |
@@ -266,8 +271,8 @@ A divergent path is surfaced as a single whole-file conflict — ours between `<
 | `LBR-REPO-001` | Not inside a libra repository | Initialize with `libra init` or navigate to a repo |
 | `LBR-REPO-003` | HEAD detached, no cherry-pick in progress for `--continue`/`--skip`/`--abort`/`--quit`, or `--continue` on the wrong branch | Switch to a branch / start a pick first / switch back to the sequence branch |
 | `LBR-CLI-003` | Cannot resolve a commit reference | Use `libra log` to find valid commit references |
-| `LBR-CLI-002` | Merge commit without `-m`, invalid/out-of-range `-m`, empty commit without `--allow-empty`, redundant commit without `--keep-redundant-commits`, or empty message without `--allow-empty-message` | Use the flag named in the hint |
-| `LBR-UNSUPPORTED-001` | An unsupported Git option (`--strategy`, `-X`, `--empty`, `--cleanup`, `--rerere-autoupdate`) was passed | Drop the option; it is not supported by libra cherry-pick |
+| `LBR-CLI-002` | Merge commit without `-m`, invalid/out-of-range `-m`, an invalid `--cleanup` mode, empty commit without `--allow-empty`, redundant commit without `--keep-redundant-commits`, or empty message without `--allow-empty-message` | Use the flag named in the hint |
+| `LBR-UNSUPPORTED-001` | An unsupported Git option (`--strategy`, `-X`, `--empty`, `--rerere-autoupdate`) was passed | Drop the option; it is not supported by libra cherry-pick |
 | `LBR-CONFLICT-001` | Conflict during cherry-pick (three-way conflict, or untracked file would be overwritten) | Resolve and `libra add`, then `libra cherry-pick --continue` (or `--skip`/`--abort`/`--quit`) |
 | `LBR-CONFLICT-002` | `merge`/`rebase` started while a cherry-pick is in progress, or a new pick started over an in-progress sequence | Finish or cancel the cherry-pick first |
 | `LBR-IO-001` | Failed to load an object or cherry-pick state | Check repository integrity and retry |

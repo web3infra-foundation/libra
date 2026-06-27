@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::{
     command::{diff, editor, load_object, save_object_to_storage, status},
-    common_utils::{check_conventional_commits_message, format_commit_msg},
+    common_utils::{check_conventional_commits_message, format_commit_msg, parse_commit_msg},
     internal::{
         ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
@@ -656,8 +656,14 @@ pub async fn run_commit(
         // resolved template wins (matching Git, where `-t` overrides the amend
         // parent message). Other message sources (`-m`/`-F`/`-C`) keep their
         // existing behavior.
+        //
+        // The parent's stored body embeds any `gpgsig` signature header (Libra
+        // keeps the signature inside `Commit.message`; see `format_commit_msg`),
+        // so we must extract the true log message with `parse_commit_msg` before
+        // reusing it — otherwise a signed parent leaks its PGP/SSH signature
+        // block into the amended message instead of the real subject/body.
         let final_message = if args.no_edit && args.template.is_none() {
-            parent_commit.message.clone()
+            parse_commit_msg(&parent_commit.message).0.to_string()
         } else {
             message.clone()
         };
@@ -888,7 +894,9 @@ async fn resolve_final_message(
         None => match &template_content {
             Some(template) => template.clone(),
             None if args.amend && !parent_ids.is_empty() => load_object::<Commit>(&parent_ids[0])
-                .map(|commit| commit.message.trim_start_matches('\n').to_string())
+                // Strip any embedded `gpgsig` header so a signed parent's
+                // signature block does not seed the editor buffer.
+                .map(|commit| parse_commit_msg(&commit.message).0.to_string())
                 .unwrap_or_default(),
             None => String::new(),
         },
@@ -1171,7 +1179,10 @@ async fn load_commit_message(spec: &str) -> Result<String, CommitError> {
         commit_id: spec.to_string(),
         detail: e.to_string(),
     })?;
-    Ok(commit.message.trim_start_matches('\n').to_string())
+    // Strip any embedded `gpgsig` header so that reusing a signed commit's
+    // message (via `-C`/`-c`/`--reuse-message`/`--fixup`/`--squash`) yields the
+    // real log message rather than the leading PGP/SSH signature block.
+    Ok(parse_commit_msg(&commit.message).0.to_string())
 }
 
 /// Extract the subject (first line) of a commit message.
@@ -1182,7 +1193,7 @@ fn commit_subject(message: &str) -> &str {
 /// Parse a `commit.cleanup` config value into a [`CleanupMode`], case-insensitively
 /// (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Returns `None` for an
 /// unrecognized value so the caller falls back to the built-in default.
-fn parse_cleanup_mode(value: &str) -> Option<CleanupMode> {
+pub(crate) fn parse_cleanup_mode(value: &str) -> Option<CleanupMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "strip" => Some(CleanupMode::Strip),
         "whitespace" => Some(CleanupMode::Whitespace),
@@ -1241,7 +1252,7 @@ fn truncate_at_scissors(message: &str) -> String {
 }
 
 /// Apply Git-style cleanup to a commit message.
-fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String {
+pub(crate) fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String {
     match mode {
         CleanupMode::Verbatim => message.to_string(),
         CleanupMode::Scissors => {

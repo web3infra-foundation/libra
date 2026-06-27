@@ -936,6 +936,202 @@ fn repo_with_feature_commit(file: &str, content: &str, msg: &str) -> (tempfile::
     (repo, oid)
 }
 
+/// Like [`repo_with_feature_commit`], but the feature commit's message is stored
+/// verbatim (`commit --cleanup=verbatim`), so a later `cherry-pick --cleanup`
+/// has comment/whitespace content to act on (a plain `-m` commit is already
+/// Strip-cleaned).
+fn repo_with_verbatim_feature_commit(
+    file: &str,
+    content: &str,
+    msg: &str,
+) -> (tempfile::TempDir, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    std::fs::write(p.join(file), content).unwrap();
+    assert_cli_success(&run_libra_command(&["add", file], p), "add feature file");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "--cleanup=verbatim", "-m", msg, "--no-verify"],
+            p,
+        ),
+        "verbatim feature commit",
+    );
+    let oid = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    (repo, oid)
+}
+
+/// `cherry-pick --cleanup=strip` removes `#` comment lines and trailing
+/// whitespace from the replayed message; `--cleanup=verbatim` preserves them.
+#[test]
+fn cherry_pick_cleanup_strip_then_verbatim() {
+    let msg = "pick subject\n\nkept body line\n# comment to strip\n";
+
+    let (repo, oid) = repo_with_verbatim_feature_commit("f.txt", "feat\n", msg);
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--cleanup=strip", &oid], repo.path()),
+        "cherry-pick --cleanup=strip",
+    );
+    let stripped = cp_head_message(repo.path());
+    assert!(
+        stripped.contains("pick subject"),
+        "subject kept: {stripped}"
+    );
+    assert!(stripped.contains("kept body line"), "body kept: {stripped}");
+    assert!(
+        !stripped.contains("# comment to strip"),
+        "strip must drop the `#` comment line: {stripped}"
+    );
+
+    // verbatim keeps the comment line intact.
+    let (repo2, oid2) = repo_with_verbatim_feature_commit("f.txt", "feat\n", msg);
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--cleanup=verbatim", &oid2], repo2.path()),
+        "cherry-pick --cleanup=verbatim",
+    );
+    assert!(
+        cp_head_message(repo2.path()).contains("# comment to strip"),
+        "verbatim must preserve the `#` comment line"
+    );
+
+    // `--cleanup=strip -s`: the body is cleaned but the blank-line separator
+    // before the appended Signed-off-by trailer must survive (the trailer is
+    // appended AFTER cleanup, so it is never collapsed into the body).
+    let (repo3, oid3) = repo_with_verbatim_feature_commit("f.txt", "feat\n", msg);
+    assert_cli_success(
+        &run_libra_command(
+            &["cherry-pick", "--cleanup=strip", "-s", &oid3],
+            repo3.path(),
+        ),
+        "cherry-pick --cleanup=strip -s",
+    );
+    let signed = cp_head_message(repo3.path());
+    assert!(
+        signed.contains("\n\nSigned-off-by:"),
+        "trailer separator preserved under strip: {signed:?}"
+    );
+    assert!(
+        !signed.contains("# comment to strip"),
+        "strip still drops the comment: {signed:?}"
+    );
+
+    // `--cleanup=default` with no editor falls back to `whitespace` (keeps `#`
+    // lines), matching Git's "if the message is to be edited" clause and commit.
+    let (repo4, oid4) = repo_with_verbatim_feature_commit("f.txt", "feat\n", msg);
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--cleanup=default", &oid4], repo4.path()),
+        "cherry-pick --cleanup=default",
+    );
+    assert!(
+        cp_head_message(repo4.path()).contains("# comment to strip"),
+        "default without an editor keeps `#` lines (whitespace fallback)"
+    );
+}
+
+/// The `--cleanup` mode round-trips through the SQLite sequencer: a pick that
+/// conflicts, is resolved, and resumed with `--continue` still cleans the
+/// resumed commit's message.
+#[test]
+fn cherry_pick_cleanup_survives_conflict_resume() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    // feature: a commit touching shared.txt with a verbatim (messy) message.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "switch -c feature",
+    );
+    std::fs::write(p.join("shared.txt"), "feature\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add shared");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-m",
+                "conflicting subject\n\nkept body\n# strip me\n",
+                "--no-verify",
+            ],
+            p,
+        ),
+        "verbatim feature commit",
+    );
+    let oid = cp_rev_parse(p, "HEAD");
+
+    // main diverges on shared.txt so the pick conflicts.
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "main\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+
+    // cherry-pick --cleanup=strip → conflict.
+    assert_eq!(
+        run_libra_command(&["cherry-pick", "--cleanup=strip", &oid], p)
+            .status
+            .code(),
+        Some(128),
+        "pick conflicts"
+    );
+
+    // Resolve + continue → the resumed commit applies the stored cleanup mode.
+    std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add resolved",
+    );
+    assert_cli_success(
+        &run_libra_command(&["cherry-pick", "--continue"], p),
+        "cherry-pick --continue",
+    );
+    let msg = cp_head_message(p);
+    assert!(msg.contains("conflicting subject"), "subject kept: {msg}");
+    assert!(
+        !msg.contains("# strip me"),
+        "cleanup mode survived the resume and stripped the comment: {msg}"
+    );
+}
+
+/// `cherry-pick --cleanup=<bogus>` is a usage error (exit 129, LBR-CLI-002),
+/// rejected up front before any commit is created.
+#[test]
+fn cherry_pick_invalid_cleanup_mode_rejected() {
+    let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
+    let out = run_libra_command(&["cherry-pick", "--cleanup=bogus", &oid], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "invalid cleanup mode should exit 129: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_h, report) = parse_cli_error_stderr(&out.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+
+    // The mode is validated BEFORE the sequencer-control dispatch, so an invalid
+    // mode fails fast even alongside `--continue` (rather than slipping through
+    // to a resumed commit / a "no cherry-pick in progress" error).
+    let cont = run_libra_command(
+        &["cherry-pick", "--continue", "--cleanup=bogus"],
+        repo.path(),
+    );
+    assert_eq!(
+        cont.status.code(),
+        Some(129),
+        "invalid --cleanup with --continue should still exit 129: {}",
+        String::from_utf8_lossy(&cont.stderr)
+    );
+    assert_eq!(
+        parse_cli_error_stderr(&cont.stderr).1.error_code,
+        "LBR-CLI-002"
+    );
+}
+
 /// Default cherry-pick (no `-x`) must NOT append the cherry-picked-from line
 /// (behavior reversal — previously always appended).
 #[test]
@@ -1158,7 +1354,6 @@ fn cherry_pick_unsupported_flags_rejected() {
     let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
     let cases: Vec<Vec<&str>> = vec![
         vec!["cherry-pick", "--empty", "drop", &oid],
-        vec!["cherry-pick", "--cleanup", "strip", &oid],
         vec!["cherry-pick", "--rerere-autoupdate", &oid],
         vec!["cherry-pick", "--commit", &oid],
     ];

@@ -25,7 +25,10 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, merge, save_object},
+    command::{
+        commit::{CleanupMode, cleanup_commit_message, parse_cleanup_mode},
+        load_object, merge, save_object,
+    },
     common_utils::format_commit_msg,
     internal::{
         branch::Branch,
@@ -52,6 +55,7 @@ EXAMPLES:
     libra cherry-pick -x abc1234           Append a '(cherry picked from ...)' line
     libra cherry-pick -s abc1234           Add a Signed-off-by trailer
     libra cherry-pick -m 1 <merge>         Cherry-pick a merge commit along parent 1
+    libra cherry-pick --cleanup=strip abc1234  Clean up the replayed commit message
     libra cherry-pick --continue           Resume after resolving conflicts
     libra cherry-pick --abort              Cancel and restore the original HEAD
     libra cherry-pick --json abc1234       Structured JSON output for agents";
@@ -74,6 +78,9 @@ enum CherryPickError {
 
     #[error("{0}")]
     InvalidMainline(String),
+
+    #[error("invalid --cleanup mode '{0}'")]
+    InvalidCleanup(String),
 
     #[error("unsupported cherry-pick option: {0}")]
     Unsupported(String),
@@ -116,6 +123,7 @@ impl CherryPickError {
             Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
             Self::InvalidMainline(_) => StableErrorCode::CliInvalidArguments,
+            Self::InvalidCleanup(_) => StableErrorCode::CliInvalidArguments,
             Self::Unsupported(_) => StableErrorCode::Unsupported,
             Self::EmptyCommit(_) => StableErrorCode::CliInvalidArguments,
             Self::RedundantCommit(_) => StableErrorCode::CliInvalidArguments,
@@ -148,6 +156,9 @@ impl From<CherryPickError> for CliError {
             CherryPickError::InvalidMainline(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("use -m <parent-number> only on a merge commit, within its parent count"),
+            CherryPickError::InvalidCleanup(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("valid modes: strip, whitespace, verbatim, scissors, default"),
             CherryPickError::Unsupported(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("this Git option is not supported by libra cherry-pick"),
@@ -226,6 +237,10 @@ struct CherryPickOpts {
     /// `-m <n>` invocation, so it must survive a conflict + resume.
     #[serde(default)]
     mainline: Option<usize>,
+    /// Message cleanup mode; must survive a conflict + resume so resumed commits
+    /// clean their message the same way. Stored as the raw mode string.
+    #[serde(default)]
+    cleanup: Option<String>,
 }
 
 impl CherryPickOpts {
@@ -239,6 +254,7 @@ impl CherryPickOpts {
             keep_redundant_commits: args.keep_redundant_commits,
             gpg_sign: args.gpg_sign,
             mainline: args.mainline,
+            cleanup: args.cleanup.clone(),
         }
     }
 
@@ -257,6 +273,7 @@ impl CherryPickOpts {
             keep_redundant_commits: self.keep_redundant_commits,
             gpg_sign: self.gpg_sign,
             mainline: self.mainline,
+            cleanup: self.cleanup,
             ..Default::default()
         }
     }
@@ -394,11 +411,16 @@ pub struct CherryPickArgs {
     #[clap(long = "no-gpg-sign", overrides_with = "gpg_sign", hide = true)]
     pub no_gpg_sign: bool,
 
+    /// How to clean up the commit message
+    /// (`strip`/`whitespace`/`verbatim`/`scissors`/`default`). Cleans the picked
+    /// body (and any `-e` edited buffer) first; the generated `-x`/`Signed-off-by`
+    /// trailers are appended afterward so their separator is preserved.
+    #[clap(long = "cleanup", value_name = "mode")]
+    pub cleanup: Option<String>,
+
     // ── Unsupported Git options captured for explicit rejection ──
     #[clap(long = "empty", value_name = "mode", hide = true)]
     pub empty: Option<String>,
-    #[clap(long = "cleanup", value_name = "mode", hide = true)]
-    pub cleanup: Option<String>,
     #[clap(long = "strategy", value_name = "name", hide = true)]
     pub strategy: Option<String>,
     #[clap(
@@ -447,9 +469,6 @@ pub async fn execute_safe(args: CherryPickArgs, output: &OutputConfig) -> CliRes
 fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
     if args.empty.is_some() {
         return Some("--empty (use --allow-empty / --keep-redundant-commits)");
-    }
-    if args.cleanup.is_some() {
-        return Some("--cleanup");
     }
     if args.rerere_autoupdate {
         return Some("--rerere-autoupdate");
@@ -579,6 +598,15 @@ async fn run_cherry_pick(
     output: &OutputConfig,
 ) -> Result<CherryPickOutput, CherryPickError> {
     util::require_repo().map_err(|_| CherryPickError::NotInRepo)?;
+
+    // Validate `--cleanup=<mode>` before ANY dispatch (including the sequencer
+    // controls below), so an invalid mode fails fast (exit 129) and never slips
+    // through `--continue`/`--skip`.
+    if let Some(raw) = &args.cleanup
+        && parse_cleanup_mode(raw).is_none()
+    {
+        return Err(CherryPickError::InvalidCleanup(raw.clone()));
+    }
 
     // Sequencer controls operate on the in-progress state and are dispatched
     // FIRST — they must never be rejected by the in-progress guard below.
@@ -1100,9 +1128,66 @@ async fn build_cherry_pick_message(
     args: &CherryPickArgs,
     output: &OutputConfig,
 ) -> Result<String, CherryPickSingleError> {
-    let mut message = original_commit.message.trim().to_string();
+    // Resolve the editor up front: `-e` only opens one on an interactive TTY,
+    // never in machine/JSON mode, and only if one is configured. Whether it
+    // actually opens governs the `default`/`scissors` cleanup fallback.
+    let editor = if args.edit && !output.is_json() && std::io::stdin().is_terminal() {
+        resolve_editor().await
+    } else {
+        None
+    };
 
-    // Trailer block: `-x` line first, `Signed-off-by` last (matches Git).
+    // Resolve `--cleanup=<mode>` to its effective mode (validated up front, so an
+    // unparseable value cannot reach here). `default`/`scissors` fall back to
+    // `whitespace` when no editor opens — matching Git's "if the message is to be
+    // edited" clause and `libra commit`.
+    let effective_cleanup = args
+        .cleanup
+        .as_deref()
+        .and_then(parse_cleanup_mode)
+        .map(|mode| {
+            if editor.is_some() {
+                mode
+            } else {
+                match mode {
+                    CleanupMode::Default | CleanupMode::Scissors => CleanupMode::Whitespace,
+                    other => other,
+                }
+            }
+        });
+
+    let body = original_commit.message.trim();
+
+    if let Some(mode) = effective_cleanup {
+        // `--cleanup` path: clean the BODY (and, after `-e`, the edited buffer),
+        // THEN append the generated trailers — so cleanup applies to everything
+        // the user can change while never collapsing the trailer separator.
+        let mut message = cleanup_commit_message(body, mode);
+        if let Some(editor) = editor {
+            let edited = edit_cherry_pick_message(&message, &editor).await?;
+            message = cleanup_commit_message(&edited, mode);
+        }
+        append_cherry_pick_trailers(&mut message, original_commit, args).await;
+        Ok(message)
+    } else {
+        // Default path (unchanged): trim → trailers → optional `-e` edit.
+        let mut message = body.to_string();
+        append_cherry_pick_trailers(&mut message, original_commit, args).await;
+        if let Some(editor) = editor {
+            message = edit_cherry_pick_message(&message, &editor).await?;
+        }
+        Ok(message)
+    }
+}
+
+/// Append the cherry-pick trailer block to `message`: the `-x`
+/// `(cherry picked from commit …)` line first, then the `-s` `Signed-off-by`
+/// line, each only when requested and not already present (matches Git's order).
+async fn append_cherry_pick_trailers(
+    message: &mut String,
+    original_commit: &Commit,
+    args: &CherryPickArgs,
+) {
     let mut trailers: Vec<String> = Vec::new();
     if args.append_source {
         let line = format!("(cherry picked from commit {})", original_commit.id);
@@ -1121,14 +1206,6 @@ async fn build_cherry_pick_message(
         message.push_str("\n\n");
         message.push_str(&trailers.join("\n"));
     }
-
-    // `-e`: only launch an editor on an interactive TTY and never in machine/JSON
-    // mode (`--machine`/`--json`); otherwise degrade to the assembled message.
-    if args.edit && !output.is_json() && std::io::stdin().is_terminal() {
-        message = maybe_edit_cherry_pick_message(&message).await?;
-    }
-
-    Ok(message)
 }
 
 /// Launch the resolved editor on a scratch message file via the shared editor
@@ -1136,12 +1213,12 @@ async fn build_cherry_pick_message(
 /// (`abort_on_failure = false`). Cherry-pick keeps its own editor precedence
 /// (`core.editor` → `$VISUAL` → `$EDITOR`, no `$GIT_EDITOR`) via `resolve_editor`
 /// above and passes the resolved command to the shared launcher.
-async fn maybe_edit_cherry_pick_message(message: &str) -> Result<String, CherryPickSingleError> {
-    let Some(editor) = resolve_editor().await else {
-        return Ok(message.to_string());
-    };
+async fn edit_cherry_pick_message(
+    message: &str,
+    editor: &str,
+) -> Result<String, CherryPickSingleError> {
     let path = util::storage_path().join("CHERRY_PICK_MSG");
-    crate::command::editor::edit_message(&path, message, &editor, false)
+    crate::command::editor::edit_message(&path, message, editor, false)
         .await
         .map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))
 }
@@ -1873,6 +1950,7 @@ mod tests {
             keep_redundant_commits: true,
             gpg_sign: true,
             mainline: Some(2),
+            cleanup: Some("strip".to_string()),
             ..Default::default()
         };
         let json = serde_json::to_string(&CherryPickOpts::from_args(&args)).unwrap();
@@ -1887,5 +1965,6 @@ mod tests {
         assert!(rebuilt.keep_redundant_commits);
         assert!(rebuilt.gpg_sign);
         assert_eq!(rebuilt.mainline, Some(2));
+        assert_eq!(rebuilt.cleanup.as_deref(), Some("strip"));
     }
 }

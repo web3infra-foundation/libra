@@ -2,7 +2,7 @@
 
 ## 命令实现目标
 
-`libra cherry-pick` 的目标是把一个或多个已有提交引入当前分支。当前实现支持按顺序重放多个提交、`-n, --no-commit`（暂存而不自动提交，已支持多提交）、`-x`（记录来源提交行）、`-s/--signoff`（追加 Signed-off-by）、`-e/--edit`（交互式编辑提交消息，非 TTY/机器模式下自动降级）、`-m/--mainline <n>`（沿指定父提交 cherry-pick 合并提交）、`--ff`（直接快进而不重写提交）、`-S/--gpg-sign`（通过 libra vault 签名）以及空提交策略 `--allow-empty`/`--allow-empty-message`/`--keep-redundant-commits`。冲突走 SQLite `cherry_pick_state` sequencer：路径级三方冲突写入索引 stage 1/2/3 与工作树冲突标记，并支持 `--continue`/`--skip`/`--abort`/`--quit`，同时与 merge/rebase 互斥。`--strategy`、`-X/--strategy-option`、`--empty`、`--cleanup`、`--rerere-autoupdate` 被显式拒绝（见“还未实现的功能”）。
+`libra cherry-pick` 的目标是把一个或多个已有提交引入当前分支。当前实现支持按顺序重放多个提交、`-n, --no-commit`（暂存而不自动提交，已支持多提交）、`-x`（记录来源提交行）、`-s/--signoff`（追加 Signed-off-by）、`-e/--edit`（交互式编辑提交消息，非 TTY/机器模式下自动降级）、`-m/--mainline <n>`（沿指定父提交 cherry-pick 合并提交）、`--ff`（直接快进而不重写提交）、`-S/--gpg-sign`（通过 libra vault 签名）、空提交策略 `--allow-empty`/`--allow-empty-message`/`--keep-redundant-commits`，以及 `--cleanup=<mode>`（`strip`/`whitespace`/`verbatim`/`scissors`/`default`：先清理被 pick 的消息正文与 `-e` 编辑后的缓冲，再追加 `-x`/`Signed-off-by` trailer，从而保留 trailer 分隔空行；无 editor 时 `default`/`scissors` 回退为 `whitespace`；非法 mode 报 `LBR-CLI-002`/退出 129，且在 sequencer 控制分发之前校验）。冲突走 SQLite `cherry_pick_state` sequencer：路径级三方冲突写入索引 stage 1/2/3 与工作树冲突标记，并支持 `--continue`/`--skip`/`--abort`/`--quit`，同时与 merge/rebase 互斥。`--strategy`、`-X/--strategy-option`、`--empty`、`--rerere-autoupdate` 被显式拒绝（见“还未实现的功能”）。
 
 ## 对比 Git 与兼容性
 
@@ -48,8 +48,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/cherry-pick.md`。
-- Synopsis：`libra cherry-pick [-n|--no-commit] [-x] [-s|--signoff] [-e|--edit] [-m <n>|--mainline <n>] [--ff] [-S|--gpg-sign] [--allow-empty] [--allow-empty-message] [--keep-redundant-commits] [--json] [--quiet] <commit>...` 或 `libra cherry-pick (--continue|--skip|--abort|--quit)`。
-- 公开参数/子命令包括：`<commit>...`（位置参数，sequencer 控制下非必填）、`-n, --no-commit`、`-x`、`-s/--signoff`、`-e/--edit`、`-m/--mainline <n>`、`--ff`、`-S/--gpg-sign`、`--allow-empty`、`--allow-empty-message`、`--keep-redundant-commits`、sequencer 控制 `--continue`/`--skip`/`--abort`/`--quit`、`--json`、`--quiet`。
+- Synopsis：`libra cherry-pick [-n|--no-commit] [-x] [-s|--signoff] [-e|--edit] [-m <n>|--mainline <n>] [--ff] [-S|--gpg-sign] [--allow-empty] [--allow-empty-message] [--keep-redundant-commits] [--cleanup=<mode>] [--json] [--quiet] <commit>...` 或 `libra cherry-pick (--continue|--skip|--abort|--quit)`。
+- 公开参数/子命令包括：`<commit>...`（位置参数，sequencer 控制下非必填）、`-n, --no-commit`、`-x`、`-s/--signoff`、`-e/--edit`、`-m/--mainline <n>`、`--ff`、`-S/--gpg-sign`、`--allow-empty`、`--allow-empty-message`、`--keep-redundant-commits`、`--cleanup=<mode>`（strip/whitespace/verbatim/scissors/default）、sequencer 控制 `--continue`/`--skip`/`--abort`/`--quit`、`--json`、`--quiet`。
 
 
 ## 还未实现的功能
@@ -59,7 +59,7 @@ flowchart TD
 | 兼容差异项 | 自定义合并策略 | 原始对照：--strategy <s>；相关参数/替代：单一内置三方合并；当前说明：显式拒绝（LBR-UNSUPPORTED-001 / 128）。后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 策略选项 | 原始对照：-X / --strategy-option；相关参数/替代：不适用；当前说明：显式拒绝（LBR-UNSUPPORTED-001 / 128）。后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 空提交模式 | 原始对照：--empty=<how>；相关参数/替代：使用 --allow-empty / --keep-redundant-commits；当前说明：`--empty` 显式拒绝（LBR-UNSUPPORTED-001 / 128）。后续实现时需要补对应回归测试并同步兼容矩阵。 |
-| 兼容差异项 | 消息清理 | 原始对照：--cleanup=<mode>；相关参数/替代：不适用；当前说明：显式拒绝（LBR-UNSUPPORTED-001 / 128）。后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 消息清理 `--cleanup=<mode>` | 已公开：`strip`/`whitespace`/`verbatim`/`scissors`/`default`，复用 commit 的 `parse_cleanup_mode` + `cleanup_commit_message`（已改为 `pub(crate)`）。`build_cherry_pick_message` 先清理被 pick 的正文（`-e` 时再清理编辑后的缓冲），再追加 `-x`/`Signed-off-by` trailer，从而不会塌陷 trailer 分隔空行；仅在显式给出时生效（默认仍为 trim，行为不变）。无 editor 时 `default`/`scissors` 回退为 `whitespace`（同 commit / git 的“若消息将被编辑”语义）。mode 在 sequencer 控制分发之前即校验，非法值报 `InvalidCleanup` → `LBR-CLI-002`/退出 129（`--continue --cleanup=bogus` 亦快速失败）。通过 `CherryPickOpts.cleanup`（原始字符串）round-trip 到 `--continue`/`--skip`。带集成测试 `cherry_pick_cleanup_strip_then_verbatim`、`cherry_pick_cleanup_survives_conflict_resume`、`cherry_pick_invalid_cleanup_mode_rejected` 与单元 round-trip 守卫。 |
 | 兼容差异项 | rerere 自动更新 | 原始对照：--rerere-autoupdate；相关参数/替代：不适用；当前说明：显式拒绝（LBR-UNSUPPORTED-001 / 128）。后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 行级冲突 hunk | 原始对照：Git 行级三方合并；相关参数/替代：路径级整文件冲突标记；当前说明：cherry-pick 冲突以整文件 `<<<<<<<`/`=======`/`>>>>>>>` 呈现，不做行级 hunk 合并。后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
