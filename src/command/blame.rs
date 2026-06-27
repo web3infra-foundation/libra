@@ -45,6 +45,7 @@ EXAMPLES:
     libra blame -L '/fn main/,/^}/' src/main.rs  Blame from a regex match to a regex match
     libra blame -l src/main.rs             Show full commit hashes
     libra blame -s src/main.rs             Suppress the author and date columns
+    libra blame -w src/main.rs             Ignore whitespace-only changes when attributing lines
     libra --json blame src/main.rs         Structured JSON output for agents";
 
 #[derive(Parser, Debug)]
@@ -100,6 +101,26 @@ pub struct BlameArgs {
     /// does not follow renames/copies, so every line shows the blamed file.
     #[clap(short = 'f', long = "show-name")]
     pub show_name: bool,
+
+    /// Ignore whitespace when comparing the parent's and child's versions of a
+    /// line, so whitespace-only changes are attributed to the older commit.
+    /// Matches Git's `-w` (ignore-all-whitespace) semantics.
+    #[clap(short = 'w', long = "ignore-whitespace")]
+    pub ignore_whitespace: bool,
+}
+
+/// Strip every whitespace character from a line for `-w` comparison, mirroring
+/// Git's ignore-all-whitespace rule (`XDF_IGNORE_WHITESPACE`). The original
+/// line content is preserved for display; only the comparison key is normalized.
+///
+/// Git's whitespace test is C `isspace()` on bytes — ASCII space/tab/newline/
+/// vertical-tab/form-feed/carriage-return only. We deliberately do NOT use
+/// `char::is_whitespace`, which also matches Unicode whitespace (e.g. NBSP), so
+/// a non-ASCII-whitespace edit is still treated as a real change as in Git.
+fn normalize_for_whitespace(line: &str) -> String {
+    line.chars()
+        .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
+        .collect()
 }
 
 /// Single attributed line of a blame report. Serialised verbatim to JSON.
@@ -358,10 +379,20 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
         .collect();
 
     use std::collections::VecDeque;
-    let mut queue: VecDeque<(ObjectHash, Commit, Vec<String>)> = VecDeque::new();
-    queue.push_back((commit_id, commit_obj, target_lines));
+    // One BFS frame: a commit, its version of the file, and the line-number
+    // mapping from that version to the final target file.
+    type WalkFrame = (ObjectHash, Commit, Vec<String>, Vec<Option<usize>>);
+    // Each queue entry carries `cur_to_final`: for every line of that commit's
+    // version of the file, the index of the line it became in the final target
+    // file (or `None` if it does not survive to the target). Diff line numbers
+    // are positions in the *current* commit, so they must be remapped through
+    // this table to reach the right `blame_lines` slot — a direct `new_line - 1`
+    // index is wrong once an intervening commit inserts or deletes lines above.
+    let init_map: Vec<Option<usize>> = (0..target_lines.len()).map(Some).collect();
+    let mut queue: VecDeque<WalkFrame> = VecDeque::new();
+    queue.push_back((commit_id, commit_obj, target_lines, init_map));
 
-    while let Some((current_id, current_commit, current_lines)) = queue.pop_front() {
+    while let Some((current_id, current_commit, current_lines, cur_to_final)) = queue.pop_front() {
         if !blame_lines.iter().any(|b| b.commit_id == current_id) {
             continue;
         }
@@ -378,18 +409,55 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                 _ => continue,
             };
 
-            let operations = compute_diff(&parent_lines, &current_lines);
+            // Carry the final-line mapping back to the parent: a line that is
+            // `Equal` between parent and current keeps the same final position.
+            let mut parent_to_final: Vec<Option<usize>> = vec![None; parent_lines.len()];
+
+            // With `-w`, diff on whitespace-normalized copies so a line that
+            // differs only in whitespace is treated as unchanged and attributed
+            // to the parent. The default path diffs the borrowed line vectors
+            // directly (no copy); the original lines are always kept for display.
+            let operations = if args.ignore_whitespace {
+                let diff_parent: Vec<String> = parent_lines
+                    .iter()
+                    .map(|l| normalize_for_whitespace(l))
+                    .collect();
+                let diff_current: Vec<String> = current_lines
+                    .iter()
+                    .map(|l| normalize_for_whitespace(l))
+                    .collect();
+                compute_diff(&diff_parent, &diff_current)
+            } else {
+                compute_diff(&parent_lines, &current_lines)
+            };
             for op in operations {
                 use git_internal::diff::DiffOperation;
                 match op {
                     DiffOperation::Insert { .. } | DiffOperation::Delete { .. } => {}
                     DiffOperation::Equal { old_line, new_line } => {
-                        let final_idx = new_line - 1;
+                        // Remap the current-commit line number to the final target
+                        // line via this commit's mapping (identity for the target).
+                        let Some(Some(final_idx)) = cur_to_final.get(new_line - 1).copied() else {
+                            continue;
+                        };
+                        if let Some(slot) = parent_to_final.get_mut(old_line - 1) {
+                            *slot = Some(final_idx);
+                        }
                         if let Some(blame) = blame_lines.get_mut(final_idx)
                             && blame.commit_id == current_id
                         {
-                            let parent_content = parent_lines.get(old_line - 1);
-                            if Some(&blame.content) == parent_content {
+                            // Compare the parent line against the blamed line using
+                            // the same normalization the diff used, so `-w` matches
+                            // whitespace-only differences. The default path compares
+                            // borrowed strings directly (no allocation per line).
+                            let parent_line = parent_lines.get(old_line - 1);
+                            let is_match = if args.ignore_whitespace {
+                                let blame_key = normalize_for_whitespace(&blame.content);
+                                parent_line.map(|l| normalize_for_whitespace(l)) == Some(blame_key)
+                            } else {
+                                parent_line == Some(&blame.content)
+                            };
+                            if is_match {
                                 blame.commit_id = *parent_id;
                                 blame.author = parent_commit.author.name.clone();
                                 blame.author_email = parent_commit.author.email.clone();
@@ -399,7 +467,7 @@ async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
                     }
                 }
             }
-            queue.push_back((*parent_id, parent_commit, parent_lines));
+            queue.push_back((*parent_id, parent_commit, parent_lines, parent_to_final));
         }
     }
 
@@ -681,6 +749,21 @@ fn resolve_end_endpoint(token: &str, lines: &[LineBlame], start: usize) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `-w` normalization strips only ASCII whitespace (Git's `isspace` set),
+    /// leaving Unicode whitespace such as NBSP intact so it still counts as a
+    /// real change — matching Git's byte-based ignore-all-whitespace.
+    #[test]
+    fn normalize_for_whitespace_strips_ascii_only() {
+        assert_eq!(normalize_for_whitespace("  let  x =\t1 \r"), "letx=1");
+        assert_eq!(
+            normalize_for_whitespace("a\x0bb\x0cc"),
+            "abc",
+            "vertical-tab and form-feed are ASCII whitespace"
+        );
+        // U+00A0 NBSP is Unicode-only whitespace; Git does not ignore it.
+        assert_eq!(normalize_for_whitespace("a\u{a0}b"), "a\u{a0}b");
+    }
 
     /// Pin the `Display` format for the static-message and direct-
     /// message variants of [`BlameError`]. These strings are used as

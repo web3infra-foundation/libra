@@ -30,6 +30,7 @@ For large files, the `-L` option restricts output to a specific line range, redu
 | Raw time | `-t` | | Show the raw author timestamp (epoch seconds) instead of a formatted date. |
 | Abbrev | | `--abbrev <N>` | Use N hex digits for the abbreviated commit hash (ignored with `-l`). |
 | Root | | `--root` | Do not treat root commits as boundaries. Accepted no-op: Libra's blame never prefixes boundary/root commits with `^`, so root commits already appear as normal commits. |
+| Ignore whitespace | `-w` | `--ignore-whitespace` | Ignore whitespace when comparing the parent's and child's versions of a line, so a whitespace-only change is attributed to the older commit. Matches Git's `-w` (ignore-all-whitespace) semantics. |
 | Porcelain | `-p` | `--porcelain` | Machine-readable porcelain output (commit metadata once per commit). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Validate inputs but suppress all blame output. |
@@ -79,6 +80,9 @@ libra blame -L 10,20 src/main.rs
 
 # Blame 5 lines from line 10
 libra blame -L 10,+5 src/main.rs
+
+# Ignore whitespace-only changes when attributing lines
+libra blame -w src/main.rs
 
 # JSON output for agents
 libra --json blame src/main.rs
@@ -165,6 +169,7 @@ The commit argument is positional (second argument after the file path) rather t
 | Show timestamp | `-t` (raw epoch; formatted by default) | `-t` (raw timestamp) | N/A |
 | Abbrev length | `--abbrev <N>` | `--abbrev=<N>` | N/A |
 | Don't treat root as boundary | `--root` (no-op; root already shown as normal) | `--root` | N/A |
+| Ignore whitespace | `-w` / `--ignore-whitespace` (ignore-all-whitespace) | `-w` | N/A |
 | Porcelain format | `-p` / `--porcelain` / `--line-porcelain` (no original line numbers, `boundary`, or `previous` metadata) | `-p` / `--porcelain` / `--line-porcelain` | N/A |
 | Incremental output | Not supported | `--incremental` | N/A |
 | Score threshold | Not supported | `-M` / `-C` (move/copy detection) | N/A |

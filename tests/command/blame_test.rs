@@ -79,6 +79,149 @@ fn test_blame_json_output_includes_lines() {
     assert!(json["data"]["lines"].as_array().is_some());
 }
 
+/// Scenario: a line is introduced in commit A and only re-indented (whitespace
+/// change) in commit B. Default blame attributes it to B; `blame -w` ignores the
+/// whitespace difference and attributes it to A.
+#[test]
+fn test_blame_ignore_whitespace_attributes_to_older_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    // Commit A: introduce the line with no surrounding whitespace.
+    std::fs::write(repo.path().join("ws.txt"), "value\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "ws.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "add ws", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let head_a = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let commit_a = String::from_utf8_lossy(&head_a.stdout).trim().to_string();
+
+    // Commit B: change only the whitespace (re-indent the same content).
+    std::fs::write(repo.path().join("ws.txt"), "    value\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "ws.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "reindent ws", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let head_b = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    let commit_b = String::from_utf8_lossy(&head_b.stdout).trim().to_string();
+    assert_ne!(commit_a, commit_b, "the two commits must differ");
+
+    // Default blame: the whitespace-only change is attributed to commit B.
+    let default = run_libra_command(&["--json", "blame", "ws.txt"], repo.path());
+    assert!(
+        default.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    let default_json = parse_json_stdout(&default);
+    assert_eq!(
+        default_json["data"]["lines"][0]["hash"], commit_b,
+        "default blame attributes the re-indent to commit B"
+    );
+
+    // `-w`: the whitespace difference is ignored, so the line traces to commit A.
+    let ignored = run_libra_command(&["--json", "blame", "-w", "ws.txt"], repo.path());
+    assert!(
+        ignored.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let ignored_json = parse_json_stdout(&ignored);
+    assert_eq!(
+        ignored_json["data"]["lines"][0]["hash"], commit_a,
+        "blame -w attributes the whitespace-only change to commit A"
+    );
+}
+
+/// Scenario: a whitespace-only change is followed by an intervening commit that
+/// inserts a line *above* it, shifting its line number. `blame -w` must still
+/// trace the shifted line to the commit that introduced its content, which
+/// requires remapping diff line numbers through the back-walk (not a direct
+/// `new_line - 1` index into the final file).
+#[test]
+fn test_blame_ignore_whitespace_after_line_shift() {
+    let repo = create_committed_repo_via_cli();
+
+    // Commit A: introduce the line (no surrounding whitespace).
+    std::fs::write(repo.path().join("shift.txt"), "value\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "shift.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "A add value", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+    let commit_a =
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], repo.path()).stdout)
+            .trim()
+            .to_string();
+
+    // Commit B: re-indent the line (whitespace-only change).
+    std::fs::write(repo.path().join("shift.txt"), "    value\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "shift.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "B reindent", "--no-verify"], repo.path())
+            .status
+            .success()
+    );
+
+    // Commit C: insert a header line ABOVE, shifting "value" to line 2.
+    std::fs::write(repo.path().join("shift.txt"), "header\n    value\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "shift.txt"], repo.path())
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(
+            &["commit", "-m", "C add header", "--no-verify"],
+            repo.path()
+        )
+        .status
+        .success()
+    );
+    let commit_c =
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], repo.path()).stdout)
+            .trim()
+            .to_string();
+
+    // `-w`: line 2 ("value", shifted) traces past the whitespace-only B to A;
+    // line 1 (the inserted header) is attributed to C.
+    let ignored = run_libra_command(&["--json", "blame", "-w", "shift.txt"], repo.path());
+    assert!(
+        ignored.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    let json = parse_json_stdout(&ignored);
+    assert_eq!(
+        json["data"]["lines"][0]["hash"], commit_c,
+        "the inserted header line is attributed to commit C"
+    );
+    assert_eq!(
+        json["data"]["lines"][1]["hash"], commit_a,
+        "the shifted whitespace-only line still traces to commit A under -w"
+    );
+}
+
 /// Scenario: `blame --porcelain` emits the machine-readable format — a
 /// `<sha> <orig> <final> [<group>]` header followed (once per commit) by the
 /// author/committer/summary/filename metadata block and tab-prefixed content.
@@ -655,6 +798,7 @@ async fn blame_runs_with_sha1() {
         abbrev: None,
         root: false,
         show_name: false,
+        ignore_whitespace: false,
     })
     .await;
 }
@@ -683,6 +827,7 @@ async fn blame_runs_with_sha256() {
         abbrev: None,
         root: false,
         show_name: false,
+        ignore_whitespace: false,
     })
     .await;
 }
@@ -793,6 +938,7 @@ async fn blame_root_flag_is_accepted_noop() {
         abbrev: None,
         root: true,
         show_name: false,
+        ignore_whitespace: false,
     })
     .await;
 }

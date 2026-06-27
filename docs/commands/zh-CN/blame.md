@@ -30,6 +30,7 @@ libra blame <file> [<commit>] [-L <range>]
 | 原始时间戳 | `-t` | | 在日期列显示原始 author 时间戳（epoch 秒）取代格式化日期。 |
 | 缩写位数 | | `--abbrev <N>` | 缩写 hash 使用 N 位 hex（与 `-l` 同时给出时忽略）。 |
 | Root | | `--root` | 不把 root 提交当作边界。接受式 no-op：Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 root 提交已按普通提交显示。 |
+| 忽略空白 | `-w` | `--ignore-whitespace` | 比较父子两版行时忽略全部空白，使仅空白变更的行归属到更早的提交。与 Git `-w`（ignore-all-whitespace）语义一致。 |
 | Porcelain | `-p` | `--porcelain` | 机器可读 porcelain 输出（每个提交一次元数据）。 |
 | JSON | | `--json` | 输出结构化 JSON。 |
 | Quiet | | `--quiet` | 验证输入但抑制所有 blame 输出。 |
@@ -163,6 +164,7 @@ Git 的 blame 默认使用 HEAD，并要求 `git blame --contents <file>` 才能
 | 显示时间戳 | `-t`（原始 epoch；默认格式化） | `-t`（原始时间戳） | N/A |
 | 缩写位数 | `--abbrev <N>` | `--abbrev=<N>` | N/A |
 | 不把 root 当边界 | `--root`（no-op；root 已按普通提交显示） | `--root` | N/A |
+| 忽略空白 | `-w` / `--ignore-whitespace`（ignore-all-whitespace） | `-w` | N/A |
 | Porcelain 格式 | `-p` / `--porcelain` / `--line-porcelain` | `-p` / `--porcelain` / `--line-porcelain` | N/A |
 | 增量输出 | 不支持 | `--incremental` | N/A |
 | 评分阈值 | 不支持 | `-M` / `-C`（移动/复制检测） | N/A |

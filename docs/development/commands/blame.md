@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra blame` 的目标是按行展示文件内容的最近修改提交、作者和时间信息。实现需要支持常用显示字段（`-l`/`-s`/`-t`/`--abbrev`/`-e`）、porcelain 输出和行号范围等兼容面，同时把空白忽略（`-w`）、移动/复制检测、反向 blame、incremental 等高阶能力列为后续工作（当前 HEAD 未实现）。
+`libra blame` 的目标是按行展示文件内容的最近修改提交、作者和时间信息。实现需要支持常用显示字段（`-l`/`-s`/`-t`/`--abbrev`/`-e`）、porcelain 输出和行号范围等兼容面，空白忽略（`-w`，ignore-all-whitespace）也已支持，同时把移动/复制检测、反向 blame、incremental 等高阶能力列为后续工作（当前 HEAD 未实现）。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础文件 blame、`-L` 行范围（数字、`START,END`、`START,+COUNT`，以及 `/regex/` start/end 端点；单端点跨到文件末尾，与 git 一致）、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`-f`（`--show-name`，在 hash 后显示文件名）/`--abbrev <n>`、`--root`（接受式 no-op：Libra 从不给边界/root 提交加 `^` 前缀）已支持；`-L :<funcname>`、reverse、`-w` 空白忽略、incremental 和 copy/move detection 尚未公开。
+- 兼容级别：`partial`。基础文件 blame、`-L` 行范围（数字、`START,END`、`START,+COUNT`，以及 `/regex/` start/end 端点；单端点跨到文件末尾，与 git 一致）、`--porcelain`/`-p`/`--line-porcelain`、`-e`/`--show-email`、显示标志 `-l`（完整 hash）/`-s`（隐藏作者与日期）/`-t`（原始时间戳）/`-f`（`--show-name`，在 hash 后显示文件名）/`--abbrev <n>`、`--root`（接受式 no-op：Libra 从不给边界/root 提交加 `^` 前缀）、`-w`/`--ignore-whitespace`（ignore-all-whitespace 行归属）已支持；`-L :<funcname>`、reverse、incremental 和 copy/move detection 尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -37,8 +37,8 @@ flowchart TD
 
 - 本节依据本地 main 分支提交历史重写，筛选与该命令实现、测试或文档路径直接相关的提交；以下是归纳后的实现脉络。
 - 2025-11-29 `4a66aa45`（`feat(blame, diff): add blame support, bump the git-internal version (#70)`）：基础实现节点：add blame support, bump the git-internal version (#70)；当前实现的主要轮廓可追溯到该提交。
-- 2026-06-03 `1d055f9e`（`feat(blame): add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)`）：功能演进：add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)；该提交引入的 `-w` / ignore-whitespace 参数在当前 HEAD 的 `BlameArgs` 中已不存在（已回退），与缺口表保持一致。
-- 2026-06-03 `e377e0a6`（`feat(blame): implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)`）：功能演进：implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)；该提交引入的 porcelain / `-p` 输出在当前 HEAD 的 `BlameArgs` 与 `execute_safe` 中已不存在（已回退），与缺口表保持一致。
+- 2026-06-03 `1d055f9e`（`feat(blame): add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)`）：功能演进：add ignore-whitespace (-w) attribution and BFS early-exit (v0.17.1290)；该提交引入的 `-w` / ignore-whitespace 曾被回退，现已在当前 HEAD 重新实现（`BlameArgs.ignore_whitespace` + `normalize_for_whitespace`），与缺口表“✅ 已实现”一致。
+- 2026-06-03 `e377e0a6`（`feat(blame): implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)`）：功能演进：implement porcelain/-p output and clamp overlong -L end with checked arithmetic (v0.17.1289)；porcelain / `-p` 输出当前 HEAD 已实现（`BlameArgs.porcelain`/`line_porcelain` + `execute_safe` 渲染），与缺口表“✅ 已实现（部分）porcelain 格式”一致。
 - 2026-06-04 `a0e349a9`（`fix: align blame and bisect compatibility`）：实现修正：align blame and bisect compatibility；该节点把边界行为、错误处理或兼容差异纳入当前实现约束。
 - 历史结论：当前文档应以这些提交之后的代码、测试和兼容矩阵为准；更早的迁移式文档只保留为背景，不再作为事实来源。
 
@@ -46,8 +46,8 @@ flowchart TD
 
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/blame.md`。
-- Synopsis：`libra blame <file> [<commit>] [-L <range>] [-f] [--root]`。
-- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`（数字 `N`/`START,END`/`START,+COUNT` 与 `/regex/` start/end 端点；单端点跨到文件末尾）、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`、`-f`/`--show-name`（在 hash 列后插入文件名；`name_col` 仅作用于人类格式的 `-s` 与默认两条输出路径，不影响 porcelain——porcelain 已有 `filename` 行；Libra 不跟踪 rename/copy，故每行都是被 blame 的文件）、`--root`（接受式 no-op：字段 `root` 解析后不被读取；Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 `--root` 请求的“root 按普通提交显示”已是默认行为）。
+- Synopsis：`libra blame <file> [<commit>] [-L <range>] [-f] [--root] [-w]`。
+- 公开参数/子命令包括：`<FILE>`、`[<COMMIT>]`、`-L <RANGE>`（数字 `N`/`START,END`/`START,+COUNT` 与 `/regex/` start/end 端点；单端点跨到文件末尾）、`--porcelain`/`-p`、`--line-porcelain`、`-e`/`--show-email`、`-l`、`-s`、`-t`、`--abbrev <N>`、`-f`/`--show-name`（在 hash 列后插入文件名；`name_col` 仅作用于人类格式的 `-s` 与默认两条输出路径，不影响 porcelain——porcelain 已有 `filename` 行；Libra 不跟踪 rename/copy，故每行都是被 blame 的文件）、`--root`（接受式 no-op：字段 `root` 解析后不被读取；Libra 的 blame 从不给边界/root 提交加 `^` 前缀，故 `--root` 请求的“root 按普通提交显示”已是默认行为）、`-w`/`--ignore-whitespace`（比较父子版本时去除全部空白，仅空白变更的行归属到更早提交；`normalize_for_whitespace` 仅作用于比较键，显示仍用原始行）。
 - `-l`/`-s`/`-t`/`--abbrev <N>`（默认人类格式的显示标志，复用现有 `BlameLine` 字段）：`-l` 在每行行首打印完整提交 hash（取代缩写）；`--abbrev=<n>` 用 n 位 hex 缩写（`-l` 优先于 `--abbrev`）；`-s` 整列隐藏作者与日期，仅保留 `<hash> <line>) <content>`；`-t` 在日期列打印原始 author 时间戳（epoch 秒）取代本地化日期。`BlameLine` 现额外序列化 `timestamp`（JSON 加项）。这些标志只影响默认人类格式，不影响 porcelain。
 - `-e`/`--show-email`：默认人类输出中以 `<email>` 形式显示作者邮箱代替作者名；与作者名共用固定 15 列宽（过长按 12 + `...` 截断，属与 Git 动态列宽的既有有意差异）。仅影响默认格式，不影响 `--porcelain`（其本身已含 `author-mail`）。`BlameLine` 现额外序列化 `author_email`（JSON 加项）。
 - `--porcelain`/`--line-porcelain`：机器可读输出，每行先打印 `<sha> <orig> <final> [<group>]` 头部，再（`--porcelain` 每个提交一次、`--line-porcelain` 每行）打印 author/author-mail/author-time/author-tz/committer*/summary/filename 元数据块，最后是 `\t<content>`。元数据通过重新加载归属提交读取。**有意差异/限制**：blame 遍历不跟踪每提交的原始行号，`<orig>` 以 `<final>` 近似。
@@ -63,7 +63,7 @@ flowchart TD
 | ✅ 已实现 | 显示邮箱 `-e`/`--show-email` | 默认输出以 `<email>` 显示作者邮箱代替作者名（仅人类格式；porcelain 不受影响）。带集成测试（`test_blame_show_email_displays_author_email`）。 |
 | ✅ 已实现 | 显示标志 `-l`/`-s`/`-t`/`-f`/`--abbrev`/`-p` | `-l` 完整 hash；`--abbrev=<n>` n 位缩写（`-l` 优先）；`-s` 隐藏作者/日期列；`-t` 原始 epoch 时间戳；`-f`/`--show-name` 在 hash 后插入文件名（人类格式两条路径；Libra 不跟踪 rename，每行同名）；`-p` 为 `--porcelain` 短别名。复用现有 `BlameLine` 字段（新增 `timestamp` JSON 项）；仅人类格式。带集成测试（`test_blame_display_flags_long_suppress_timestamp_abbrev`、`test_blame_show_name_flag_prints_filename`）。 |
 | ✅ 已实现（部分） | porcelain 格式 | `--porcelain`/`--line-porcelain` 已支持（重新加载提交取元数据；带集成测试）。限制：`<orig>` 原始行号以 `<final>` 近似（blame 遍历未跟踪每提交原始行号），未输出 `boundary`/`previous` 行。 |
-| 兼容差异项 | 忽略空白 | 原始对照：不支持；相关参数/替代：-w / --ignore-whitespace；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | 忽略空白 `-w`/`--ignore-whitespace` | 比较父子两版行时忽略全部空白（git `-w` 即 ignore-all-whitespace 语义）：仅空白变更的行归属到更早的提交。`normalize_for_whitespace` 去除所有空白字符，仅用于 `compute_diff` 输入与 `Equal` 块的内容比较键，原始行内容保留用于显示。带集成测试 `test_blame_ignore_whitespace_attributes_to_older_commit`。 |
 | 兼容差异项 | 增量输出 | 原始对照：不支持；相关参数/替代：--incremental；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 | 兼容差异项 | 相似度阈值 | 原始对照：不支持；相关参数/替代：-M / -C (move/copy detection)；当前说明：不适用。 后续实现时需要补对应回归测试并同步兼容矩阵。 |
 
