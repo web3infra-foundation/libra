@@ -2069,3 +2069,108 @@ fn test_for_each_ref_if_then_else_conditional() {
         );
     }
 }
+
+/// `%(tree)`, `%(tree:short)`, `%(parent)`, `%(parent:short)`, and
+/// `%(numparent)` expand from the ref's commit. Covers a merge commit
+/// (multi-parent, space-joined), a root commit (zero parents → empty),
+/// full-vs-short prefix matching, and an annotated tag (a non-commit ref →
+/// all commit-graph atoms empty).
+#[test]
+#[serial]
+fn test_for_each_ref_commit_graph_atoms() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    let stdout_trim = |a: &[&str]| String::from_utf8_lossy(&run(a).stdout).trim().to_string();
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+
+    // c1 (root) on main; branch `side` at c1; c2 on main; sideC on side.
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+    let c1 = stdout_trim(&["rev-parse", "HEAD"]);
+    run(&["branch", "side"]);
+    fs::write(p.join("a.txt"), "2\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c2", "--no-verify"]);
+    let c2 = stdout_trim(&["rev-parse", "HEAD"]);
+    run(&["switch", "side"]);
+    fs::write(p.join("b.txt"), "s\n").unwrap();
+    run(&["add", "b.txt"]);
+    run(&["commit", "-m", "sideC", "--no-verify"]);
+    let side_c = stdout_trim(&["rev-parse", "HEAD"]);
+    run(&["switch", "main"]);
+    assert!(
+        run(&["merge", "side"]).status.success(),
+        "merge side into main"
+    );
+    // A branch at the root commit so we can inspect a zero-parent ref.
+    run(&["branch", "root", &c1]);
+
+    // Merge commit on main: two parents (first-parent = main's c2, then sideC),
+    // space-joined as full hashes, with `:short` the 7-char prefixes.
+    assert_eq!(
+        stdout_trim(&["for-each-ref", "--format=%(numparent)", "refs/heads/main"]),
+        "2",
+        "merge has two parents"
+    );
+    assert_eq!(
+        stdout_trim(&["for-each-ref", "--format=%(parent)", "refs/heads/main"]),
+        format!("{c2} {side_c}"),
+        "full parents are space-joined in first-parent order"
+    );
+    assert_eq!(
+        stdout_trim(&[
+            "for-each-ref",
+            "--format=%(parent:short)",
+            "refs/heads/main"
+        ]),
+        format!("{} {}", &c2[..7], &side_c[..7]),
+        "short parents are the 7-char prefixes, space-joined"
+    );
+
+    // Root commit: zero parents → %(numparent)=0 and %(parent) empty.
+    assert_eq!(
+        stdout_trim(&["for-each-ref", "--format=%(numparent)", "refs/heads/root"]),
+        "0",
+        "root commit has no parents"
+    );
+    assert_eq!(
+        stdout_trim(&["for-each-ref", "--format=[%(parent)]", "refs/heads/root"]),
+        "[]",
+        "root commit's %(parent) is empty"
+    );
+
+    // %(tree) full hash with %(tree:short) its 7-char prefix.
+    let trees = stdout_trim(&[
+        "for-each-ref",
+        "--format=%(tree) %(tree:short)",
+        "refs/heads/root",
+    ]);
+    let parts: Vec<&str> = trees.split(' ').collect();
+    assert_eq!(parts.len(), 2, "two fields: {trees}");
+    assert_eq!(parts[0].len(), 40, "tree is a full 40-char hash: {trees}");
+    assert_eq!(
+        parts[1],
+        &parts[0][..7],
+        "tree:short is the 7-char prefix: {trees}"
+    );
+
+    // A non-commit ref (annotated tag, objecttype=tag): all commit-graph atoms
+    // are empty.
+    assert!(
+        run(&["tag", "atag", "-m", "annotated"]).status.success(),
+        "create annotated tag"
+    );
+    assert_eq!(
+        stdout_trim(&[
+            "for-each-ref",
+            "--format=[%(tree)][%(tree:short)][%(parent)][%(parent:short)][%(numparent)]",
+            "refs/tags/atag",
+        ]),
+        "[][][][][]",
+        "commit-graph atoms are empty for a non-commit (annotated-tag) ref"
+    );
+}

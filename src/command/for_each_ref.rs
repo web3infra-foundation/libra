@@ -1152,7 +1152,7 @@ fn render_format(
     // Commit-field atoms (`%(subject)`, author/committer name+email) require
     // loading the ref's object. Load it once, only when at least one such atom
     // is present, to avoid extra object reads.
-    const COMMIT_FIELD_ATOMS: [&str; 14] = [
+    const COMMIT_FIELD_ATOMS: [&str; 19] = [
         "%(subject)",
         "%(contents)",
         "%(contents:subject)",
@@ -1167,6 +1167,11 @@ fn render_format(
         "%(taggername)",
         "%(taggeremail)",
         "%(taggerdate)",
+        "%(tree)",
+        "%(tree:short)",
+        "%(parent)",
+        "%(parent:short)",
+        "%(numparent)",
     ];
     let fields = if COMMIT_FIELD_ATOMS.iter().any(|a| format.contains(a)) {
         commit_fields_for(entry)
@@ -1176,8 +1181,13 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 29] = [
+    let atoms: [(&str, &str); 34] = [
         ("objectsize", objectsize.as_str()),
+        ("tree:short", fields.tree_short.as_str()),
+        ("tree", fields.tree.as_str()),
+        ("parent:short", fields.parent_short.as_str()),
+        ("parent", fields.parent.as_str()),
+        ("numparent", fields.numparent.as_str()),
         ("*objectname:short", deref_objectname_short.as_str()),
         ("*objectname", deref_objectname.as_str()),
         ("*objecttype", deref_objecttype.as_str()),
@@ -1540,6 +1550,15 @@ struct CommitFields {
     tagger_name: String,
     tagger_email: String,
     tagger_date: String,
+    /// `%(tree)` / `%(tree:short)`: the commit's tree id (empty for non-commits).
+    tree: String,
+    tree_short: String,
+    /// `%(parent)` / `%(parent:short)`: the commit's parent ids, space-separated
+    /// (empty for a root commit or a non-commit).
+    parent: String,
+    parent_short: String,
+    /// `%(numparent)`: the commit's parent count (empty for a non-commit).
+    numparent: String,
 }
 
 /// Load the ref's object (once) and extract its commit-field atom values.
@@ -1552,6 +1571,20 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
             // Strip a leading `gpgsig`/`gpgsig-sha256` header before the subject.
             Ok(c) => {
                 let contents = parse_commit_msg(&c.message).0.to_string();
+                let parent = c
+                    .parent_commit_ids
+                    .iter()
+                    .map(|h| h.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let parent_short = c
+                    .parent_commit_ids
+                    .iter()
+                    .map(|h| h.to_string().chars().take(7).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let tree = c.tree_id.to_string();
+                let tree_short = tree.chars().take(7).collect();
                 CommitFields {
                     subject: first_subject_line(&contents),
                     body: message_body(&contents),
@@ -1562,6 +1595,11 @@ fn commit_fields_for(entry: &RefEntry) -> CommitFields {
                     committer_email: format!("<{}>", c.committer.email),
                     author_date: format_timestamp_with(c.author.timestamp as i64, ""),
                     committer_date: format_timestamp_with(c.committer.timestamp as i64, ""),
+                    tree,
+                    tree_short,
+                    parent,
+                    parent_short,
+                    numparent: c.parent_commit_ids.len().to_string(),
                     ..CommitFields::default()
                 }
             }
