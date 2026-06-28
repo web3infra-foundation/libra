@@ -137,6 +137,10 @@ pub struct RefEntry {
     refname: String,
     objectname: String,
     objecttype: String,
+    /// For a symbolic ref (e.g. `refs/remotes/<remote>/HEAD`), the full name of
+    /// the ref it points to; `None` for ordinary refs. Drives `%(symref)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symref: Option<String>,
     #[serde(skip_serializing)]
     points_at: Vec<String>,
     /// Precomputed `%(describe[:opts])` values, keyed by the atom's option string
@@ -296,9 +300,9 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
             let branches = Branch::list_branches_result(Some(&remote.name))
                 .await
                 .map_err(branch_error)?;
-            for branch in branches {
+            for branch in &branches {
                 let refname = if branch.name.starts_with("refs/remotes/") {
-                    branch.name
+                    branch.name.clone()
                 } else {
                     format!("refs/remotes/{}/{}", remote.name, branch.name)
                 };
@@ -307,6 +311,33 @@ async fn run_for_each_ref(_args: &ForEachRefArgs) -> CliResult<Vec<RefEntry>> {
                     branch.commit.to_string(),
                     "commit",
                 ));
+            }
+
+            // A configured remote HEAD (`refs/remotes/<remote>/HEAD`, e.g. via
+            // `remote set-head`) is a symbolic ref. Git lists it with the object
+            // its target resolves to and exposes the target via `%(symref)`.
+            if let Some(Head::Branch(target_branch)) = Head::remote_current(&remote.name).await {
+                let target = if target_branch.starts_with("refs/") {
+                    target_branch
+                } else {
+                    format!("refs/remotes/{}/{}", remote.name, target_branch)
+                };
+                // Resolve the target's object from the branches just enumerated;
+                // skip a dangling HEAD whose target ref does not exist.
+                let target_short = target
+                    .strip_prefix(&format!("refs/remotes/{}/", remote.name))
+                    .unwrap_or(&target);
+                if let Some(b) = branches.iter().find(|b| {
+                    b.name == target_short
+                        || b.name == target
+                        || format!("refs/remotes/{}/{}", remote.name, b.name) == target
+                }) {
+                    entries.push(symbolic_ref_entry(
+                        format!("refs/remotes/{}/HEAD", remote.name),
+                        target,
+                        b.commit.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -460,6 +491,20 @@ fn direct_ref_entry(refname: String, objectname: String, objecttype: &str) -> Re
         points_at: vec![objectname.clone()],
         objectname,
         objecttype: objecttype.to_string(),
+        symref: None,
+        describe: HashMap::new(),
+    }
+}
+
+/// A symbolic ref entry (e.g. `refs/remotes/<remote>/HEAD`): its object is the
+/// commit the target resolves to, and `symref` records the target ref name.
+fn symbolic_ref_entry(refname: String, target: String, objectname: String) -> RefEntry {
+    RefEntry {
+        refname,
+        points_at: vec![objectname.clone()],
+        objectname,
+        objecttype: "commit".to_string(),
+        symref: Some(target),
         describe: HashMap::new(),
     }
 }
@@ -470,6 +515,7 @@ fn tag_ref_entry(tag: &tag::Tag) -> RefEntry {
         refname: format!("refs/tags/{}", tag.name),
         objectname,
         objecttype,
+        symref: None,
         points_at,
         describe: HashMap::new(),
     }
@@ -1635,6 +1681,8 @@ fn render_fragment(
         // active); the literal format text between atoms is pushed verbatim above.
         if let Some(value) = refname_strip_atom(token, &entry.refname) {
             push_field(&mut out, &value, quote);
+        } else if let Some(value) = symref_atom(token, entry.symref.as_deref()) {
+            push_field(&mut out, &value, quote);
         } else if let Some(n) = token
             .strip_prefix("objectname:short=")
             .and_then(|s| s.parse::<usize>().ok())
@@ -2288,20 +2336,48 @@ fn refname_strip_atom(token: &str, refname: &str) -> Option<String> {
     } else {
         return None;
     };
-    let n: i64 = num.parse().ok()?;
+    Some(strip_ref_components(refname, from_left, num.parse().ok()?))
+}
+
+/// Drop/keep slash-separated components of a ref name (Git's `lstrip`/`rstrip`).
+/// `N > 0` removes that many leading (lstrip) or trailing (rstrip) components;
+/// `N < 0` keeps the last `|N|` (lstrip) or first `|N|` (rstrip).
+fn strip_ref_components(refname: &str, from_left: bool, n: i64) -> String {
     let comps: Vec<&str> = refname.split('/').collect();
     let len = comps.len() as i64;
     let kept: &[&str] = match (from_left, n >= 0) {
-        // lstrip=N: drop N leading components
         (true, true) => comps.get(n.min(len) as usize..).unwrap_or(&[]),
-        // lstrip=-N: keep the last N components
         (true, false) => &comps[(len - (-n).min(len)) as usize..],
-        // rstrip=N: drop N trailing components
         (false, true) => &comps[..(len - n.min(len)) as usize],
-        // rstrip=-N: keep the first N components
         (false, false) => comps.get(..(-n).min(len) as usize).unwrap_or(&comps),
     };
-    Some(kept.join("/"))
+    kept.join("/")
+}
+
+/// Handle the `%(symref)` family: `%(symref)` (the full target ref of a
+/// symbolic ref, empty for ordinary refs), `%(symref:short)`, and
+/// `%(symref:lstrip=N)` / `%(symref:rstrip=N)`. Returns `None` for any token
+/// outside the family so the caller treats it as a different/unknown atom.
+fn symref_atom(token: &str, symref: Option<&str>) -> Option<String> {
+    let target = symref.unwrap_or("");
+    if token == "symref" {
+        return Some(target.to_string());
+    }
+    if token == "symref:short" {
+        // An empty target (ordinary ref) stays empty rather than shortening "".
+        return Some(if target.is_empty() {
+            String::new()
+        } else {
+            short_refname(target)
+        });
+    }
+    if let Some(num) = token.strip_prefix("symref:lstrip=") {
+        return Some(strip_ref_components(target, true, num.parse().ok()?));
+    }
+    if let Some(num) = token.strip_prefix("symref:rstrip=") {
+        return Some(strip_ref_components(target, false, num.parse().ok()?));
+    }
+    None
 }
 
 #[cfg(test)]

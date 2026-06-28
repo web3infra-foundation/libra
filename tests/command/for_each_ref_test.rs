@@ -2691,3 +2691,72 @@ fn test_for_each_ref_describe_atom() {
     assert_eq!(code, Some(0));
     assert_eq!(orphan, "[]", "no reachable tag -> empty %(describe)");
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_symref_atom() {
+    use libra::internal::branch::Branch;
+
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+    let p = temp.path();
+
+    std::fs::write("a.txt", "1\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("c1".into()),
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
+
+    let head = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    // A remote-tracking ref, then a symbolic remote HEAD pointing at it.
+    Branch::update_branch("refs/remotes/origin/main", &head, Some("origin"))
+        .await
+        .expect("create remote-tracking origin/main");
+    assert_cli_success(
+        &run_libra_command(&["remote", "add", "origin", "https://example.com/r.git"], p),
+        "remote add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["remote", "set-head", "origin", "main"], p),
+        "remote set-head",
+    );
+
+    let out = run_libra_command(
+        &[
+            "for-each-ref",
+            "--remotes",
+            "--format=%(refname)|%(symref)|%(symref:short)",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "for-each-ref %(symref)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The symbolic remote HEAD shows its target; an ordinary remote ref is empty.
+    assert!(
+        s.lines()
+            .any(|l| l == "refs/remotes/origin/HEAD|refs/remotes/origin/main|origin/main"),
+        "symbolic remote HEAD exposes its target via %(symref): {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == "refs/remotes/origin/main||"),
+        "an ordinary remote-tracking ref has an empty %(symref): {s:?}"
+    );
+}
