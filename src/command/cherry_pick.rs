@@ -56,6 +56,7 @@ EXAMPLES:
     libra cherry-pick -s abc1234           Add a Signed-off-by trailer
     libra cherry-pick -m 1 <merge>         Cherry-pick a merge commit along parent 1
     libra cherry-pick --cleanup=strip abc1234  Clean up the replayed commit message
+    libra cherry-pick --empty=drop abc1234  Skip the pick if it is already upstream
     libra cherry-pick --continue           Resume after resolving conflicts
     libra cherry-pick --abort              Cancel and restore the original HEAD
     libra cherry-pick --json abc1234       Structured JSON output for agents";
@@ -81,6 +82,9 @@ enum CherryPickError {
 
     #[error("invalid --cleanup mode '{0}'")]
     InvalidCleanup(String),
+
+    #[error("invalid value for '--empty': '{0}'")]
+    InvalidEmpty(String),
 
     #[error("unsupported cherry-pick option: {0}")]
     Unsupported(String),
@@ -124,6 +128,7 @@ impl CherryPickError {
             Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
             Self::InvalidMainline(_) => StableErrorCode::CliInvalidArguments,
             Self::InvalidCleanup(_) => StableErrorCode::CliInvalidArguments,
+            Self::InvalidEmpty(_) => StableErrorCode::CliInvalidArguments,
             Self::Unsupported(_) => StableErrorCode::Unsupported,
             Self::EmptyCommit(_) => StableErrorCode::CliInvalidArguments,
             Self::RedundantCommit(_) => StableErrorCode::CliInvalidArguments,
@@ -159,6 +164,9 @@ impl From<CherryPickError> for CliError {
             CherryPickError::InvalidCleanup(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("valid modes: strip, whitespace, verbatim, scissors, default"),
+            CherryPickError::InvalidEmpty(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("valid modes: drop, keep, stop"),
             CherryPickError::Unsupported(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("this Git option is not supported by libra cherry-pick"),
@@ -241,6 +249,10 @@ struct CherryPickOpts {
     /// clean their message the same way. Stored as the raw mode string.
     #[serde(default)]
     cleanup: Option<String>,
+    /// `--empty=<mode>` policy; must survive a conflict + resume so a later
+    /// redundant commit in the sequence is handled the same way. Raw mode string.
+    #[serde(default)]
+    empty: Option<String>,
 }
 
 impl CherryPickOpts {
@@ -255,6 +267,7 @@ impl CherryPickOpts {
             gpg_sign: args.gpg_sign,
             mainline: args.mainline,
             cleanup: args.cleanup.clone(),
+            empty: args.empty.clone(),
         }
     }
 
@@ -274,17 +287,86 @@ impl CherryPickOpts {
             gpg_sign: self.gpg_sign,
             mainline: self.mainline,
             cleanup: self.cleanup,
+            empty: self.empty,
             ..Default::default()
         }
     }
 }
 
+/// Policy for a pick whose change set becomes redundant against HEAD after
+/// replay (Git's `--empty=<mode>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyMode {
+    /// Halt and let the user decide (Git's default).
+    Stop,
+    /// Skip the redundant commit and continue (`--empty=drop`).
+    Drop,
+    /// Keep the now-empty commit (`--empty=keep`, == `--keep-redundant-commits`).
+    Keep,
+}
+
+/// Parse a `--empty=<mode>` value; `None` for an unrecognized mode.
+fn parse_empty_mode(value: &str) -> Option<EmptyMode> {
+    match value {
+        "stop" => Some(EmptyMode::Stop),
+        "drop" => Some(EmptyMode::Drop),
+        "keep" => Some(EmptyMode::Keep),
+        _ => None,
+    }
+}
+
+/// The effective become-redundant policy: `--empty=<mode>` wins; otherwise
+/// `--keep-redundant-commits` means `keep` and the default is `stop` (matching
+/// Git). Assumes `--empty` was already validated by [`run_cherry_pick`], so an
+/// unexpected value defaults to `stop`.
+fn effective_empty_mode(args: &CherryPickArgs) -> EmptyMode {
+    if let Some(raw) = &args.empty {
+        return parse_empty_mode(raw).unwrap_or(EmptyMode::Stop);
+    }
+    if args.keep_redundant_commits {
+        EmptyMode::Keep
+    } else {
+        EmptyMode::Stop
+    }
+}
+
+/// Outcome of picking a single commit.
+enum PickOutcome {
+    /// A new commit was created (or HEAD fast-forwarded) at this id.
+    Committed(ObjectHash),
+    /// `--no-commit`: changes staged, no commit created.
+    Staged,
+    /// `--empty=drop`: the pick was redundant against HEAD and was skipped. Carries
+    /// the dropped commit's subject for the `dropping … -- patch contents already
+    /// upstream` notice.
+    Dropped(String),
+}
+
 // ── Structured output ────────────────────────────────────────────────
+
+/// A commit skipped under `--empty=drop` (its patch is already upstream).
+#[derive(Debug, Clone, Serialize)]
+pub struct DroppedCommit {
+    pub commit: String,
+    pub subject: String,
+}
+
+/// Running tally of a pick sequence: committed/staged commits and the commits
+/// dropped under `--empty=drop`. Bundled so the sequencer functions take one
+/// accumulator rather than two parallel out-parameters.
+#[derive(Default)]
+struct PickAccumulator {
+    picked: Vec<CherryPickEntry>,
+    dropped: Vec<DroppedCommit>,
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CherryPickOutput {
     pub picked: Vec<CherryPickEntry>,
     pub no_commit: bool,
+    /// Commits skipped under `--empty=drop` (additive; absent when none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<DroppedCommit>,
     /// Sequencer action: `"continue"`/`"skip"`/`"abort"`/`"quit"`. Absent for a
     /// plain pick (back-compatible: old consumers see the same `{picked,no_commit}`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,9 +500,13 @@ pub struct CherryPickArgs {
     #[clap(long = "cleanup", value_name = "mode")]
     pub cleanup: Option<String>,
 
-    // ── Unsupported Git options captured for explicit rejection ──
-    #[clap(long = "empty", value_name = "mode", hide = true)]
+    /// How to handle a pick that becomes empty (redundant against HEAD) after
+    /// replay: `stop` (default — halt for you to decide), `drop` (skip it), or
+    /// `keep` (record the empty commit; same as `--keep-redundant-commits`).
+    #[clap(long = "empty", value_name = "mode")]
     pub empty: Option<String>,
+
+    // ── Unsupported Git options captured for explicit rejection ──
     #[clap(long = "strategy", value_name = "name", hide = true)]
     pub strategy: Option<String>,
     #[clap(
@@ -467,9 +553,6 @@ pub async fn execute_safe(args: CherryPickArgs, output: &OutputConfig) -> CliRes
 /// Reject Git options libra cherry-pick does not implement. Returns the first
 /// offending flag (so the error names a concrete option) or `None`.
 fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
-    if args.empty.is_some() {
-        return Some("--empty (use --allow-empty / --keep-redundant-commits)");
-    }
     if args.rerere_autoupdate {
         return Some("--rerere-autoupdate");
     }
@@ -516,6 +599,20 @@ fn make_entry(source: &ObjectHash, new_commit: Option<ObjectHash>) -> CherryPick
         short_new: new_commit
             .as_ref()
             .map(|id| short_display_hash(&id.to_string()).to_string()),
+    }
+}
+
+/// Record a single pick's [`PickOutcome`] into the accumulator: a
+/// committed/staged pick becomes a `CherryPickEntry`, a `--empty=drop` pick
+/// becomes a `DroppedCommit`.
+fn record_outcome(outcome: PickOutcome, commit_id: &ObjectHash, acc: &mut PickAccumulator) {
+    match outcome {
+        PickOutcome::Committed(id) => acc.picked.push(make_entry(commit_id, Some(id))),
+        PickOutcome::Staged => acc.picked.push(make_entry(commit_id, None)),
+        PickOutcome::Dropped(subject) => acc.dropped.push(DroppedCommit {
+            commit: commit_id.to_string(),
+            subject,
+        }),
     }
 }
 
@@ -608,6 +705,14 @@ async fn run_cherry_pick(
         return Err(CherryPickError::InvalidCleanup(raw.clone()));
     }
 
+    // Validate `--empty=<mode>` before ANY dispatch too, for the same reason: an
+    // invalid mode must fail fast (exit 129) and never slip through `--continue`.
+    if let Some(raw) = &args.empty
+        && parse_empty_mode(raw).is_none()
+    {
+        return Err(CherryPickError::InvalidEmpty(raw.clone()));
+    }
+
     // Sequencer controls operate on the in-progress state and are dispatched
     // FIRST — they must never be rejected by the in-progress guard below.
     if args.continue_pick {
@@ -653,10 +758,10 @@ async fn run_cherry_pick(
     let opts_json = serde_json::to_string(&CherryPickOpts::from_args(&args))
         .map_err(|e| CherryPickError::SaveFailed(format!("failed to serialize options: {e}")))?;
 
-    let mut picked = Vec::new();
+    let mut acc = PickAccumulator::default();
     for (i, commit_id) in commit_ids.iter().enumerate() {
         match cherry_pick_single_commit(commit_id, &args, output).await {
-            Ok(new_commit_id) => picked.push(make_entry(commit_id, new_commit_id)),
+            Ok(outcome) => record_outcome(outcome, commit_id, &mut acc),
             Err(CherryPickSingleError::Conflicted(paths)) => {
                 let label = args.commits[i].clone();
                 if args.no_commit {
@@ -692,8 +797,9 @@ async fn run_cherry_pick(
     }
 
     Ok(CherryPickOutput {
-        picked,
+        picked: acc.picked,
         no_commit: args.no_commit,
+        dropped: acc.dropped,
         ..Default::default()
     })
 }
@@ -711,7 +817,7 @@ async fn resume_picks(
     opts_args: &CherryPickArgs,
     opts_json: &str,
     output: &OutputConfig,
-    picked: &mut Vec<CherryPickEntry>,
+    acc: &mut PickAccumulator,
 ) -> Result<(), CherryPickError> {
     while let Some(commit_id) = todo.pop_front() {
         // Persist the position BEFORE attempting each commit so that whatever
@@ -729,7 +835,7 @@ async fn resume_picks(
         pending.save().await.map_err(CherryPickError::SaveFailed)?;
 
         match cherry_pick_single_commit(&commit_id, opts_args, output).await {
-            Ok(new_commit_id) => picked.push(make_entry(&commit_id, new_commit_id)),
+            Ok(outcome) => record_outcome(outcome, &commit_id, acc),
             Err(CherryPickSingleError::Conflicted(paths)) => {
                 // State already points at this commit + the remaining todo.
                 return Err(CherryPickError::Conflict {
@@ -778,7 +884,10 @@ async fn run_cherry_pick_continue(
         .await
         .map_err(|e| map_single_error(e, &state.current_oid.to_string()))?;
 
-    let mut picked = vec![make_entry(&state.current_oid, Some(new_commit))];
+    let mut acc = PickAccumulator {
+        picked: vec![make_entry(&state.current_oid, Some(new_commit))],
+        dropped: Vec::new(),
+    };
     resume_picks(
         &state.head_name,
         state.head_orig,
@@ -786,12 +895,13 @@ async fn run_cherry_pick_continue(
         &opts_args,
         &state.opts_json,
         output,
-        &mut picked,
+        &mut acc,
     )
     .await?;
 
     Ok(CherryPickOutput {
-        picked,
+        picked: acc.picked,
+        dropped: acc.dropped,
         action: Some("continue".to_string()),
         ..Default::default()
     })
@@ -809,7 +919,7 @@ async fn run_cherry_pick_skip(output: &OutputConfig) -> Result<CherryPickOutput,
         .map_err(|e| CherryPickError::LoadObject(format!("failed to read saved options: {e}")))?;
     let opts_args = opts.into_args();
 
-    let mut picked = Vec::new();
+    let mut acc = PickAccumulator::default();
     resume_picks(
         &state.head_name,
         state.head_orig,
@@ -817,12 +927,13 @@ async fn run_cherry_pick_skip(output: &OutputConfig) -> Result<CherryPickOutput,
         &opts_args,
         &state.opts_json,
         output,
-        &mut picked,
+        &mut acc,
     )
     .await?;
 
     Ok(CherryPickOutput {
-        picked,
+        picked: acc.picked,
+        dropped: acc.dropped,
         action: Some("skip".to_string()),
         ..Default::default()
     })
@@ -888,6 +999,14 @@ fn render_cherry_pick_output(result: &CherryPickOutput, output: &OutputConfig) -
         _ => {}
     }
 
+    // `--empty=drop`: note each redundant commit that was skipped (Git's
+    // `dropping <sha> <subject> -- patch contents already upstream`).
+    for d in &result.dropped {
+        println!(
+            "dropping {} {} -- patch contents already upstream",
+            d.commit, d.subject
+        );
+    }
     for entry in &result.picked {
         if let Some(short_new) = &entry.short_new {
             println!("[{}] cherry-picked from {}", short_new, entry.short_source,);
@@ -907,7 +1026,7 @@ async fn cherry_pick_single_commit(
     commit_id: &ObjectHash,
     args: &CherryPickArgs,
     output: &OutputConfig,
-) -> Result<Option<ObjectHash>, CherryPickSingleError> {
+) -> Result<PickOutcome, CherryPickSingleError> {
     let commit_to_pick: Commit =
         load_object(commit_id).map_err(|e| CherryPickSingleError::LoadObject(e.to_string()))?;
 
@@ -930,7 +1049,7 @@ async fn cherry_pick_single_commit(
         reset_hard(&commit_id.to_string(), output)
             .await
             .map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;
-        return Ok(Some(*commit_id));
+        return Ok(PickOutcome::Committed(*commit_id));
     }
 
     // Resolve the diff base parent, honoring `-m <n>` for merge commits.
@@ -1066,7 +1185,7 @@ async fn cherry_pick_single_commit(
             .save(&index_file)
             .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save index: {e}")))?;
         reset_workdir_tracked_only(&current_index, &index)?;
-        return Ok(None);
+        return Ok(PickOutcome::Staged);
     }
 
     let current_head = Head::current_commit().await.ok_or_else(|| {
@@ -1074,16 +1193,31 @@ async fn cherry_pick_single_commit(
     })?;
 
     // (B) "Empty" class 2: the replayed change is redundant against the current
-    // HEAD (resulting tree is identical). Git stops unless `--keep-redundant-commits`.
+    // HEAD (resulting tree is identical). Git's `--empty=<mode>` decides: `stop`
+    // (default) halts, `drop` skips the commit, `keep` records the empty commit.
     // An originally-empty commit that reached here has already passed `--allow-empty`,
-    // so it is allowed through even though its tree is unchanged.
+    // so it is committed regardless (its emptiness is intentional, not redundant).
     let head_commit: Commit = load_object(&current_head).map_err(|e| {
         CherryPickSingleError::LoadObject(format!("failed to load current HEAD commit: {e}"))
     })?;
-    if tree_id == head_commit.tree_id && !originally_empty && !args.keep_redundant_commits {
-        return Err(CherryPickSingleError::RedundantCommit(
-            commit_id.to_string(),
-        ));
+    if tree_id == head_commit.tree_id && !originally_empty {
+        match effective_empty_mode(args) {
+            EmptyMode::Stop => {
+                return Err(CherryPickSingleError::RedundantCommit(
+                    commit_id.to_string(),
+                ));
+            }
+            EmptyMode::Drop => {
+                // Skip without touching the index/worktree or advancing HEAD. Take
+                // the subject from the de-signed message so a signed commit reports
+                // its real first line, not the `gpgsig` header.
+                let (clean_msg, _) = crate::common_utils::parse_commit_msg(&commit_to_pick.message);
+                let subject = clean_msg.lines().next().unwrap_or("").to_string();
+                return Ok(PickOutcome::Dropped(subject));
+            }
+            // `keep`: fall through and commit the (empty) commit.
+            EmptyMode::Keep => {}
+        }
     }
 
     index
@@ -1093,7 +1227,7 @@ async fn cherry_pick_single_commit(
 
     let cherry_pick_commit_id =
         create_cherry_pick_commit(&commit_to_pick, &current_head, tree_id, args, output).await?;
-    Ok(Some(cherry_pick_commit_id))
+    Ok(PickOutcome::Committed(cherry_pick_commit_id))
 }
 
 /// Resolve the Signed-off-by identity from the configured `user.name`/`user.email`
@@ -1951,6 +2085,7 @@ mod tests {
             gpg_sign: true,
             mainline: Some(2),
             cleanup: Some("strip".to_string()),
+            empty: Some("drop".to_string()),
             ..Default::default()
         };
         let json = serde_json::to_string(&CherryPickOpts::from_args(&args)).unwrap();
@@ -1966,5 +2101,6 @@ mod tests {
         assert!(rebuilt.gpg_sign);
         assert_eq!(rebuilt.mainline, Some(2));
         assert_eq!(rebuilt.cleanup.as_deref(), Some("strip"));
+        assert_eq!(rebuilt.empty.as_deref(), Some("drop"));
     }
 }

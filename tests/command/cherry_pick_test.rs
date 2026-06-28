@@ -1353,7 +1353,6 @@ fn cherry_pick_redundant_blocked_then_kept() {
 fn cherry_pick_unsupported_flags_rejected() {
     let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
     let cases: Vec<Vec<&str>> = vec![
-        vec!["cherry-pick", "--empty", "drop", &oid],
         vec!["cherry-pick", "--rerere-autoupdate", &oid],
         vec!["cherry-pick", "--commit", &oid],
     ];
@@ -2065,5 +2064,185 @@ fn cherry_pick_resume_nonconflict_error_keeps_accurate_state() {
     assert_eq!(
         report.error_code, "LBR-REPO-003",
         "state cleared after skip"
+    );
+}
+
+/// `--empty=<mode>` controls a pick that becomes redundant against HEAD after
+/// replay: `drop` skips it (HEAD unchanged), `stop` (default) halts, `keep`
+/// records the empty commit. An invalid mode is a usage error.
+#[tokio::test]
+#[serial]
+async fn test_cherry_pick_empty_modes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    // feature: add line X to shared.txt.
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch feature",
+    );
+    std::fs::write(p.join("shared.txt"), "base\nX\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add on feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add X", "--no-verify"], p),
+        "feature commit",
+    );
+    let feature_commit = Head::current_commit()
+        .await
+        .expect("feature commit")
+        .to_string();
+
+    // main: make the IDENTICAL change, so cherry-picking feature's commit is
+    // redundant (the resulting tree equals HEAD's).
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "base\nX\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add on main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main also adds X", "--no-verify"], p),
+        "main commit",
+    );
+    let main_tip = Head::current_commit().await.expect("main tip");
+
+    // --empty=drop: skip the redundant commit; HEAD must not move, and the
+    // "dropping … patch contents already upstream" notice names the real subject.
+    let drop = run_libra_command(&["cherry-pick", "--empty=drop", &feature_commit], p);
+    assert_cli_success(&drop, "--empty=drop succeeds");
+    assert_eq!(
+        Head::current_commit().await.expect("HEAD"),
+        main_tip,
+        "--empty=drop leaves HEAD unmoved"
+    );
+    let drop_out = String::from_utf8_lossy(&drop.stdout);
+    assert!(
+        drop_out.contains("dropping")
+            && drop_out.contains("add X")
+            && drop_out.contains("already upstream"),
+        "--empty=drop reports the dropped commit: {drop_out}"
+    );
+
+    // --empty=stop (the default) halts with a "redundant" error.
+    let stop = run_libra_command(&["cherry-pick", "--empty=stop", &feature_commit], p);
+    assert_ne!(stop.status.code(), Some(0), "--empty=stop halts");
+    assert!(
+        String::from_utf8_lossy(&stop.stderr).contains("redundant"),
+        "--empty=stop explains the redundancy"
+    );
+
+    // --empty=keep: record the empty commit; HEAD advances.
+    let keep = run_libra_command(&["cherry-pick", "--empty=keep", &feature_commit], p);
+    assert_cli_success(&keep, "--empty=keep succeeds");
+    assert_ne!(
+        Head::current_commit().await.expect("HEAD"),
+        main_tip,
+        "--empty=keep records the (empty) commit, advancing HEAD"
+    );
+
+    // Invalid mode is a usage error (exit 129) naming the bad value.
+    let bogus = run_libra_command(&["cherry-pick", "--empty=bogus", &feature_commit], p);
+    assert_eq!(
+        bogus.status.code(),
+        Some(129),
+        "invalid --empty mode exits 129"
+    );
+    assert!(
+        String::from_utf8_lossy(&bogus.stderr).contains("--empty"),
+        "the error names --empty"
+    );
+}
+
+/// `--empty=drop` survives a conflict + `--continue`: the mode round-trips through
+/// the sequencer state, so a LATER commit in the sequence that becomes redundant
+/// is dropped (not stopped on) when the resume reaches it.
+#[test]
+#[serial]
+fn cherry_pick_empty_drop_survives_conflict_resume() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("shared.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base shared", "--no-verify"], p),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch feature",
+    );
+
+    // f1: conflicting edit to shared.txt.
+    std::fs::write(p.join("shared.txt"), "feature\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f1", "--no-verify"], p),
+        "commit f1",
+    );
+    let f1 = cp_rev_parse(p, "HEAD");
+
+    // f2: add redundant.txt=R — main will already have the identical file, so this
+    // pick becomes redundant against HEAD after f1 lands.
+    std::fs::write(p.join("redundant.txt"), "R\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "redundant.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "f2 add R", "--no-verify"], p),
+        "commit f2",
+    );
+    let f2 = cp_rev_parse(p, "HEAD");
+
+    // main: conflict on shared.txt AND already add the identical redundant.txt.
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "main\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add main edit",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main edit",
+    );
+    std::fs::write(p.join("redundant.txt"), "R\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "redundant.txt"], p),
+        "add main R",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main adds R", "--no-verify"], p),
+        "commit main R",
+    );
+
+    // Pick f1, f2 with --empty=drop → f1 conflicts and halts.
+    assert_eq!(
+        run_libra_command(&["cherry-pick", "--empty=drop", &f1, &f2], p)
+            .status
+            .code(),
+        Some(128),
+        "f1 conflicts"
+    );
+
+    // Resolve f1 and continue: f1 commits, then the resume reaches f2 — which is
+    // redundant — and (because --empty=drop round-tripped through the state) drops
+    // it rather than halting. The sequence completes.
+    std::fs::write(p.join("shared.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "shared.txt"], p),
+        "add resolved",
+    );
+    let cont = run_libra_command(&["cherry-pick", "--continue"], p);
+    assert_cli_success(&cont, "--continue drops the redundant f2 and finishes");
+    let cont_out = String::from_utf8_lossy(&cont.stdout);
+    assert!(
+        cont_out.contains("dropping") && cont_out.contains("already upstream"),
+        "the resumed redundant f2 is reported as dropped: {cont_out}"
+    );
+
+    // State cleared (sequence complete): another sequencer control errors.
+    let after = run_libra_command(&["cherry-pick", "--continue"], p);
+    let (_h, report) = parse_cli_error_stderr(&after.stderr);
+    assert_eq!(
+        report.error_code, "LBR-REPO-003",
+        "state cleared after resume"
     );
 }
