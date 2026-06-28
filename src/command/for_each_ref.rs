@@ -647,6 +647,40 @@ fn ref_object_size(entry: &RefEntry) -> CliResult<i64> {
     Ok(data.len() as i64)
 }
 
+/// The raw, decompressed contents of the ref's object — Git's `%(raw)`. For a
+/// branch this is the commit object's canonical text (`tree …`/`parent …`/
+/// `author …`/`committer …`/blank/message), for an annotated tag the tag object.
+/// Same byte source as [`ref_object_size`], so `%(raw:size)` == `%(objectsize)`.
+///
+/// The for-each-ref render pipeline is UTF-8 text based (like `%(contents)`), so
+/// rather than lossily transcode binary content — which would silently corrupt
+/// the output and make it disagree with `%(raw:size)` — a non-UTF-8 object is
+/// rejected. Commit and (annotated) tag objects, the only objects a branch/tag
+/// ref normally names, are text.
+fn ref_raw_content(entry: &RefEntry) -> CliResult<String> {
+    let hash = ObjectHash::from_str(&entry.objectname).map_err(|source| {
+        CliError::fatal(format!(
+            "ref '{}' has an invalid object id '{}': {source}",
+            entry.refname, entry.objectname
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    let data = util::objects_storage().get(&hash).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to read object {} for ref '{}': {source}",
+            entry.objectname, entry.refname
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })?;
+    String::from_utf8(data).map_err(|_| {
+        CliError::fatal(format!(
+            "object {} for ref '{}' is not valid UTF-8; %(raw) is only supported for text objects",
+            entry.objectname, entry.refname
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+    })
+}
+
 /// Sort entries by their object's byte size (`objectsize`); ties break by refname
 /// ascending, matching Git's final ordering key.
 fn sort_entries_by_objectsize(entries: &mut [RefEntry], reverse: bool) -> CliResult<()> {
@@ -1071,6 +1105,21 @@ fn render_output(
     }
 
     let quote = resolve_quote_style(args);
+    // `%(raw)` is binary-unsafe under the quoting modes, so Git rejects it with
+    // `--python`/`--shell`/`--tcl` (but allows `--perl`); match that.
+    if let Some(format) = &args.format
+        && format.contains("%(raw)")
+        && matches!(
+            quote,
+            Some(QuoteStyle::Shell | QuoteStyle::Python | QuoteStyle::Tcl)
+        )
+    {
+        return Err(
+            CliError::fatal("--format=raw cannot be used with --python, --shell, --tcl")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_exit_code(128),
+        );
+    }
     // `%(color:…)` atoms emit ANSI only when color is enabled: forced on by
     // `--color=always`, off by `--color=never`/NO_COLOR, and tty-gated under the
     // `auto` default (mirroring Git's `want_color()`).
@@ -1192,6 +1241,19 @@ fn render_format(
     } else {
         String::new()
     };
+    // `%(raw)` / `%(raw:size)`: the raw decompressed object content and its byte
+    // length (the latter equals `%(objectsize)`); both computed lazily. Note
+    // `%(raw)` is not a substring of `%(raw:size)`, so the two are distinguished.
+    let raw_size = if format.contains("%(raw:size)") {
+        ref_object_size(entry)?.to_string()
+    } else {
+        String::new()
+    };
+    let raw = if format.contains("%(raw)") {
+        ref_raw_content(entry)?
+    } else {
+        String::new()
+    };
     // `%(*objectname)` / `%(*objectname:short)`: the object an annotated tag
     // dereferences to (empty for non-tag refs); computed lazily.
     let deref_objectname = if format.contains("%(*objectname") {
@@ -1274,7 +1336,9 @@ fn render_format(
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 34] = [
+    let atoms: [(&str, &str); 36] = [
+        ("raw:size", raw_size.as_str()),
+        ("raw", raw.as_str()),
         ("objectsize", objectsize.as_str()),
         ("tree:short", fields.tree_short.as_str()),
         ("tree", fields.tree.as_str()),

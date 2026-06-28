@@ -2380,3 +2380,153 @@ fn test_for_each_ref_color_atom() {
         "shell mode quotes an empty color field when color is off (no trailing reset)"
     );
 }
+
+#[test]
+fn test_for_each_ref_raw_atom() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "raw subject", "--no-verify"]);
+
+    // %(raw:size) equals %(objectsize) (same decompressed-object byte count).
+    let sizes = run(&[
+        "for-each-ref",
+        "--format=%(raw:size) %(objectsize)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&sizes, "for-each-ref %(raw:size)");
+    let size_line = String::from_utf8(sizes.stdout)
+        .unwrap()
+        .trim_end()
+        .to_string();
+    let mut parts = size_line.split_whitespace();
+    let raw_size = parts.next().unwrap_or("");
+    let object_size = parts.next().unwrap_or("");
+    assert_eq!(raw_size, object_size, "raw:size must equal objectsize");
+    assert!(
+        raw_size.parse::<u64>().is_ok_and(|n| n > 0),
+        "raw:size is a positive integer: {size_line}"
+    );
+
+    // %(raw) is the canonical commit object content (tree/author/committer/body).
+    let raw = run(&["for-each-ref", "--format=%(raw)", "refs/heads/main"]);
+    assert_cli_success(&raw, "for-each-ref %(raw)");
+    let raw_text = String::from_utf8(raw.stdout).unwrap();
+    assert!(
+        raw_text.starts_with("tree "),
+        "raw starts with tree: {raw_text:?}"
+    );
+    assert!(
+        raw_text.contains("\nauthor ") && raw_text.contains("\ncommitter "),
+        "raw has author/committer lines: {raw_text:?}"
+    );
+    assert!(
+        raw_text.contains("raw subject"),
+        "raw has the message: {raw_text:?}"
+    );
+
+    // %(raw) is binary-unsafe under quoting: rejected with --shell (exit 128),
+    // while %(raw:size) is allowed.
+    let bad = run(&[
+        "for-each-ref",
+        "--shell",
+        "--format=%(raw)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(
+        bad.status.code(),
+        Some(128),
+        "%(raw) with --shell should fail (128): {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    let ok = run(&[
+        "for-each-ref",
+        "--shell",
+        "--format=%(raw:size)",
+        "refs/heads/main",
+    ]);
+    assert_cli_success(&ok, "%(raw:size) is allowed with --shell");
+}
+
+#[test]
+fn test_for_each_ref_raw_rejects_non_utf8() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+
+    // Grab the tree of HEAD to build a structurally-valid commit object whose
+    // message contains non-UTF-8 bytes.
+    let cat = run(&["cat-file", "-p", "HEAD"]);
+    let head_body = String::from_utf8_lossy(&cat.stdout);
+    let tree = head_body
+        .lines()
+        .find_map(|l| l.strip_prefix("tree "))
+        .expect("HEAD commit has a tree line")
+        .to_string();
+
+    // Craft a commit object with an invalid-UTF-8 message and hash it literally.
+    let mut commit_bytes =
+        format!("tree {tree}\nauthor a <a@b> 1 +0000\ncommitter a <a@b> 1 +0000\n\n").into_bytes();
+    commit_bytes.extend_from_slice(&[0xff, 0xfe, 0x00]);
+    commit_bytes.extend_from_slice(b"binary message\n");
+    let craft = p.join("craft.commit");
+    fs::write(&craft, &commit_bytes).unwrap();
+    let hashed = run(&[
+        "hash-object",
+        "-t",
+        "commit",
+        "--literally",
+        "-w",
+        craft.to_str().unwrap(),
+    ]);
+    assert_cli_success(&hashed, "hash-object crafted commit");
+    let oid = String::from_utf8_lossy(&hashed.stdout).trim().to_string();
+
+    // Point a branch at the binary commit so for-each-ref will list it.
+    assert_cli_success(
+        &run(&["branch", "bincommit", &oid]),
+        "branch -> binary commit",
+    );
+
+    // %(raw) must reject the non-UTF-8 object (rather than emit corrupted bytes).
+    let raw = run(&["for-each-ref", "--format=%(raw)", "refs/heads/bincommit"]);
+    assert_eq!(
+        raw.status.code(),
+        Some(129),
+        "%(raw) on a non-UTF-8 object should fail (LBR-CLI-002 / 129): {}",
+        String::from_utf8_lossy(&raw.stdout)
+    );
+    let (_h, report) = parse_cli_error_stderr(&raw.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        report.message.contains("not valid UTF-8"),
+        "error should explain the non-UTF-8 rejection: {}",
+        report.message
+    );
+
+    // %(raw:size) still reports the true byte length and succeeds.
+    let size = run(&[
+        "for-each-ref",
+        "--format=%(raw:size)",
+        "refs/heads/bincommit",
+    ]);
+    assert_cli_success(&size, "%(raw:size) on a non-UTF-8 object");
+    assert!(
+        String::from_utf8_lossy(&size.stdout)
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|n| n > 0),
+        "%(raw:size) is a positive byte count even for a binary object"
+    );
+}
