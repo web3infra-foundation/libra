@@ -64,6 +64,10 @@ Examples:
   # Append each commit's notes after the --- line (default ref, then a custom ref)
   libra format-patch --notes --stdout HEAD~2..HEAD
   libra format-patch --notes=review --stdout HEAD~2..HEAD
+
+  # Send the patch as a MIME attachment (or inline) part
+  libra format-patch --attach --stdout HEAD~2..HEAD
+  libra format-patch --inline --stdout HEAD~2..HEAD
 ";
 
 // ---------------------------------------------------------------------------
@@ -161,6 +165,15 @@ pub struct FormatPatchArgs {
     /// the given ref. Commits without a note are emitted unchanged.
     #[arg(long = "notes", value_name = "REF", num_args = 0..=1, require_equals = true)]
     pub notes: Option<Option<String>>,
+
+    /// Create multipart/mixed messages with the commit log in the body and the
+    /// patch itself as a separate `attachment` part.
+    #[arg(long = "attach", conflicts_with = "inline")]
+    pub attach: bool,
+
+    /// Like `--attach`, but the patch part uses `Content-Disposition: inline`.
+    #[arg(long = "inline")]
+    pub inline: bool,
 
     /// Show full object IDs in diff index header lines.
     #[arg(long = "full-index")]
@@ -592,10 +605,31 @@ async fn format_patch_body(
     // ---- Threading headers ----
     push_threading_headers(&mut out, thread_id, patch_num, start_num, total);
 
-    // ---- MIME (always plain text UTF-8) ----
+    // `--attach`/`--inline` wrap the patch in a MIME multipart: the log message
+    // + diffstat go in a `text/plain` part, the diff in a `text/x-patch` part.
+    let attach_disposition = if args.attach {
+        Some("attachment")
+    } else if args.inline {
+        Some("inline")
+    } else {
+        None
+    };
+    // Boundary mirrors Git's: twelve dashes + the tool version string.
+    let boundary = format!("------------libra {}", env!("CARGO_PKG_VERSION"));
+
+    // ---- MIME headers ----
+    // Git puts only the `Content-Type` at the multipart envelope level; the
+    // `Content-Transfer-Encoding` lives on each MIME part (emitted below). For a
+    // plain (non-attach) patch the transfer-encoding stays at the top level.
     out.push_str("MIME-Version: 1.0\n");
-    out.push_str("Content-Type: text/plain; charset=UTF-8\n");
-    out.push_str("Content-Transfer-Encoding: 8bit\n");
+    if attach_disposition.is_some() {
+        out.push_str(&format!(
+            "Content-Type: multipart/mixed; boundary=\"{boundary}\"\n"
+        ));
+    } else {
+        out.push_str("Content-Type: text/plain; charset=UTF-8\n");
+        out.push_str("Content-Transfer-Encoding: 8bit\n");
+    }
 
     // ---- To: / Cc: (after the MIME block, matching Git's header order) ----
     let (to, cc) = resolve_recipients(args);
@@ -604,13 +638,12 @@ async fn format_patch_body(
     // ---- Blank line: headers -> body ----
     out.push('\n');
 
-    // ---- In-body `From:` (preserve the original author when `--from` rewrote
-    // the header), so `git am` can restore authorship ----
+    // ---- Message section: in-body `From:`, commit body, Signed-off-by, the
+    // `---` separator, notes, and the diffstat (everything above the diff). ----
+    let mut message_section = String::new();
     if in_body_from {
-        out.push_str(&format!("From: {author_name} <{author_email}>\n\n"));
+        message_section.push_str(&format!("From: {author_name} <{author_email}>\n\n"));
     }
-
-    // ---- Commit message body ----
     let body = raw_msg
         .lines()
         .skip(1) // skip the subject line
@@ -619,41 +652,66 @@ async fn format_patch_body(
         .trim()
         .to_string();
     if !body.is_empty() {
-        out.push_str(&body);
-        out.push('\n');
+        message_section.push_str(&body);
+        message_section.push('\n');
     }
-
-    // ---- Signed-off-by ----
     if args.signoff {
         let (name, email) = resolve_signoff_identity().await?;
-        out.push_str(&format!("Signed-off-by: {name} <{email}>\n"));
+        message_section.push_str(&format!("Signed-off-by: {name} <{email}>\n"));
     }
-
-    // ---- "---" separator ----
-    out.push_str("---\n");
-
-    // ---- Notes (after `---`, before the diffstat — matching Git) ----
+    message_section.push_str("---\n");
     if let Some(block) = render_notes_block(&args.notes, &commit.id.to_string()).await? {
-        out.push_str(&block);
+        message_section.push_str(&block);
     }
-
-    // ---- Diffstat ----
     if !args.no_stat
         && let Ok(stats) = log::compute_commit_stat(commit, vec![]).await
     {
         let stat_text = format_diffstat_plain(&stats);
         if !stat_text.is_empty() {
-            out.push_str(&stat_text);
-            out.push('\n');
+            message_section.push_str(&stat_text);
+            message_section.push('\n');
         }
     }
 
     // ---- Unified diff ----
     let diff = log::generate_diff(commit, vec![]).await?;
-    out.push_str(&diff);
 
-    // ---- Footer ----
-    push_signature(&mut out, args);
+    if let Some(disposition) = attach_disposition {
+        // MIME multipart assembly (byte-compatible with `git format-patch --attach`).
+        let slug = patch_slug(commit, args);
+        let filename = patch_filename(
+            args.numbered,
+            patch_num,
+            total,
+            start_num,
+            &slug,
+            &args.suffix,
+            args.numbered_files,
+        );
+        out.push_str("This is a multi-part message in MIME format.\n");
+        out.push_str(&format!("--{boundary}\n"));
+        out.push_str("Content-Type: text/plain; charset=UTF-8; format=fixed\n");
+        out.push_str("Content-Transfer-Encoding: 8bit\n\n");
+        out.push('\n');
+        // Normalize the message-part's trailing newlines so exactly two blank
+        // lines separate it from the next boundary (matching Git), regardless of
+        // how many trailing newlines the diffstat left.
+        out.push_str(message_section.trim_end_matches('\n'));
+        out.push_str(&format!("\n\n\n--{boundary}\n"));
+        out.push_str(&format!(
+            "Content-Type: text/x-patch; name=\"{filename}\"\n"
+        ));
+        out.push_str("Content-Transfer-Encoding: 8bit\n");
+        out.push_str(&format!(
+            "Content-Disposition: {disposition}; filename=\"{filename}\"\n\n"
+        ));
+        out.push_str(&diff);
+        out.push_str(&format!("\n--{boundary}--\n"));
+    } else {
+        out.push_str(&message_section);
+        out.push_str(&diff);
+        push_signature(&mut out, args);
+    }
 
     Ok(out)
 }

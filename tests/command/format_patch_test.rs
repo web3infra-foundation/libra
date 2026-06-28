@@ -390,6 +390,111 @@ fn notes_malformed_ref_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
+// --attach / --inline
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn attach_wraps_patch_in_mime_multipart() {
+    let repo = repo_with_commits(1);
+    let out = run_libra_command(
+        &["format-patch", "--stdout", "--attach", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "format-patch --attach");
+    let body = String::from_utf8_lossy(&out.stdout);
+
+    // multipart envelope: header, intro line, both parts, closing boundary.
+    assert!(
+        body.contains("Content-Type: multipart/mixed; boundary=\"------------libra "),
+        "missing multipart Content-Type: {body}"
+    );
+    assert!(
+        body.contains("This is a multi-part message in MIME format."),
+        "missing MIME intro line: {body}"
+    );
+    // text/plain part holds the log + diffstat.
+    assert!(
+        body.contains("Content-Type: text/plain; charset=UTF-8; format=fixed"),
+        "missing text/plain part: {body}"
+    );
+    // text/x-patch attachment part holds the diff.
+    assert!(
+        body.contains("Content-Type: text/x-patch; name=\"0001-")
+            && body.contains("Content-Disposition: attachment; filename=\"0001-"),
+        "missing attachment part: {body}"
+    );
+    assert!(
+        body.contains("diff --git "),
+        "diff missing from body: {body}"
+    );
+    // closing boundary terminates the multipart.
+    assert!(
+        body.contains("------------libra ") && body.trim_end().ends_with("--"),
+        "missing closing boundary: {body}"
+    );
+}
+
+#[test]
+#[serial]
+fn inline_uses_inline_content_disposition() {
+    let repo = repo_with_commits(1);
+    let out = run_libra_command(
+        &["format-patch", "--stdout", "--inline", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_cli_success(&out, "format-patch --inline");
+    let body = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        body.contains("Content-Disposition: inline; filename=\"0001-"),
+        "inline should use inline disposition: {body}"
+    );
+    assert!(
+        !body.contains("Content-Disposition: attachment"),
+        "inline must not use attachment disposition: {body}"
+    );
+}
+
+#[test]
+#[serial]
+fn attach_and_inline_are_mutually_exclusive() {
+    let repo = repo_with_commits(1);
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "--stdout",
+            "--attach",
+            "--inline",
+            "HEAD~1..HEAD",
+        ],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "--attach with --inline should be rejected: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn no_attach_stays_plain_text() {
+    let repo = repo_with_commits(1);
+    let out = run_libra_command(&["format-patch", "--stdout", "HEAD~1..HEAD"], repo.path());
+    assert_cli_success(&out, "format-patch plain");
+    let body = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        body.contains("Content-Type: text/plain; charset=UTF-8\n"),
+        "default output should be plain text: {body}"
+    );
+    assert!(
+        !body.contains("multipart/mixed"),
+        "default output must not be multipart: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // JSON output
 // ---------------------------------------------------------------------------
 

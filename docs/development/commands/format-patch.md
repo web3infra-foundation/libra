@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`；`--signature-file <file>`；`--encode-email-headers`/`--no-encode-email-headers`），merge 提交默认跳过。收件人头 `--to`/`--cc`（可重复，按 git 折叠续行，置于 MIME 头之后，cover letter 同样输出）与 `--no-to`/`--no-cc`（抑制——Libra 无 `format.to`/`format.cc` 配置可重置）已实现。`--from [<ident>]`（改写 `From:` 头为给定身份，无值时用 committer 配置身份；与提交作者不同则将原作者保留为 in-body `From:` 供 `git am` 还原）已实现。`--notes[=<ref>]`（在 `---` 之后、diffstat 之前附加 notes，复用 notes 子系统）已实现。未实现的 Git 选项包括 `--attach`、`--inline`、`--base`、`--interdiff`、`--range-diff`（`--force` 非 Git format-patch 标志）。
+- 兼容级别：`partial`。核心补丁导出能力已公开，支持 15+ 参数（含 `--suffix <sfx>`，默认 `.patch`；`--zero-commit`；`--signature`/`--no-signature`；`--signature-file <file>`；`--encode-email-headers`/`--no-encode-email-headers`），merge 提交默认跳过。收件人头 `--to`/`--cc`（可重复，按 git 折叠续行，置于 MIME 头之后，cover letter 同样输出）与 `--no-to`/`--no-cc`（抑制——Libra 无 `format.to`/`format.cc` 配置可重置）已实现。`--from [<ident>]`（改写 `From:` 头为给定身份，无值时用 committer 配置身份；与提交作者不同则将原作者保留为 in-body `From:` 供 `git am` 还原）已实现。`--notes[=<ref>]`（在 `---` 之后、diffstat 之前附加 notes，复用 notes 子系统）已实现。`--attach` / `--inline`（将补丁包成 `multipart/mixed` MIME：log+diffstat 为 `text/plain` part，diff 为 `text/x-patch` part，`Content-Disposition` 分别为 `attachment`/`inline`；boundary 取工具版本，二者互斥）已实现。未实现的 Git 选项包括 `--base`、`--interdiff`、`--range-diff`（`--force` 非 Git format-patch 标志）。
 
 ## 设计方案
 
@@ -50,13 +50,13 @@ flowchart TD
 - 公开状态：已公开；模块状态：`src/command/mod.rs` 导出 `format_patch`，`src/cli.rs::Commands::FormatPatch` 负责 CLI 接入。
 - 用户文档：`docs/commands/format-patch.md`。
 - Synopsis：`libra format-patch [OPTIONS] [revision-range]`。
-- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`--to <ADDRESS>`、`--cc <ADDRESS>`、`--no-to`、`--no-cc`、`--from [<IDENT>]`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`、`--zero-commit`、`--signature <SIGNATURE>`、`--no-signature`、`--signature-file <FILE>`、`--encode-email-headers` / `--no-encode-email-headers`、`--numbered-files`。`--signature-file` 在 `execute_safe` 早期读文件并填入 `signature` 槽（与 `--signature` 互斥，trim 尾换行）；`--encode-email-headers` 经 `encode_email_header` 对含非 ASCII 的 `From` 名称与 `Subject` 做整值 RFC 2047 Q 编码（`=?UTF-8?q?...?=`），纯 ASCII 或未开启时原样输出。
+- 公开参数包括：`[revision-range]`、`-o, --output-directory <DIR>`、`--stdout`、`-n, --numbered`、`--start-number <N>`、`--subject-prefix <PREFIX>`、`--cover-letter`、`--thread` / `--no-thread`、`--in-reply-to <MESSAGE_ID>`、`--to <ADDRESS>`、`--cc <ADDRESS>`、`--no-to`、`--no-cc`、`--from [<IDENT>]`、`-v, --reroll-count <N>`、`-s, --signoff`、`--full-index`、`--no-stat`、`--keep-subject`、`--suffix <SFX>`、`--zero-commit`、`--signature <SIGNATURE>`、`--no-signature`、`--signature-file <FILE>`、`--encode-email-headers` / `--no-encode-email-headers`、`--numbered-files`、`--notes [<REF>]`、`--attach`、`--inline`。`--signature-file` 在 `execute_safe` 早期读文件并填入 `signature` 槽（与 `--signature` 互斥，trim 尾换行）；`--encode-email-headers` 经 `encode_email_header` 对含非 ASCII 的 `From` 名称与 `Subject` 做整值 RFC 2047 Q 编码（`=?UTF-8?q?...?=`），纯 ASCII 或未开启时原样输出。
 
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| Git flag | `--attach` / `--inline` / `--no-attach`（MIME 附件/内联模式） | 未公开；当前固定输出 `text/plain; charset=UTF-8` 内联，不加 MIME multipart。命令层。 |
+| ✅ 已实现 | `--attach` / `--inline`（MIME 附件/内联模式） | 已公开：`format_patch_body` 在 `--attach`/`--inline` 下输出 `multipart/mixed`——`Content-Type` 头改为 `multipart/mixed; boundary="------------libra <ver>"`，正文为 “This is a multi-part message in MIME format.” + `text/plain`（log+`---`+notes+diffstat）part + `text/x-patch`（diff，`name=`/`filename=` 取补丁文件名）part + 关闭 boundary；`--attach` 用 `Content-Disposition: attachment`，`--inline` 用 `inline`，二者 clap `conflicts_with` 互斥（违反报 `LBR-CLI-002`/退出 129）。与 git `format-patch --attach` 结构字节对齐（boundary 取版本而非 git 版本串）。带集成测试 `attach_wraps_patch_in_mime_multipart`、`inline_uses_inline_content_disposition`、`attach_and_inline_are_mutually_exclusive`、`no_attach_stays_plain_text`。`--no-attach` 为默认行为，未单列。 |
 | ✅ 已实现 | `--suffix <sfx>`（文件名后缀，默认 `.patch`） | 已公开：通过 `patch_filename` 的 `suffix` 参数与 cover-letter 列表统一使用；默认 `.patch` 保持原行为。带集成测试（`suffix_changes_patch_filename_extension`）。 |
 | ✅ 已实现 | `--signature <sig>` / `--no-signature`（自定义/省略签名） | 已公开：`push_signature` 统一两处页脚（补丁正文 + cover letter）——`--no-signature` 完全省略 `-- ` 页脚；`--signature <s>` 设置文本；默认仍为 libra 版本号。带集成测试（`signature_controls_patch_footer`）。 |
 | ✅ 已实现 | `--signature-file <file>`（从文件读取签名） | 已公开：`execute_safe` 早期读文件内容（trim 尾换行）填入 `signature` 槽，与 `--signature` 互斥，`--no-signature` 仍优先；读失败报 `LBR-IO-001`。带集成测试（`signature_file_sets_the_footer`）。 |
