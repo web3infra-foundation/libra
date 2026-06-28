@@ -62,6 +62,10 @@ pub struct RebaseState {
     pub current_head: ObjectHash,
     /// Whether fixup!/squash! commits should be folded during this rebase.
     pub autosquash: bool,
+    /// How to handle commits that *become* empty after replay (Git's `--empty`).
+    /// Must survive a conflict + `--continue`, so a later become-empty commit in
+    /// the sequence is dropped/kept the same way the start invocation requested.
+    pub empty_mode: RebaseEmptyMode,
 }
 
 impl RebaseState {
@@ -201,6 +205,18 @@ impl RebaseState {
                 .await
                 .map_err(|e| format!("failed to add rebase_state.todo_actions: {e}"))?;
         }
+        if !columns.contains("empty_mode") {
+            // Default `keep` preserves Libra's existing behavior (replay become-empty
+            // commits) for any state row written before this column existed.
+            let stmt = Statement::from_string(
+                DbBackend::Sqlite,
+                "ALTER TABLE rebase_state ADD COLUMN empty_mode TEXT NOT NULL DEFAULT 'keep'"
+                    .to_string(),
+            );
+            db.execute(stmt)
+                .await
+                .map_err(|e| format!("failed to add rebase_state.empty_mode: {e}"))?;
+        }
         Ok(())
     }
 
@@ -220,7 +236,7 @@ impl RebaseState {
         let stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
-                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha, autosquash, todo_actions
+                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha, autosquash, todo_actions, empty_mode
                 FROM rebase_state
                 LIMIT 1
             "#
@@ -261,6 +277,12 @@ impl RebaseState {
         let todo_actions_str: String = row
             .try_get_by_index(8)
             .map_err(|e| format!("invalid todo_actions: {e}"))?;
+        let empty_mode_str: String = row
+            .try_get_by_index(9)
+            .map_err(|e| format!("invalid empty_mode: {e}"))?;
+        // Unknown/legacy values fall back to `keep` (Libra's pre-feature behavior).
+        let empty_mode =
+            parse_rebase_empty_mode(empty_mode_str.trim()).unwrap_or(RebaseEmptyMode::Keep);
 
         let onto =
             ObjectHash::from_str(onto_str.trim()).map_err(|e| format!("Invalid onto hash: {e}"))?;
@@ -291,6 +313,7 @@ impl RebaseState {
             stopped_sha,
             current_head,
             autosquash,
+            empty_mode,
         }))
     }
 
@@ -317,12 +340,16 @@ impl RebaseState {
             None => Value::String(None),
         };
 
+        let empty_mode_value = match state.empty_mode {
+            RebaseEmptyMode::Drop => "drop",
+            RebaseEmptyMode::Keep => "keep",
+        };
         let insert_stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r#"
                 INSERT INTO rebase_state
-                (head_name, onto, orig_head, current_head, todo, todo_actions, done, stopped_sha, autosquash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (head_name, onto, orig_head, current_head, todo, todo_actions, done, stopped_sha, autosquash, empty_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
             [
                 state.head_name.clone().into(),
@@ -334,6 +361,7 @@ impl RebaseState {
                 done.into(),
                 stopped_value,
                 (state.autosquash as i64).into(),
+                empty_mode_value.into(),
             ],
         );
 
@@ -423,6 +451,9 @@ impl RebaseState {
             stopped_sha,
             current_head,
             autosquash: false,
+            // Legacy on-disk rebase state predates `--empty`; default to keep
+            // (Libra's pre-feature behavior).
+            empty_mode: RebaseEmptyMode::Keep,
         })
     }
 
@@ -529,6 +560,57 @@ pub enum ReplayResult {
         kind: ReplayErrorKind,
         detail: String,
     },
+    /// The commit *became* empty after replay (its merged tree equals the new
+    /// parent's tree, though the original commit was not itself empty) and the
+    /// effective `--empty` mode is `drop`: skip it without creating a commit. The
+    /// index/worktree already match the new parent (the merged tree is identical),
+    /// so no mutation is needed. Carries the dropped commit's subject for reporting.
+    BecameEmptyDropped { subject: String },
+}
+
+/// Policy for a commit that *becomes* empty after replay (Git's `--empty`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseEmptyMode {
+    /// Skip the become-empty commit (`--empty=drop`, Git's non-interactive default).
+    Drop,
+    /// Record the now-empty commit (`--empty=keep`; Libra's default when `--empty`
+    /// is omitted).
+    Keep,
+}
+
+/// Parse a `--empty=<mode>` value. Only `drop`/`keep` are supported; Git's
+/// `stop`/`ask` (halt for the user to decide) require an interactive-style
+/// halt-on-empty resume flow Libra's non-interactive rebase does not have.
+/// `None` for an unrecognized or unsupported mode (the caller reports it).
+fn parse_rebase_empty_mode(value: &str) -> Option<RebaseEmptyMode> {
+    match value {
+        "drop" => Some(RebaseEmptyMode::Drop),
+        "keep" => Some(RebaseEmptyMode::Keep),
+        _ => None,
+    }
+}
+
+/// Resolve the effective `--empty` mode for a rebase. Omitted → `keep` (Libra's
+/// default — an intentional divergence from Git, which drops). `drop`/`keep` are
+/// supported; `stop`/`ask` are rejected (no halt-on-empty resume flow); any other
+/// value is a usage error. All rejections are `LBR-CLI-002` (exit 129).
+fn resolve_rebase_empty_mode(args: &RebaseArgs) -> CliResult<RebaseEmptyMode> {
+    let Some(raw) = args.empty.as_deref() else {
+        return Ok(RebaseEmptyMode::Keep);
+    };
+    if let Some(mode) = parse_rebase_empty_mode(raw) {
+        return Ok(mode);
+    }
+    let hint = if matches!(raw, "stop" | "ask") {
+        "Libra's non-interactive rebase has no halt-on-empty flow; use --empty=drop or --empty=keep"
+    } else {
+        "valid values are drop, keep (Git's stop/ask are not supported)"
+    };
+    Err(
+        CliError::command_usage(format!("unrecognized --empty mode '{raw}'"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(hint),
+    )
 }
 
 /// Categorizes the cause of a non-conflict failure inside
@@ -632,6 +714,7 @@ EXAMPLES:
     libra rebase --onto main dev  Replay dev..HEAD onto main, keeping the upstream range
     libra rebase --keep-empty main Keep empty commits while replaying (Libra's default)
     libra rebase --no-keep-empty main  Drop commits that are already empty in the source
+    libra rebase --empty=drop main  Drop commits that become empty after replay (already upstream)
     libra rebase --continue       Resume an in-progress rebase after fixing conflicts
     libra rebase --skip           Drop the current conflicting commit and continue
     libra rebase --abort          Restore the original branch and clear rebase state
@@ -691,22 +774,31 @@ pub struct RebaseArgs {
     /// Keep commits that begin empty (already empty before replay) rather than
     /// dropping them. Accepted for Git parity and is a no-op: Libra's rebase
     /// already keeps empty commits by default, so this matches existing behavior.
-    /// Toggle pair with `--no-keep-empty`; the last one wins. (Git's `--empty=drop`,
-    /// which drops commits that *become* empty after replay, is a distinct concept
-    /// and is not implemented.)
+    /// Toggle pair with `--no-keep-empty`; the last one wins. (This controls
+    /// commits that *begin* empty; `--empty=<mode>` controls commits that *become*
+    /// empty after replay.)
     #[clap(long = "keep-empty", overrides_with = "no_keep_empty")]
     pub keep_empty: bool,
 
     /// Drop commits that begin empty (their tree equals their parent's — they
     /// introduce no change) instead of replaying them. Toggle pair with
     /// `--keep-empty`; the last one wins. (Only commits that are ALREADY empty are
-    /// dropped; Git's `--empty=drop`, for commits that *become* empty after replay,
-    /// is not implemented.)
+    /// dropped here; `--empty=<mode>` handles commits that *become* empty after
+    /// replay.)
     #[clap(long = "no-keep-empty", overrides_with = "keep_empty")]
     pub no_keep_empty: bool,
+
+    /// How to handle a commit that *becomes* empty after replay (its changes are
+    /// already present on the new base): `drop` skips it, `keep` records the empty
+    /// commit. Omitted, Libra keeps it (an intentional divergence — Git drops by
+    /// default; pass `--empty=drop` for Git's behavior). Git's `stop`/`ask` (halt
+    /// for the user to decide) are not supported: Libra's non-interactive rebase
+    /// has no halt-on-empty resume flow.
+    #[clap(long = "empty", value_name = "mode")]
+    pub empty: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct RebaseOutput {
     action: String,
     status: String,
@@ -726,6 +818,10 @@ struct RebaseOutput {
     restored: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     applied_commits: Vec<RebaseAppliedCommitOutput>,
+    /// Commits skipped under `--empty=drop` (became empty after replay). Additive;
+    /// absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dropped_commits: Vec<RebaseDroppedCommitOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -741,9 +837,17 @@ struct RebaseAppliedCommitOutput {
     subject: String,
 }
 
+/// A commit skipped under `--empty=drop` (it became empty after replay).
+#[derive(Debug, Clone, Serialize)]
+struct RebaseDroppedCommitOutput {
+    commit: String,
+    subject: String,
+}
+
 #[derive(Debug, Default)]
 struct RebaseReplaySummary {
     applied_commits: Vec<RebaseAppliedCommitOutput>,
+    dropped_commits: Vec<RebaseDroppedCommitOutput>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -975,6 +1079,9 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
     }
 
     preflight_rebase(&args).await?;
+    // Validate `--empty` before any dispatch (start or sequencer control) so a bad
+    // mode fails fast (exit 129) rather than slipping through.
+    let empty_mode = resolve_rebase_empty_mode(&args)?;
     if args.abort {
         let result = run_rebase_abort().await.map_err(CliError::from)?;
         return render_rebase_output(&result, output);
@@ -1000,6 +1107,7 @@ pub async fn execute_safe(args: RebaseArgs, output: &OutputConfig) -> CliResult<
             args.autosquash,
             args.reapply_cherry_picks,
             args.no_keep_empty,
+            empty_mode,
         )
         .await
         .map_err(CliError::from)?;
@@ -1067,6 +1175,12 @@ fn render_rebase_output(result: &RebaseOutput, output: &OutputConfig) -> CliResu
         }
     }
 
+    for dropped in &result.dropped_commits {
+        println!(
+            "dropping {} {} -- patch contents already upstream",
+            dropped.commit, dropped.subject
+        );
+    }
     for applied in &result.applied_commits {
         println!("Applied: {} {}", short_id(&applied.commit), applied.subject);
     }
@@ -1110,6 +1224,12 @@ fn render_rebase_start_output(result: &RebaseOutput) {
                 println!(
                     "Rebasing {replay_count} commits from `{}` onto `{upstream}`...",
                     result.branch
+                );
+            }
+            for dropped in &result.dropped_commits {
+                println!(
+                    "dropping {} {} -- patch contents already upstream",
+                    dropped.commit, dropped.subject
                 );
             }
             for applied in &result.applied_commits {
@@ -1432,6 +1552,7 @@ async fn run_rebase_start(
     autosquash: bool,
     _reapply_cherry_picks: bool,
     no_keep_empty: bool,
+    empty_mode: RebaseEmptyMode,
 ) -> Result<RebaseOutput, RebaseError> {
     let db = get_db_conn_instance().await;
 
@@ -1551,6 +1672,7 @@ async fn run_rebase_start(
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
+            dropped_commits: Vec::new(),
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
@@ -1570,6 +1692,7 @@ async fn run_rebase_start(
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
+            dropped_commits: Vec::new(),
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
@@ -1626,6 +1749,7 @@ async fn run_rebase_start(
             previous_commit: Some(head_to_rebase_id.to_string()),
             restored: None,
             applied_commits: Vec::new(),
+            dropped_commits: Vec::new(),
             skipped_commit: None,
             skipped_subject: None,
             remaining: Some(0),
@@ -1684,6 +1808,7 @@ async fn run_rebase_start(
         stopped_sha: None,
         current_head: newbase_id,
         autosquash,
+        empty_mode,
     };
 
     state.save().await.map_err(RebaseError::StateSave)?;
@@ -1703,6 +1828,7 @@ async fn run_rebase_start(
         previous_commit: Some(head_to_rebase_id.to_string()),
         restored: None,
         applied_commits: replay.applied_commits,
+        dropped_commits: replay.dropped_commits,
         skipped_commit: None,
         skipped_subject: None,
         remaining: Some(state.todo.len()),
@@ -1739,7 +1865,9 @@ pub(crate) struct PullRebaseSummary {
 /// with structured hints — pull just wraps it in its own error
 /// variant so the `phase=rebase` detail can be attached.
 pub(crate) async fn run_rebase_for_pull(upstream: &str) -> Result<PullRebaseSummary, RebaseError> {
-    let output = run_rebase_start(upstream, None, false, false, false).await?;
+    // `pull --rebase` keeps Libra's default (keep become-empty commits).
+    let output =
+        run_rebase_start(upstream, None, false, false, false, RebaseEmptyMode::Keep).await?;
     let old_commit = output
         .previous_commit
         .clone()
@@ -1779,7 +1907,38 @@ async fn continue_replay(
             .front()
             .copied()
             .unwrap_or(RebaseTodoAction::Pick);
-        match replay_commit_with_conflict_detection(&commit_id, &state.current_head, action).await {
+        match replay_commit_with_conflict_detection(
+            &commit_id,
+            &state.current_head,
+            action,
+            state.empty_mode,
+        )
+        .await
+        {
+            ReplayResult::BecameEmptyDropped { subject } => {
+                // `--empty=drop`: the commit became empty after replay; skip it
+                // without advancing `current_head` (the new parent is unchanged).
+                state.todo.pop_front();
+                state.todo_actions.pop_front();
+                state.stopped_sha = None;
+                if emit_human {
+                    println!(
+                        "dropping {} {} -- patch contents already upstream",
+                        commit_id, subject
+                    );
+                }
+                summary.dropped_commits.push(RebaseDroppedCommitOutput {
+                    commit: commit_id.to_string(),
+                    subject,
+                });
+                if let Err(e) = state.save().await {
+                    if emit_human {
+                        emit_warning(format!("failed to save rebase state: {}", e));
+                    } else {
+                        return Err(RebaseError::StateSave(e));
+                    }
+                }
+            }
             ReplayResult::Success(replayed_commit_id) => {
                 let subject = commit_subject_lossy(&commit_id, emit_human);
                 state.current_head = replayed_commit_id;
@@ -1975,6 +2134,7 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
     let branch = state.head_name.clone();
     let onto_display = short_object_id(&state.onto);
     let mut applied_commits = Vec::new();
+    let mut dropped_commits = Vec::new();
 
     if let Some(stopped_sha) = state.stopped_sha {
         // Create a commit from the current index after the user has resolved
@@ -2035,6 +2195,7 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
         state.save().await.map_err(RebaseError::StateSave)?;
         let replay = continue_replay(&mut state, &branch, &onto_display, false).await?;
         applied_commits.extend(replay.applied_commits);
+        dropped_commits.extend(replay.dropped_commits);
     }
 
     Ok(RebaseOutput {
@@ -2049,6 +2210,7 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
         previous_commit: Some(previous_commit),
         restored: None,
         applied_commits,
+        dropped_commits,
         skipped_commit: None,
         skipped_subject: None,
         remaining: Some(state.todo.len()),
@@ -2159,6 +2321,7 @@ async fn run_rebase_abort() -> Result<RebaseOutput, RebaseError> {
         previous_commit: Some(state.current_head.to_string()),
         restored: Some(true),
         applied_commits: Vec::new(),
+        dropped_commits: Vec::new(),
         skipped_commit: None,
         skipped_subject: None,
         remaining: None,
@@ -2212,6 +2375,7 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         .map_err(|e| RebaseError::WorkdirReset(e.to_string()))?;
 
     let mut applied_commits = Vec::new();
+    let mut dropped_commits = Vec::new();
     if state.todo.is_empty() {
         finalize_rebase(&state, false)
             .await
@@ -2220,6 +2384,7 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         state.save().await.map_err(RebaseError::StateSave)?;
         let replay = continue_replay(&mut state, &branch, &onto_display, false).await?;
         applied_commits.extend(replay.applied_commits);
+        dropped_commits.extend(replay.dropped_commits);
     }
 
     Ok(RebaseOutput {
@@ -2234,6 +2399,7 @@ async fn run_rebase_skip() -> Result<RebaseOutput, RebaseError> {
         previous_commit: Some(previous_commit),
         restored: None,
         applied_commits,
+        dropped_commits,
         skipped_commit: Some(skipped_sha.to_string()),
         skipped_subject,
         remaining: Some(state.todo.len()),
@@ -3328,6 +3494,7 @@ async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
     action: RebaseTodoAction,
+    empty_mode: RebaseEmptyMode,
 ) -> ReplayResult {
     let index_file = path::index();
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
@@ -3520,6 +3687,21 @@ async fn replay_commit_with_conflict_detection(
         Ok(id) => id,
         Err(e) => return ReplayResult::internal(ReplayErrorKind::TreeCreate, e.to_string()),
     };
+
+    // `--empty=drop`: a commit that BECOMES empty after replay (the merged tree
+    // equals the new parent's tree — its changes are already on the new base) is
+    // skipped. This is distinct from a commit that BEGINS empty (handled by
+    // `--no-keep-empty` up front): `their_tree != base_tree` confirms the original
+    // commit DID introduce a change, so emptiness arose from the replay. The
+    // index/worktree already equal the new parent (new_tree == our_tree), so no
+    // mutation is needed before skipping.
+    if empty_mode == RebaseEmptyMode::Drop
+        && new_tree_id == our_tree.id
+        && their_tree.id != base_tree.id
+    {
+        let subject = commit_subject_from_message(&commit_to_replay.message);
+        return ReplayResult::BecameEmptyDropped { subject };
+    }
 
     let new_commit =
         match create_replayed_commit(&commit_to_replay, new_tree_id, *new_parent_id, action) {

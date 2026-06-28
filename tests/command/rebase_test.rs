@@ -104,6 +104,7 @@ async fn test_rebase_json_abort_outputs_restored_branch() {
         stopped_sha: None,
         current_head: head,
         autosquash: false,
+        empty_mode: libra::command::rebase::RebaseEmptyMode::Keep,
     }
     .save()
     .await
@@ -180,6 +181,7 @@ fn test_rebase_machine_abort_outputs_restored_branch() {
                 stopped_sha: None,
                 current_head: head,
                 autosquash: false,
+                empty_mode: libra::command::rebase::RebaseEmptyMode::Keep,
             }
             .save()
             .await
@@ -1413,6 +1415,7 @@ async fn test_basic_rebase() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1619,6 +1622,7 @@ async fn test_rebase_preserves_untracked_files() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1734,6 +1738,7 @@ async fn test_rebase_already_up_to_date() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1902,6 +1907,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -1927,6 +1933,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2111,6 +2118,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2147,6 +2155,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         stopped_sha: None,
         current_head: rebased_head,
         autosquash: false,
+        empty_mode: libra::command::rebase::RebaseEmptyMode::Keep,
     };
     state
         .save()
@@ -2163,6 +2172,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2240,6 +2250,7 @@ async fn test_rebase_continue_no_rebase() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2299,6 +2310,7 @@ async fn test_rebase_skip_no_rebase() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2470,6 +2482,7 @@ async fn test_rebase_with_conflict_and_abort() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2502,6 +2515,7 @@ async fn test_rebase_with_conflict_and_abort() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2697,6 +2711,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2732,6 +2747,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2945,6 +2961,7 @@ async fn test_rebase_with_conflict_and_skip() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -2969,6 +2986,7 @@ async fn test_rebase_with_conflict_and_skip() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3150,6 +3168,7 @@ async fn test_rebase_with_conflict_and_continue() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3198,6 +3217,7 @@ async fn test_rebase_with_conflict_and_continue() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3459,6 +3479,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3484,6 +3505,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3677,6 +3699,7 @@ async fn test_rebase_state_persistence() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3719,6 +3742,7 @@ async fn test_rebase_state_persistence() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -3867,6 +3891,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4018,6 +4043,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4169,6 +4195,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4351,6 +4378,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4538,6 +4566,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4568,6 +4597,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4754,6 +4784,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4781,6 +4812,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4946,6 +4978,7 @@ async fn test_rebase_continue_requires_resolution() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4972,6 +5005,7 @@ async fn test_rebase_continue_requires_resolution() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -4998,6 +5032,7 @@ async fn test_rebase_continue_requires_resolution() {
         no_rerere_autoupdate: false,
         keep_empty: false,
         no_keep_empty: false,
+        empty: None,
         no_autostash: false,
         onto: None,
         branch: None,
@@ -5505,5 +5540,206 @@ fn test_rebase_no_keep_empty_all_empty_range_moves_branch_to_base() {
     assert!(
         !log.contains("empty-1") && !log.contains("empty-2"),
         "all start-empty commits must be dropped:\n{log}"
+    );
+}
+
+/// Build a repo where `topic` has a commit that BECOMES empty when rebased onto
+/// `main` (both add the identical change) plus a genuinely new commit. Leaves
+/// HEAD on `topic`, with `main` as the rebase upstream.
+fn build_become_empty_rebase_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "topic"], p),
+        "branch topic",
+    );
+    std::fs::write(p.join("shared.txt"), "X\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add topic X");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic adds X", "--no-verify"], p),
+        "commit topic X",
+    );
+    std::fs::write(p.join("shared.txt"), "X\nY\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add topic Y");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic adds Y", "--no-verify"], p),
+        "commit topic Y",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "X\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main X");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main adds X", "--no-verify"], p),
+        "commit main X",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "topic"], p), "switch topic");
+    repo
+}
+
+/// `--empty=drop` skips a commit that becomes empty after replay (its change is
+/// already on the new base), reporting the git-style `dropping … upstream`
+/// notice, while still replaying the genuinely-new commit.
+#[test]
+#[serial]
+fn test_rebase_empty_drop_skips_become_empty_commit() {
+    let repo = build_become_empty_rebase_repo();
+    let p = repo.path();
+    let out = run_libra_command(&["rebase", "--empty=drop", "main"], p);
+    assert_cli_success(&out, "rebase --empty=drop");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("dropping")
+            && stdout.contains("topic adds X")
+            && stdout.contains("already upstream"),
+        "--empty=drop reports the dropped become-empty commit:\n{stdout}"
+    );
+    let log =
+        String::from_utf8_lossy(&run_libra_command(&["log", "--pretty=%s"], p).stdout).into_owned();
+    assert!(
+        log.contains("topic adds Y"),
+        "the new commit is replayed:\n{log}"
+    );
+    assert!(
+        !log.contains("topic adds X"),
+        "the become-empty commit was dropped:\n{log}"
+    );
+    assert!(log.contains("main adds X"), "main's commit remains:\n{log}");
+}
+
+/// Without `--empty` (Libra's default) the become-empty commit is KEPT — an
+/// intentional divergence from Git, which drops it.
+#[test]
+#[serial]
+fn test_rebase_empty_default_keeps_become_empty_commit() {
+    let repo = build_become_empty_rebase_repo();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["rebase", "main"], p),
+        "rebase (default keep)",
+    );
+    let log =
+        String::from_utf8_lossy(&run_libra_command(&["log", "--pretty=%s"], p).stdout).into_owned();
+    assert!(
+        log.contains("topic adds X") && log.contains("topic adds Y"),
+        "default rebase keeps the become-empty commit:\n{log}"
+    );
+}
+
+/// `--empty=stop`/`--empty=ask` (valid Git modes Libra does not support) and any
+/// unknown value are usage errors (exit 129) naming `--empty`.
+#[test]
+#[serial]
+fn test_rebase_empty_invalid_mode_rejected() {
+    let repo = build_become_empty_rebase_repo();
+    let p = repo.path();
+    for mode in ["stop", "ask", "bogus"] {
+        let out = run_libra_command(&["rebase", &format!("--empty={mode}"), "main"], p);
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "--empty={mode} is a usage error: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--empty"),
+            "--empty={mode} error names --empty"
+        );
+    }
+}
+
+/// `--empty=drop` survives a conflict + `--continue`: the mode round-trips
+/// through `RebaseState`, so a LATER commit that becomes empty is dropped when
+/// the resume reaches it (not replayed as an empty commit).
+#[test]
+#[serial]
+fn test_rebase_empty_drop_survives_conflict_resume() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // topic: f1 conflicts on conflict.txt; f2 adds shared.txt=S (will become empty).
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "topic"], p),
+        "branch topic",
+    );
+    std::fs::write(p.join("conflict.txt"), "topic-line\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "conflict.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic f1", "--no-verify"], p),
+        "commit f1",
+    );
+    std::fs::write(p.join("shared.txt"), "S\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "topic f2 adds S", "--no-verify"], p),
+        "commit f2",
+    );
+    // main: conflicting edit to conflict.txt AND already add the identical shared.txt.
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("conflict.txt"), "main-line\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "add main edit",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edits conflict", "--no-verify"], p),
+        "commit main edit",
+    );
+    std::fs::write(p.join("shared.txt"), "S\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main S");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main adds S", "--no-verify"], p),
+        "commit main S",
+    );
+    assert_cli_success(&run_libra_command(&["switch", "topic"], p), "switch topic");
+
+    // Start rebase --empty=drop: f1 conflicts and stops with resumable state.
+    let start = run_libra_command(&["rebase", "--empty=drop", "main"], p);
+    assert_eq!(
+        start.status.code(),
+        Some(128),
+        "f1 conflict stops the rebase"
+    );
+    assert!(
+        String::from_utf8_lossy(&start.stderr).contains("--continue"),
+        "the conflict stop points at --continue (resumable state): {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    // Resolve f1 and continue; the resume reaches f2 (become-empty) and, because
+    // --empty=drop round-tripped through the state, drops it.
+    std::fs::write(p.join("conflict.txt"), "resolved\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "conflict.txt"], p),
+        "stage resolution",
+    );
+    let cont = run_libra_command(&["rebase", "--continue"], p);
+    assert_cli_success(&cont, "--continue drops the redundant f2 and finishes");
+    let cont_out = String::from_utf8_lossy(&cont.stdout);
+    assert!(
+        cont_out.contains("dropping")
+            && cont_out.contains("topic f2 adds S")
+            && cont_out.contains("already upstream"),
+        "the resumed become-empty f2 is reported as dropped:\n{cont_out}"
+    );
+    let log =
+        String::from_utf8_lossy(&run_libra_command(&["log", "--pretty=%s"], p).stdout).into_owned();
+    assert!(
+        log.contains("topic f1"),
+        "f1 (resolved) is replayed:\n{log}"
+    );
+    assert!(
+        !log.contains("topic f2 adds S"),
+        "the become-empty f2 was dropped on resume:\n{log}"
+    );
+    // State cleared (sequence complete): another --continue errors with no rebase.
+    let after = run_libra_command(&["rebase", "--continue"], p);
+    assert_ne!(
+        after.status.code(),
+        Some(0),
+        "no rebase in progress after completion"
+    );
+    assert!(
+        String::from_utf8_lossy(&after.stderr).contains("no rebase in progress"),
+        "state cleared after the sequence completes: {}",
+        String::from_utf8_lossy(&after.stderr)
     );
 }

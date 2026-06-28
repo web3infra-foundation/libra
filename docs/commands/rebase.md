@@ -8,7 +8,7 @@ Reapply commits on top of another base tip.
 
 ```
 libra rebase <upstream>
-libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty | --no-keep-empty] <upstream>
+libra rebase [--autosquash] [--reapply-cherry-picks] [--no-autostash] [--no-rerere-autoupdate] [--keep-empty | --no-keep-empty] [--empty=<mode>] <upstream>
 libra rebase --onto <newbase> <upstream> [<branch>]
 libra rebase --continue
 libra rebase --abort
@@ -39,7 +39,8 @@ Rebase state (the list of remaining and completed commits, the original HEAD, an
 | | `--no-autostash` | Do not stash and re-apply a dirty working tree around the rebase. Accepted no-op for Git parity: Libra's rebase never autostashes (it requires a clean tree). (Git's `--autostash` is not implemented.) |
 | | `--no-rerere-autoupdate` | Do not update the rerere index. Accepted no-op for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
 | | `--keep-empty` | Keep commits that begin empty (already empty before replay) rather than dropping them. Accepted no-op for Git parity: Libra's rebase already keeps empty commits by default. Toggle pair with `--no-keep-empty`; the last one wins. |
-| | `--no-keep-empty` | Drop commits that begin empty (their tree equals their parent's — they introduce no change) instead of replaying them. Toggle pair with `--keep-empty`. (Only commits that are *already* empty are dropped; the distinct `--empty=drop`, for commits that *become* empty after replay, is not implemented.) |
+| | `--no-keep-empty` | Drop commits that begin empty (their tree equals their parent's — they introduce no change) instead of replaying them. Toggle pair with `--keep-empty`. (This controls commits that *begin* empty; `--empty=<mode>` controls commits that *become* empty after replay.) |
+| | `--empty=<mode>` | How to handle a commit that *becomes* empty after replay (its change is already on the new base): `drop` skips it (HEAD does not advance; a `dropping <sha> <subject> -- patch contents already upstream` notice is printed), `keep` records the empty commit. Omitted, Libra **keeps** it — an intentional divergence from Git, which drops by default; pass `--empty=drop` for Git's behavior. The mode survives a conflict into `--continue`/`--skip`. Git's `stop`/`ask` (halt for you to decide) are not supported (Libra's non-interactive rebase has no halt-on-empty resume flow); they and any unknown value are usage errors (`LBR-CLI-002`, exit 129). |
 
 ### Option Details
 
@@ -362,6 +363,7 @@ Libra provides a middle ground: a linear rebase with conflict-stop semantics (fa
 | Reapply cherry-picks | Supported; Libra replays by default | `--reapply-cherry-picks` | N/A |
 | Rebase merges | Not supported | `--rebase-merges` | Default behavior |
 | Keep empty | `--keep-empty` (no-op; already keeps empty) / `--no-keep-empty` (drop start-empty commits) | `--keep-empty` / `--no-keep-empty` | Default keeps empty |
+| Empty mode | `--empty=<drop\|keep>` (become-empty; default **keep**) | `--empty=<drop\|keep\|stop>` (default drop) | N/A |
 | Force rebase | Not supported | `--force-rebase` | N/A |
 | Branch | `<branch>` (third positional) | `<branch>` (third positional) | `-s` / `--source` |
 | Revision set | Not supported | N/A | `-r` / `--revisions` |
