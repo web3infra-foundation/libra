@@ -43,6 +43,7 @@ EXAMPLES:
     libra for-each-ref --tags --sort=*objectsize  Sort tags by their dereferenced target's size
     libra for-each-ref --format='%(align:20,left)%(refname:short)%(end)%(objectname:short)'  Pad the ref name to a 20-column field
     libra for-each-ref --format='%(refname:short)%(if)%(HEAD)%(then) (current)%(end)'  Mark the checked-out branch conditionally
+    libra for-each-ref --format='%(refname:short) %(describe)'  Describe each ref's tip relative to the nearest tag
     libra for-each-ref --shell --format='%(refname)'  Shell-quote each field for eval
     libra for-each-ref --points-at HEAD List refs that point at HEAD
     libra for-each-ref --merged=main    List refs already merged into main
@@ -138,6 +139,12 @@ pub struct RefEntry {
     objecttype: String,
     #[serde(skip_serializing)]
     points_at: Vec<String>,
+    /// Precomputed `%(describe[:opts])` values, keyed by the atom's option string
+    /// (`""` for a bare `%(describe)`, e.g. `"tags"`/`"abbrev=4"` otherwise). Filled
+    /// by an async pass before rendering because `git describe` is async and the
+    /// render pipeline is synchronous; absent from the `--json` schema.
+    #[serde(skip)]
+    describe: HashMap<String, String>,
 }
 
 pub async fn execute(args: ForEachRefArgs) -> CliResult<()> {
@@ -145,7 +152,17 @@ pub async fn execute(args: ForEachRefArgs) -> CliResult<()> {
 }
 
 pub async fn execute_safe(args: ForEachRefArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = run_for_each_ref(&args).await?;
+    let mut result = run_for_each_ref(&args).await?;
+    // Precompute `%(describe[:opts])` values (async) before the sync render pass.
+    // Only for the human render path: `--json` ignores `--format` entirely (and the
+    // describe cache is `#[serde(skip)]`), and `--quiet` emits nothing — so neither
+    // should pay for, or be failed by, describe computation/validation.
+    if let Some(format) = &args.format
+        && !output.is_json()
+        && !output.quiet
+    {
+        populate_describe_cache(&mut result, format).await?;
+    }
     // Resolve the current HEAD branch so `%(HEAD)` can mark it with `*`.
     let head_refname = match Head::current().await {
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
@@ -443,6 +460,7 @@ fn direct_ref_entry(refname: String, objectname: String, objecttype: &str) -> Re
         points_at: vec![objectname.clone()],
         objectname,
         objecttype: objecttype.to_string(),
+        describe: HashMap::new(),
     }
 }
 
@@ -453,6 +471,7 @@ fn tag_ref_entry(tag: &tag::Tag) -> RefEntry {
         objectname,
         objecttype,
         points_at,
+        describe: HashMap::new(),
     }
 }
 
@@ -1089,6 +1108,101 @@ fn push_field(out: &mut String, value: &str, quote: Option<QuoteStyle>) {
     }
 }
 
+/// Parsed `%(describe:<opts>)` parameters: `(tags, abbrev, match_globs,
+/// exclude_globs)`.
+type DescribeOpts = (bool, Option<usize>, Vec<String>, Vec<String>);
+
+/// Parse a `%(describe:<opts>)` option string into the `git describe` parameters
+/// the atom exposes: `tags`, `abbrev=<n>`, and repeatable `match=<glob>` /
+/// `exclude=<glob>`. An unrecognized option is a usage error, matching Git's
+/// `fatal: unrecognized %(describe) argument`.
+fn parse_describe_options(opts: &str) -> CliResult<DescribeOpts> {
+    let mut tags = false;
+    let mut abbrev = None;
+    let mut match_patterns = Vec::new();
+    let mut exclude = Vec::new();
+    if !opts.is_empty() {
+        for part in opts.split(',') {
+            if part == "tags" {
+                tags = true;
+            } else if let Some(n) = part.strip_prefix("abbrev=") {
+                abbrev = Some(n.parse().map_err(|_| {
+                    CliError::command_usage(format!(
+                        "unrecognized %(describe) argument: abbrev={n}"
+                    ))
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                })?);
+            } else if let Some(p) = part.strip_prefix("match=") {
+                match_patterns.push(p.to_string());
+            } else if let Some(p) = part.strip_prefix("exclude=") {
+                exclude.push(p.to_string());
+            } else {
+                return Err(CliError::command_usage(format!(
+                    "unrecognized %(describe) argument: {part}"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
+        }
+    }
+    Ok((tags, abbrev, match_patterns, exclude))
+}
+
+/// Collect the distinct `%(describe[:opts])` option strings present in `format`
+/// (`""` for a bare `%(describe)`). `%(describexyz)` and other non-`describe`
+/// atoms are ignored.
+fn describe_specs_in_format(format: &str) -> Vec<String> {
+    let mut specs: Vec<String> = Vec::new();
+    let mut rest = format;
+    while let Some(idx) = rest.find("%(describe") {
+        let after = &rest[idx + "%(describe".len()..];
+        let Some(end) = after.find(')') else { break };
+        let inner = &after[..end];
+        // Accept only a bare `%(describe)` or `%(describe:...)`; anything else
+        // (e.g. `%(describexyz)`) is not a describe atom.
+        if inner.is_empty() || inner.starts_with(':') {
+            let opts = inner.strip_prefix(':').unwrap_or("").to_string();
+            if !specs.contains(&opts) {
+                specs.push(opts);
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    specs
+}
+
+/// Precompute every `%(describe[:opts])` value for each ref before the
+/// synchronous render pass. Option strings are validated up front (so a bad
+/// `%(describe:bogus)` fails even when no ref matches, matching Git); each
+/// (entry, spec) describe runs once and an unreachable-tag result is cached as
+/// the empty string.
+async fn populate_describe_cache(entries: &mut [RefEntry], format: &str) -> CliResult<()> {
+    let specs = describe_specs_in_format(format);
+    if specs.is_empty() {
+        return Ok(());
+    }
+    // Validate all option strings up front (independent of the ref set).
+    let parsed: Vec<(String, DescribeOpts)> = specs
+        .into_iter()
+        .map(|spec| parse_describe_options(&spec).map(|p| (spec, p)))
+        .collect::<CliResult<_>>()?;
+
+    for entry in entries.iter_mut() {
+        for (spec, (tags, abbrev, match_patterns, exclude)) in &parsed {
+            let value = super::describe::describe_commit_for_atom(
+                &entry.objectname,
+                *tags,
+                *abbrev,
+                match_patterns.clone(),
+                exclude.clone(),
+            )
+            .await?
+            .unwrap_or_default();
+            entry.describe.insert(spec.clone(), value);
+        }
+    }
+    Ok(())
+}
+
 fn render_output(
     entries: &[RefEntry],
     args: &ForEachRefArgs,
@@ -1184,12 +1298,14 @@ pub(crate) async fn render_ref_format_lines(
     format: &str,
     color_enabled: bool,
 ) -> CliResult<Vec<String>> {
-    let entries: Vec<RefEntry> = refs
+    let mut entries: Vec<RefEntry> = refs
         .iter()
         .map(|(refname, objectname)| {
             direct_ref_entry(refname.clone(), objectname.clone(), "commit")
         })
         .collect();
+    // Precompute `%(describe[:opts])` values (async) before the sync render pass.
+    populate_describe_cache(&mut entries, format).await?;
     let head_refname = match Head::current().await {
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
         Head::Detached(_) => None,
@@ -1530,6 +1646,14 @@ fn render_fragment(
             );
         } else if let Some(value) = date_atom_value(token, date_ctx) {
             push_field(&mut out, &value, quote);
+        } else if token == "describe" || token.starts_with("describe:") {
+            // `%(describe[:opts])`: the value was precomputed per ref (git describe
+            // is async, this render path is not), keyed by the verbatim option
+            // string. A commit with no reachable tag has an empty cached value,
+            // matching Git's empty `%(describe)` output.
+            let key = token.strip_prefix("describe:").unwrap_or("");
+            let value = entry.describe.get(key).map(String::as_str).unwrap_or("");
+            push_field(&mut out, value, quote);
         } else if let Some(spec) = token.strip_prefix("color:") {
             // Validate the spec regardless of color state (a bad `%(color:…)` is a
             // format error even when output is not colored, matching Git). The

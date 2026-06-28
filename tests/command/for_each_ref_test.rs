@@ -2530,3 +2530,164 @@ fn test_for_each_ref_raw_rejects_non_utf8() {
         "%(raw:size) is a positive byte count even for a binary object"
     );
 }
+
+#[test]
+fn test_for_each_ref_describe_atom() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    let p = temp.path();
+    let run = |a: &[&str]| run_libra_command(a, p);
+    run(&["config", "set", "user.name", "t"]);
+    run(&["config", "set", "user.email", "t@t"]);
+    fs::write(p.join("a.txt"), "1\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c1", "--no-verify"]);
+    // Annotated tag, then a second commit so the branch tip is 1 past the tag.
+    assert_cli_success(&run(&["tag", "-m", "rel", "v1.0"]), "annotated tag v1.0");
+    fs::write(p.join("a.txt"), "1\n2\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c2", "--no-verify"]);
+
+    let out = |args: &[&str]| {
+        let o = run(args);
+        (
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            o.status.code(),
+        )
+    };
+
+    // %(describe) of a commit one past the annotated tag: "v1.0-1-g<7hex>".
+    let (v, code) = out(&["for-each-ref", "--format=%(describe)", "refs/heads/main"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        v.starts_with("v1.0-1-g") && v.len() == "v1.0-1-g".len() + 7,
+        "%(describe) should be v1.0-1-g<7hex>: {v:?}"
+    );
+
+    // %(describe:abbrev=4) shortens the abbreviated-hash suffix to 4.
+    let (v4, _) = out(&[
+        "for-each-ref",
+        "--format=%(describe:abbrev=4)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        v4.starts_with("v1.0-1-g") && v4.len() == "v1.0-1-g".len() + 4,
+        "%(describe:abbrev=4) should be v1.0-1-g<4hex>: {v4:?}"
+    );
+
+    // %(describe:abbrev=0) collapses to the bare tag name.
+    let (v0, _) = out(&[
+        "for-each-ref",
+        "--format=%(describe:abbrev=0)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(v0, "v1.0", "%(describe:abbrev=0) is the tag name only");
+
+    // A lightweight tag is invisible to bare %(describe) (annotated-only) but
+    // visible to %(describe:tags).
+    assert_cli_success(&run(&["tag", "lw"]), "lightweight tag");
+    fs::write(p.join("a.txt"), "1\n2\n3\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "c3", "--no-verify"]);
+    let (with_tags, _) = out(&[
+        "for-each-ref",
+        "--format=%(describe:tags)",
+        "refs/heads/main",
+    ]);
+    assert!(
+        with_tags.starts_with("lw-") || with_tags.starts_with("v1.0-"),
+        "%(describe:tags) considers the lightweight tag: {with_tags:?}"
+    );
+
+    // An unrecognized option is a usage error (exit 129) — validated even when no
+    // ref matches.
+    let bogus = run(&[
+        "for-each-ref",
+        "--format=%(describe:bogus)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(
+        bogus.status.code(),
+        Some(129),
+        "bad %(describe) option exits 129"
+    );
+    assert!(
+        String::from_utf8_lossy(&bogus.stderr).contains("unrecognized %(describe) argument"),
+        "error names the unrecognized argument"
+    );
+    let bogus_empty = run(&[
+        "for-each-ref",
+        "--format=%(describe:bogus)",
+        "refs/tags/none",
+    ]);
+    assert_eq!(
+        bogus_empty.status.code(),
+        Some(129),
+        "%(describe) options are validated up front, even with no matching refs"
+    );
+
+    // `--json` ignores `--format` entirely (the describe cache is skipped from the
+    // JSON schema), so a bad %(describe) option must NOT fail a JSON listing.
+    let json_bogus = run(&[
+        "--json",
+        "for-each-ref",
+        "--format=%(describe:bogus)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(
+        json_bogus.status.code(),
+        Some(0),
+        "--json bypasses --format, so a bad %(describe) option does not fail it: {}",
+        String::from_utf8_lossy(&json_bogus.stderr)
+    );
+
+    // `--quiet` emits nothing and likewise must not be failed by describe
+    // validation/computation.
+    let quiet_bogus = run(&[
+        "--quiet",
+        "for-each-ref",
+        "--format=%(describe:bogus)",
+        "refs/heads/main",
+    ]);
+    assert_eq!(
+        quiet_bogus.status.code(),
+        Some(0),
+        "--quiet emits nothing and is not failed by a bad %(describe) option"
+    );
+    assert!(quiet_bogus.stdout.is_empty(), "--quiet produces no stdout");
+
+    // A commit with no reachable tag describes as an empty string. Craft a
+    // parentless root commit (a separate history with no ancestor tag) and point
+    // a branch at it — `checkout --orphan` is not available in Libra.
+    let tree = {
+        let cat = run(&["cat-file", "-p", "HEAD"]);
+        String::from_utf8_lossy(&cat.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("tree ").map(str::to_string))
+            .expect("HEAD has a tree")
+    };
+    let root = format!("tree {tree}\nauthor a <a@b> 1 +0000\ncommitter a <a@b> 1 +0000\n\nroot\n");
+    let craft = p.join("root.commit");
+    fs::write(&craft, root).unwrap();
+    let hashed = run(&[
+        "hash-object",
+        "-t",
+        "commit",
+        "--literally",
+        "-w",
+        craft.to_str().unwrap(),
+    ]);
+    assert_cli_success(&hashed, "hash-object root commit");
+    let oid = String::from_utf8_lossy(&hashed.stdout).trim().to_string();
+    assert_cli_success(
+        &run(&["branch", "rootless", &oid]),
+        "branch -> rootless commit",
+    );
+    let (orphan, code) = out(&[
+        "for-each-ref",
+        "--format=[%(describe)]",
+        "refs/heads/rootless",
+    ]);
+    assert_eq!(code, Some(0));
+    assert_eq!(orphan, "[]", "no reachable tag -> empty %(describe)");
+}

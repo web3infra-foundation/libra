@@ -140,6 +140,50 @@ pub async fn execute_safe(args: DescribeArgs, output: &OutputConfig) -> CliResul
     Ok(())
 }
 
+/// Describe a single commit for `for-each-ref`'s `%(describe)` atom.
+///
+/// Returns the describe string (e.g. `v1.0-2-gabc1234`), or `None` when no tag
+/// is reachable from the commit — Git's `%(describe)` renders an empty string in
+/// that case rather than failing. Mirrors the `git describe` options the atom
+/// exposes: `tags` (include lightweight tags), `abbrev=<n>`, and repeatable
+/// `match`/`exclude` glob filters. Genuine I/O or corruption errors propagate as
+/// a `CliError`.
+pub(crate) async fn describe_commit_for_atom(
+    commit: &str,
+    tags: bool,
+    abbrev: Option<usize>,
+    match_patterns: Vec<String>,
+    exclude: Vec<String>,
+) -> crate::utils::error::CliResult<Option<String>> {
+    let args = DescribeArgs {
+        commit: Some(commit.to_string()),
+        tags,
+        all: false,
+        abbrev,
+        always: false,
+        exact_match: false,
+        candidates: None,
+        long: false,
+        dirty: None,
+        first_parent: false,
+        match_patterns,
+        exclude,
+        contains: false,
+    };
+    match run_describe(args).await {
+        Ok(output) => Ok(Some(output.result)),
+        // No reachable tag for this commit -> empty `%(describe)` output, matching
+        // Git (these are not hard failures in the for-each-ref context).
+        Err(
+            DescribeError::NoNamesFound
+            | DescribeError::NoContainingTag { .. }
+            | DescribeError::NoExactMatch { .. },
+        ) => Ok(None),
+        // Real failures (bad I/O, corrupt object, malformed abbrev) propagate.
+        Err(other) => Err(describe_cli_error(other)),
+    }
+}
+
 async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeError> {
     let input = args.commit.unwrap_or_else(|| "HEAD".to_string());
     let start_hash = util::get_commit_base_typed(&input)
