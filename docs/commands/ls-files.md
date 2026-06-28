@@ -50,6 +50,7 @@ sparse-checkout integration remain deferred.
 | `-x`, `--exclude <pattern>` | Skip untracked files matching `<pattern>` (gitignore syntax) from the `--others` listing. Repeatable; supplements `--exclude-standard`. With `-i` the pattern instead defines the ignored set. |
 | `-X`, `--exclude-from <file>` | Read additional exclude patterns from `<file>` (one per line; `#` comments and blank lines skipped) and apply them like `-x`. Repeatable. |
 | `--error-unmatch` | Exit with `LBR-CLI-003` if any explicit pathspec matches no files in the selected result set. |
+| `--eol` | Prefix each cached entry with `i/<eol> w/<eol> attr/<attr>` line-ending info: `<eol>` is `lf`/`crlf`/`mixed`/`none`/`-text` (binary) for the index blob (`i/`) and the worktree file (`w/`). Byte-compatible with `git ls-files --eol`; `attr/` is always empty (Libra has no `.gitattributes`). |
 | `-z` | Emit NUL-delimited text records instead of newline-delimited output. Text mode only; rejects `--json` / `--machine`. |
 | `<pathspec>...` | Limit output to an exact file or directory prefix. Pathspecs resolve from the current working directory. |
 | `--json` | Emit the standard Libra JSON envelope. |
@@ -144,6 +145,7 @@ entries use `null` for fields that do not apply:
 | Explicit exclude file | `-X` / `--exclude-from <file>` | `-X` / `--exclude-from` | Different model |
 | Pathspec filters | `<pathspec>...` | Supported | Different model |
 | Unmatched pathspec failure | `--error-unmatch` | `--error-unmatch` | Different model |
+| Line-ending info | `--eol` (`attr/` always empty) | `--eol` | N/A |
 | NUL output | `-z` (text mode only) | `-z` | Different model |
 | Status tags | `-t` (H/R/C/?/M) | `-t` (H/S/M/R/C/K/?) | Different model |
 | Unmerged entries | `-u` / `--unmerged` | `-u` / `--unmerged` | Different model |

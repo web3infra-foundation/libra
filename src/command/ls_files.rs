@@ -8,14 +8,20 @@ use std::{
 };
 
 use clap::Parser;
-use git_internal::internal::{index::Index, object::blob::Blob};
+use git_internal::{
+    hash::ObjectHash,
+    internal::{index::Index, object::blob::Blob},
+};
 use serde::Serialize;
 
-use crate::utils::{
-    error::{CliError, CliResult, StableErrorCode},
-    ignore,
-    output::{OutputConfig, emit_json_data},
-    path, util,
+use crate::{
+    command::load_object,
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        ignore,
+        output::{OutputConfig, emit_json_data},
+        path, util,
+    },
 };
 
 /// `--help` examples for ls-files
@@ -37,7 +43,8 @@ EXAMPLES:
     libra ls-files -s                   Short output with stage info
     libra ls-files -s --abbrev=8        Abbreviate object names to 8 digits
     libra ls-files -t                   Prefix each path with a status tag
-    libra ls-files -u                   Show only unmerged (conflict) entries";
+    libra ls-files -u                   Show only unmerged (conflict) entries
+    libra ls-files --eol                Show index/worktree line-ending info per file";
 
 #[derive(Parser, Debug)]
 #[command(after_help = LS_FILES_EXAMPLES)]
@@ -115,6 +122,13 @@ pub struct LsFilesArgs {
     /// computing the shortest unique prefix.
     #[clap(long, value_name = "N", num_args = 0..=1, require_equals = true, default_missing_value = "7")]
     pub abbrev: Option<usize>,
+
+    /// Show line-ending info for each cached file: `i/<eol> w/<eol> attr/<attr>`
+    /// before the path, where `<eol>` is `lf`/`crlf`/`mixed`/`none`/`-text` for
+    /// the index blob (`i/`) and the worktree file (`w/`). Libra has no
+    /// `.gitattributes` support, so `attr/` is always empty.
+    #[clap(long)]
+    pub eol: bool,
 
     /// Limit output to files matching the given pathspec(s)
     #[clap(value_name = "pathspec")]
@@ -481,8 +495,18 @@ fn render_output(
         return Ok(());
     }
 
+    // `--eol` inserts a line-ending-info column (`i/<eol> w/<eol> attr/<attr>\t`)
+    // immediately before the path. It composes with `-t`/`-s`/`--stage` exactly
+    // like Git: the column sits after any tag/stage prefix and before the path.
+    let workdir = util::working_dir();
+
     let mut stdout = std::io::stdout().lock();
     for entry in entries {
+        let eol_col = if args.eol {
+            eol_column(entry, &workdir)
+        } else {
+            String::new()
+        };
         let mut record = if args.short || args.stage || args.unmerged {
             let hash = entry
                 .hash
@@ -494,14 +518,15 @@ fn render_output(
                 None => hash,
             };
             format!(
-                "{} {} {}\t{}",
+                "{} {} {}\t{}{}",
                 entry.mode.as_deref().unwrap_or("000000"),
                 hash,
                 entry.stage.unwrap_or(0),
+                eol_col,
                 entry.path
             )
         } else {
-            entry.path.clone()
+            format!("{}{}", eol_col, entry.path)
         };
         // `-t` prefixes a status tag (matching `git ls-files -t`).
         if args.tag {
@@ -521,4 +546,76 @@ fn render_output(
     }
 
     Ok(())
+}
+
+/// Classify the end-of-line style of a byte buffer, matching Git's `i/`/`w/`
+/// eol labels (Git's `convert.c` text stats). A buffer is BINARY (`-text`) when
+/// it has a NUL, a lone CR (CR not part of CRLF), or too many non-printable
+/// bytes (`printable >> 7 < nonprintable`, Git's heuristic). Otherwise it is
+/// `mixed` (both CRLF and lone LF), `crlf`, `lf`, or `none`.
+fn classify_eol(data: &[u8]) -> &'static str {
+    let mut nul = 0usize;
+    let mut cr = 0usize;
+    let mut crlf = 0usize;
+    let mut lf = 0usize;
+    let mut printable = 0usize;
+    let mut nonprintable = 0usize;
+    for (i, &c) in data.iter().enumerate() {
+        match c {
+            b'\r' => {
+                cr += 1;
+                if data.get(i + 1) == Some(&b'\n') {
+                    crlf += 1;
+                }
+            }
+            b'\n' => lf += 1,
+            127 => nonprintable += 1, // DEL
+            0 => {
+                nul += 1;
+                nonprintable += 1;
+            }
+            // BS, TAB, ESC, FF are treated as printable text controls.
+            8 | 9 | 27 | 12 => printable += 1,
+            c if c < 32 => nonprintable += 1,
+            _ => printable += 1,
+        }
+    }
+    let lonecr = cr - crlf;
+    let lonelf = lf - crlf;
+    if nul > 0 || lonecr > 0 || (printable >> 7) < nonprintable {
+        return "-text";
+    }
+    match (crlf > 0, lonelf > 0) {
+        (true, true) => "mixed",
+        (true, false) => "crlf",
+        (false, true) => "lf",
+        (false, false) => "none",
+    }
+}
+
+/// Build the `git ls-files --eol` column (`i/<eol> w/<eol> attr/<attr>\t`) for
+/// one entry: the index-blob eol (loaded by object id) and the worktree-file eol
+/// (read from disk). A missing blob/file leaves that field empty (Git's
+/// `lstat`-failed case). `attr/` is always empty (Libra has no `.gitattributes`).
+/// The format (`i/%-5s w/%-5s attr/%-17s\t`) is byte-compatible with Git, and
+/// the caller inserts it immediately before the path (composing with `-t`/`-s`).
+fn eol_column(entry: &FileEntry, workdir: &Path) -> String {
+    use std::str::FromStr;
+
+    let i_eol = match entry
+        .hash
+        .as_deref()
+        .and_then(|h| ObjectHash::from_str(h).ok())
+    {
+        Some(hash) => match load_object::<Blob>(&hash) {
+            Ok(blob) => classify_eol(&blob.data),
+            Err(_) => "",
+        },
+        None => "",
+    };
+    let w_eol = match fs::read(workdir.join(&entry.path)) {
+        Ok(data) => classify_eol(&data),
+        Err(_) => "",
+    };
+    format!("i/{i_eol:<5} w/{w_eol:<5} attr/{:<17}\t", "")
 }

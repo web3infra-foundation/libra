@@ -1038,3 +1038,83 @@ fn test_ls_files_exclude_inline_overrides_standard() {
         "other *.log stays excluded by .libraignore: {listed}"
     );
 }
+
+#[test]
+fn test_ls_files_eol_classifies_line_endings() {
+    let repo = tempdir().expect("repo");
+    let p = repo.path();
+    init_repo_via_cli(p);
+    configure_identity_via_cli(p);
+
+    fs::write(p.join("lf.txt"), b"a\nb\n").unwrap();
+    fs::write(p.join("crlf.txt"), b"a\r\nb\r\n").unwrap();
+    fs::write(p.join("mixed.txt"), b"a\nb\r\n").unwrap();
+    fs::write(p.join("noeol.txt"), b"noeol").unwrap();
+    fs::write(p.join("bin.bin"), b"\x00\x01\x02\n").unwrap();
+    fs::write(p.join("lonecr.txt"), b"a\rb\r").unwrap(); // bare CR -> binary
+    fs::write(p.join("ctrl.txt"), b"a\x01\x02\x03\x04\x05b").unwrap(); // control-heavy -> binary
+    let files = [
+        "lf.txt",
+        "crlf.txt",
+        "mixed.txt",
+        "noeol.txt",
+        "bin.bin",
+        "lonecr.txt",
+        "ctrl.txt",
+    ];
+    let mut add = vec!["add"];
+    add.extend_from_slice(&files);
+    assert_cli_success(&run_libra_command(&add, p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c", "--no-verify"], p),
+        "commit",
+    );
+
+    let mut cmd = vec!["ls-files", "--eol"];
+    cmd.extend_from_slice(&files);
+    let out = run_libra_command(&cmd, p);
+    assert_cli_success(&out, "ls-files --eol");
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // Byte-exact field layout matches `git ls-files --eol`
+    // (`i/%-5s w/%-5s attr/%-17s\t<path>`), with empty attr. Binary detection
+    // covers NUL, a bare CR, and a non-printable-heavy buffer (Git's heuristic).
+    for (path, eol) in [
+        ("lf.txt", "lf"),
+        ("crlf.txt", "crlf"),
+        ("mixed.txt", "mixed"),
+        ("noeol.txt", "none"),
+        ("bin.bin", "-text"),
+        ("lonecr.txt", "-text"),
+        ("ctrl.txt", "-text"),
+    ] {
+        let expected = format!("i/{eol:<5} w/{eol:<5} attr/{:<17}\t{path}", "");
+        assert!(
+            text.lines().any(|l| l == expected),
+            "expected line {expected:?} in:\n{text}"
+        );
+    }
+
+    // `--eol` composes with `-t` (tag prefix) and `-s` (mode/oid/stage prefix):
+    // the eol column sits before the path, after the tag/stage prefix (Git).
+    let t = run_libra_command(&["ls-files", "-t", "--eol", "lf.txt"], p);
+    assert_cli_success(&t, "ls-files -t --eol");
+    let expected_t = format!("H i/{e:<5} w/{e:<5} attr/{:<17}\tlf.txt", "", e = "lf");
+    assert_eq!(
+        String::from_utf8_lossy(&t.stdout).trim_end(),
+        expected_t,
+        "-t --eol composes the tag prefix before the eol column"
+    );
+
+    let s = run_libra_command(&["ls-files", "-s", "--eol", "lf.txt"], p);
+    assert_cli_success(&s, "ls-files -s --eol");
+    let s_out = String::from_utf8_lossy(&s.stdout);
+    assert!(
+        s_out.contains(&format!(
+            "\ti/{e:<5} w/{e:<5} attr/{:<17}\tlf.txt",
+            "",
+            e = "lf"
+        )),
+        "-s --eol inserts the eol column after the stage record: {s_out}"
+    );
+}

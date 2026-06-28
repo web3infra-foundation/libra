@@ -45,6 +45,7 @@ resolve-undo 和 sparse-checkout 集成仍未公开。
 | `-x`、`--exclude <pattern>` | 从 `--others` 列表中跳过匹配 `<pattern>`（gitignore 语法）的未跟踪文件。可重复；叠加 `--exclude-standard`。配合 `-i` 时该 pattern 改为定义 ignored 集。 |
 | `-X`、`--exclude-from <file>` | 从 `<file>` 读取额外 exclude 模式（每行一个；忽略 `#` 注释和空行）并按 `-x` 应用。可重复。 |
 | `--error-unmatch` | 只要任一显式 pathspec 在当前筛选结果中没有命中，就以 `LBR-CLI-003` 退出。 |
+| `--eol` | 为每个 cached 条目加前缀行尾信息 `i/<eol> w/<eol> attr/<attr>`：`<eol>` 为 index blob（`i/`）与工作树文件（`w/`）的 `lf`/`crlf`/`mixed`/`none`/`-text`（二进制）。与 `git ls-files --eol` 字节一致；Libra 无 `.gitattributes`，故 `attr/` 恒为空。 |
 | `-z` | 输出 NUL 分隔的文本记录而不是换行分隔；仅限文本模式，不能与 `--json` / `--machine` 组合。 |
 | `<pathspec>...` | 将输出限制为精确文件或目录前缀；相对于当前工作目录解析。 |
 | `--json` | 输出标准 Libra JSON 信封。 |
@@ -137,6 +138,7 @@ tracked-dir/alpha.txt\0tracked-dir/bravo.txt\0
 | 显式 exclude 文件 | `-X` / `--exclude-from <file>` | `-X` / `--exclude-from` | 模型不同 |
 | Pathspec 过滤 | `<pathspec>...` | 支持 | 模型不同 |
 | 未命中 pathspec 报错 | `--error-unmatch` | `--error-unmatch` | 模型不同 |
+| 行尾信息 | `--eol`（`attr/` 恒空） | `--eol` | N/A |
 | NUL 输出 | `-z`（仅文本模式） | `-z` | 模型不同 |
 | 状态标签 | `-t`（H/R/C/?/M） | `-t`（H/S/M/R/C/K/?） | 模型不同 |
 | 未合并条目 | `-u` / `--unmerged` | `-u` / `--unmerged` | 模型不同 |
