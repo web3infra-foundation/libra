@@ -2410,11 +2410,15 @@ fn test_branch_sort_by_committer_date() {
 
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
-    // Second (newer) commit -> branch "aaa" (alphabetically first).
+    // Second (newer) commit -> branch "aaa" (alphabetically first). A long
+    // message makes this commit object materially larger than zzz's, so the
+    // `objectsize` assertions below are driven by size, not the refname
+    // tie-break.
     std::fs::write(p.join("f.txt"), "1\n2\n").unwrap();
     assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add 2");
+    let long_msg = format!("c2 {}", "x".repeat(400));
     assert_cli_success(
-        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        &run_libra_command(&["commit", "-m", &long_msg, "--no-verify"], p),
         "commit 2",
     );
     assert_cli_success(&run_libra_command(&["branch", "aaa"], p), "branch aaa");
@@ -2468,9 +2472,123 @@ fn test_branch_sort_by_committer_date() {
         "-creatordate: newer aaa must precede older zzz: {by_creator_rev:?}"
     );
 
+    // authordate sorts by the tip commit's author date (oldest first), like
+    // committerdate here: zzz (older) before aaa (newer), reversible.
+    let by_author = order(&["branch", "--sort=authordate"]);
+    assert!(
+        pos(&by_author, "zzz") < pos(&by_author, "aaa"),
+        "authordate: older zzz must precede newer aaa: {by_author:?}"
+    );
+    let by_author_rev = order(&["branch", "--sort=-authordate"]);
+    assert!(
+        pos(&by_author_rev, "aaa") < pos(&by_author_rev, "zzz"),
+        "-authordate: newer aaa must precede older zzz: {by_author_rev:?}"
+    );
+
+    // objectsize sorts by the tip object's byte size: aaa's tip carries the long
+    // message and is therefore larger than zzz's, so ascending object size puts
+    // the smaller zzz before aaa; reversible.
+    let by_size = order(&["branch", "--sort=objectsize"]);
+    assert!(
+        pos(&by_size, "zzz") < pos(&by_size, "aaa"),
+        "objectsize: smaller root-commit zzz must precede larger aaa: {by_size:?}"
+    );
+    let by_size_rev = order(&["branch", "--sort=-objectsize"]);
+    assert!(
+        pos(&by_size_rev, "aaa") < pos(&by_size_rev, "zzz"),
+        "-objectsize: larger aaa must precede smaller zzz: {by_size_rev:?}"
+    );
+
     // An unknown sort key is a usage error (exit 129).
     let bad = run_libra_command(&["branch", "--sort=bogus"], p);
     assert_eq!(bad.status.code(), Some(129), "unknown sort key exits 129");
+}
+
+/// `--sort=authordate` orders by the tip commit's AUTHOR date (not committer
+/// date), and a reversed sort keeps the refname tie-break ascending. Uses two
+/// crafted commits whose author/committer dates are swapped so `authordate` and
+/// `committerdate` produce OPPOSITE orders — proving the author timestamp drives
+/// `authordate`.
+#[test]
+fn test_branch_sort_authordate_uses_author_date_and_keeps_tiebreak() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+
+    let tree = {
+        let cat = run_libra_command(&["cat-file", "-p", "HEAD"], p);
+        String::from_utf8_lossy(&cat.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("tree ").map(str::to_string))
+            .expect("HEAD has a tree")
+    };
+    // Craft a commit with explicit (author_ts, committer_ts) and return its oid.
+    let craft = |name: &str, author_ts: u64, committer_ts: u64| -> String {
+        let body = format!(
+            "tree {tree}\nauthor a <a@b> {author_ts} +0000\ncommitter a <a@b> {committer_ts} +0000\n\nmsg {name}\n"
+        );
+        let file = p.join(format!("{name}.commit"));
+        std::fs::write(&file, body).unwrap();
+        let out = run_libra_command(
+            &[
+                "hash-object",
+                "-t",
+                "commit",
+                "--literally",
+                "-w",
+                file.to_str().unwrap(),
+            ],
+            p,
+        );
+        assert_cli_success(&out, "hash-object crafted commit");
+        let oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_cli_success(
+            &run_libra_command(&["branch", name, &oid], p),
+            "branch -> crafted",
+        );
+        oid
+    };
+    // ax: author OLD (100), committer NEW (900). ay: the reverse.
+    craft("ax", 100, 900);
+    craft("ay", 900, 100);
+    // tie_a / tie_z share ax's dates (author 100) to exercise the tie-break.
+    craft("tie_a", 100, 900);
+    craft("tie_z", 100, 900);
+
+    let order = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "branch sort");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim_start_matches(['*', ' ']).trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+    let pos = |list: &[String], name: &str| -> usize {
+        list.iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("branch '{name}' missing from {list:?}"))
+    };
+
+    // authordate: ax (author 100) before ay (author 900).
+    let by_author = order(&["branch", "--sort=authordate"]);
+    assert!(
+        pos(&by_author, "ax") < pos(&by_author, "ay"),
+        "authordate: ax (older author date) before ay: {by_author:?}"
+    );
+    // committerdate: OPPOSITE — ay (committer 100) before ax (committer 900).
+    let by_committer = order(&["branch", "--sort=committerdate"]);
+    assert!(
+        pos(&by_committer, "ay") < pos(&by_committer, "ax"),
+        "committerdate must use committer date (opposite of authordate): {by_committer:?}"
+    );
+
+    // Reversed sort keeps the refname tie-break ASCENDING: among the equal-author
+    // (100) branches, tie_a must still precede tie_z under -authordate.
+    let by_author_rev = order(&["branch", "--sort=-authordate"]);
+    assert!(
+        pos(&by_author_rev, "tie_a") < pos(&by_author_rev, "tie_z"),
+        "-authordate keeps the refname tie-break ascending: {by_author_rev:?}"
+    );
 }
 
 /// `branch --format` renders each branch via the for-each-ref atom engine,

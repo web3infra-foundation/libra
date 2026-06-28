@@ -273,9 +273,10 @@ pub struct BranchArgs {
     pub no_merged: Option<String>,
 
     /// Sort the listed branches by key: `refname` (default), `version:refname` /
-    /// `v:refname` (numeric-aware), or `committerdate` / `creatordate` (the tip
-    /// commit's committer date). A leading `-` reverses (e.g. `-committerdate`
-    /// lists newest first). Implies --list.
+    /// `v:refname` (numeric-aware), `committerdate` / `creatordate` / `authordate`
+    /// (the tip commit's committer / author date), or `objectsize` (the tip
+    /// object's byte size). A leading `-` reverses (e.g. `-committerdate` lists
+    /// newest first). Implies --list.
     #[clap(long, group = "query", value_name = "key")]
     pub sort: Option<String>,
 
@@ -487,7 +488,7 @@ impl From<BranchError> for CliError {
             ))
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint(
-                "supported keys: refname, version:refname (v:refname), committerdate, creatordate, each reversible with a leading '-'",
+                "supported keys: refname, version:refname (v:refname), committerdate, creatordate, authordate, objectsize, each reversible with a leading '-'",
             ),
             BranchError::InvalidUpstream(upstream) => {
                 CliError::fatal(format!("invalid upstream '{upstream}'"))
@@ -1892,12 +1893,14 @@ fn sort_branch_entries(
         None => (key, false),
     };
 
-    // `committerdate`/`creatordate` sort by the tip commit's committer date (for a
-    // branch ref to a commit, Git's creatordate is the committer date). Pre-load the
-    // timestamps once (keyed by tip-commit hash) so the comparator is a cheap
-    // lookup; a commit that fails to load contributes timestamp 0 (sorts oldest)
-    // rather than aborting the listing.
-    let is_date_key = matches!(base, "committerdate" | "creatordate");
+    // Date keys sort by the tip commit's date: `committerdate`/`creatordate` use
+    // its committer date (for a branch ref to a commit, Git's creatordate is the
+    // committer date), `authordate` its author date. Pre-load the timestamps once
+    // (keyed by tip-commit hash) so the comparator is a cheap lookup; a commit
+    // that fails to load contributes timestamp 0 (sorts oldest) rather than
+    // aborting the listing.
+    let is_date_key = matches!(base, "committerdate" | "creatordate" | "authordate");
+    let use_author_date = base == "authordate";
     let timestamps: HashMap<String, i64> = if is_date_key {
         let mut map = HashMap::new();
         for entry in entries.iter() {
@@ -1907,7 +1910,13 @@ fn sort_branch_entries(
             let ts = ObjectHash::from_str(&entry.commit)
                 .ok()
                 .and_then(|hash| load_object::<Commit>(&hash).ok())
-                .map(|commit| commit.committer.timestamp as i64)
+                .map(|commit| {
+                    if use_author_date {
+                        commit.author.timestamp as i64
+                    } else {
+                        commit.committer.timestamp as i64
+                    }
+                })
                 .unwrap_or(0);
             map.insert(entry.commit.clone(), ts);
         }
@@ -1916,14 +1925,44 @@ fn sort_branch_entries(
         HashMap::new()
     };
 
+    // `objectsize` sorts by the tip object's decompressed byte size (Git's
+    // for-each-ref `objectsize`). Pre-loaded like the date keys; an unreadable
+    // object contributes size 0.
+    let sizes: HashMap<String, i64> = if base == "objectsize" {
+        let mut map = HashMap::new();
+        for entry in entries.iter() {
+            if map.contains_key(&entry.commit) {
+                continue;
+            }
+            let size = ObjectHash::from_str(&entry.commit)
+                .ok()
+                .and_then(|hash| crate::utils::util::objects_storage().get(&hash).ok())
+                .map(|data| data.len() as i64)
+                .unwrap_or(0);
+            map.insert(entry.commit.clone(), size);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
     if !matches!(
         base,
-        "refname" | "version:refname" | "v:refname" | "committerdate" | "creatordate"
+        "refname"
+            | "version:refname"
+            | "v:refname"
+            | "committerdate"
+            | "creatordate"
+            | "authordate"
+            | "objectsize"
     ) {
         return Err(BranchError::InvalidSortKey(base.to_string()));
     }
 
-    let ordering = |a: &BranchListEntry, b: &BranchListEntry| -> std::cmp::Ordering {
+    // The PRIMARY key comparison; the refname tie-break is appended afterward so
+    // that `-` reverses only the primary key (Git keeps the refname tie-break
+    // ascending under a reversed sort).
+    let primary = |a: &BranchListEntry, b: &BranchListEntry| -> std::cmp::Ordering {
         match base {
             "refname" => {
                 if ignore_case {
@@ -1935,19 +1974,35 @@ fn sort_branch_entries(
             "version:refname" | "v:refname" => {
                 crate::utils::util::version_refname_cmp(&a.name, &b.name)
             }
-            // Date keys: ascending by timestamp (oldest first), tie-broken by
-            // refname for a deterministic order, matching Git's for-each-ref.
-            "committerdate" | "creatordate" => {
+            // Date keys compare the tip commit's committer/author timestamp.
+            "committerdate" | "creatordate" | "authordate" => {
                 let ta = timestamps.get(&a.commit).copied().unwrap_or(0);
                 let tb = timestamps.get(&b.commit).copied().unwrap_or(0);
-                ta.cmp(&tb).then_with(|| a.name.cmp(&b.name))
+                ta.cmp(&tb)
+            }
+            // Object size compares the tip object's byte size.
+            "objectsize" => {
+                let sa = sizes.get(&a.commit).copied().unwrap_or(0);
+                let sb = sizes.get(&b.commit).copied().unwrap_or(0);
+                sa.cmp(&sb)
             }
             _ => std::cmp::Ordering::Equal,
         }
     };
+    // `refname`/`version:refname` ARE the name, so reversing them flips the whole
+    // order; the date/size keys reverse only the primary and keep the refname
+    // tie-break ascending (matching Git's for-each-ref).
+    let name_is_primary = matches!(base, "refname" | "version:refname" | "v:refname");
     entries.sort_by(|a, b| {
-        let ord = ordering(a, b);
-        if reverse { ord.reverse() } else { ord }
+        let mut ord = primary(a, b);
+        if reverse {
+            ord = ord.reverse();
+        }
+        if name_is_primary {
+            ord
+        } else {
+            ord.then_with(|| a.name.cmp(&b.name))
+        }
     });
     Ok(())
 }
