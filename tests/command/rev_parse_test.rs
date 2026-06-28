@@ -746,6 +746,123 @@ fn test_rev_parse_symbolic_full_name() {
     assert_eq!(v, "HEAD", "detached HEAD resolves to literal HEAD");
 }
 
+#[test]
+fn test_rev_parse_symbolic_echoes_resolvable_specs_verbatim() {
+    // `--symbolic` prints a resolvable spec "as close to the original input as
+    // possible" — i.e. verbatim — rather than expanding a ref to its full name
+    // (the way `--symbolic-full-name` does). An unresolvable name fails (exit 128).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let head_branch = String::from_utf8_lossy(
+        &run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], p).stdout,
+    )
+    .trim()
+    .to_string();
+    let full = format!("refs/heads/{head_branch}");
+
+    let out = |args: &[&str]| {
+        let o = run_libra_command(args, p);
+        (
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            o.status.code(),
+        )
+    };
+
+    // HEAD -> "HEAD" verbatim (NOT expanded to refs/heads/<branch>).
+    let (v, code) = out(&["rev-parse", "--symbolic", "HEAD"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, "HEAD", "--symbolic echoes HEAD verbatim");
+
+    // A bare branch name stays the bare name (the key contrast with
+    // --symbolic-full-name, which would print {full}).
+    let (v, code) = out(&["rev-parse", "--symbolic", &head_branch]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, head_branch, "--symbolic keeps the short branch name");
+    assert_ne!(
+        v, full,
+        "--symbolic must NOT expand to the full ref name like --symbolic-full-name"
+    );
+
+    // A fully-qualified ref is echoed verbatim too.
+    let (v, _) = out(&["rev-parse", "--symbolic", &full]);
+    assert_eq!(v, full);
+
+    // A tag stays the bare tag name (not refs/tags/<name>).
+    assert_cli_success(&run_libra_command(&["tag", "v9.9"], p), "create tag v9.9");
+    let (v, code) = out(&["rev-parse", "--symbolic", "v9.9"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, "v9.9");
+
+    // A revision expression is echoed verbatim (git keeps `~`/`^` forms as-is).
+    let (v, code) = out(&["rev-parse", "--symbolic", "HEAD~0"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, "HEAD~0");
+
+    // A bare commit SHA (a valid object that is not a ref) is echoed verbatim —
+    // unlike --symbolic-full-name, which prints nothing for a non-ref object.
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    let (v, code) = out(&["rev-parse", "--symbolic", &sha]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, sha, "a bare object id is echoed verbatim");
+
+    // A raw tree object id is also a valid object -> echoed verbatim.
+    let tree_sha =
+        String::from_utf8_lossy(&run_libra_command(&["cat-file", "-p", "HEAD"], p).stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("tree ").map(|s| s.trim().to_string()))
+            .expect("HEAD commit lists a tree");
+    let (v, code) = out(&["rev-parse", "--symbolic", &tree_sha]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v, tree_sha);
+
+    // An unresolvable spec fails with exit 128 (Libra's documented divergence:
+    // it errors on stderr rather than echoing the spec like git does).
+    let bad = run_libra_command(&["rev-parse", "--symbolic", "definitely-not-a-ref"], p);
+    assert_eq!(bad.status.code(), Some(128), "unresolvable spec exits 128");
+    assert!(
+        bad.stdout.is_empty(),
+        "an unresolvable spec emits no stdout: {:?}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+
+    // A malformed revision expression is unresolvable (exit 128).
+    let (_, code) = out(&["rev-parse", "--symbolic", "HEAD^garbage"]);
+    assert_eq!(code, Some(128));
+
+    // KNOWN, COMMAND-WIDE LIMITATION (shared with `--symbolic-full-name` and plain
+    // `rev-parse`): Libra's revision parser does not support `^{<type>}` peeling or
+    // full-ref `~N` navigation, so these git-accepted specs exit 128 here rather
+    // than being echoed. This asserts the documented behavior so it stays in sync
+    // across modes (it is NOT introduced by `--symbolic`).
+    for spec in ["HEAD^{commit}", "HEAD^{tree}", &format!("{full}~0")] {
+        let sym = run_libra_command(&["rev-parse", "--symbolic", spec], p);
+        let plain = run_libra_command(&["rev-parse", spec], p);
+        assert_eq!(
+            sym.status.code(),
+            Some(128),
+            "{spec}: --symbolic inherits the command-wide parser limitation (exit 128)"
+        );
+        assert_ne!(
+            plain.status.code(),
+            Some(0),
+            "{spec}: plain rev-parse also cannot resolve it (confirms a command-wide limitation)"
+        );
+    }
+
+    // --symbolic and --symbolic-full-name are mutually exclusive (clap usage error).
+    let conflict = run_libra_command(
+        &["rev-parse", "--symbolic", "--symbolic-full-name", "HEAD"],
+        p,
+    );
+    assert_eq!(
+        conflict.status.code(),
+        Some(129),
+        "conflicting output modes are a usage error (Libra maps clap conflicts to 129)"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_rev_parse_symbolic_full_name_remote_tracking_ref() {

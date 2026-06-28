@@ -39,6 +39,7 @@ EXAMPLES:
     libra rev-parse --sq HEAD           Print the resolved object name, shell-quoted
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
     libra rev-parse --symbolic-full-name HEAD  Print HEAD's full ref name (refs/heads/...)
+    libra rev-parse --symbolic main     Echo a resolvable spec verbatim (main, not refs/heads/main)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
@@ -63,6 +64,13 @@ pub struct RevParseArgs {
     /// ref prints nothing (exit 0); an unresolvable name fails (exit 128).
     #[clap(long = "symbolic-full-name", conflicts_with_all = ["show_toplevel", "short", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir", "show_prefix", "show_cdup"])]
     pub symbolic_full_name: bool,
+
+    /// Print SPEC in symbolic form, as close to the original input as possible
+    /// (Git's `--symbolic`): a resolvable ref / revision / object id is echoed
+    /// verbatim, an unresolvable name fails (exit 128). Differs from
+    /// `--symbolic-full-name`, which expands a ref to its full `refs/…` name.
+    #[clap(long = "symbolic", conflicts_with_all = ["symbolic_full_name", "show_toplevel", "short", "abbrev_ref", "is_inside_work_tree", "is_inside_git_dir", "is_bare_repository", "git_dir", "absolute_git_dir", "show_prefix", "show_cdup"])]
+    pub symbolic: bool,
 
     /// Show the absolute path of the top-level working tree.
     #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec"])]
@@ -323,6 +331,15 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
+    if args.symbolic {
+        let value = resolve_symbolic(spec).await?;
+        return Ok(RevParseOutput {
+            mode: "symbolic",
+            input: Some(spec.to_string()),
+            value,
+        });
+    }
+
     let commit = util::get_commit_base_typed(spec)
         .await
         .map_err(|err| rev_parse_target_error(spec, err))?;
@@ -384,6 +401,24 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
     Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
         .with_stable_code(StableErrorCode::CliInvalidTarget)
         .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash."))
+}
+
+/// Resolve `spec` for `--symbolic`: print it in a form as close to the original
+/// input as possible. Git echoes any spec it can parse — a ref, a revision
+/// expression, or a (possibly abbreviated) object id — verbatim, and keeps SHAs
+/// as SHAs. We gate validity through the same resolver `--symbolic-full-name`
+/// uses (so an unresolvable name fails with exit 128, and a valid non-ref object
+/// is still accepted), then echo the spec verbatim rather than expanding it to a
+/// full ref name.
+///
+/// Intentional divergence from Git (shared with `--symbolic-full-name`): an
+/// unresolvable spec fails on stderr with exit 128 instead of being echoed to
+/// stdout.
+async fn resolve_symbolic(spec: &str) -> CliResult<String> {
+    // Validity gate only — the returned full-ref / empty value is discarded; an
+    // unresolvable spec propagates its fatal exit-128 error.
+    resolve_symbolic_full_name(spec).await?;
+    Ok(spec.to_string())
 }
 
 async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<bool> {

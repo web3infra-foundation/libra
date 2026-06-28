@@ -27,6 +27,7 @@ It also supports `--show-toplevel` to print the absolute repository root for a w
 | `--sq` | Shell-quote the resolved object name (single-quoted) for safe shell consumption. Only affects the resolved-revision output, not query modes like `--show-toplevel`. |
 | `--abbrev-ref` | Print the symbolic branch name instead of a commit hash. |
 | `--symbolic-full-name` | Resolve the spec to its full ref name (`refs/heads/<branch>`, `refs/tags/<tag>`, `refs/remotes/<remote>/<branch>`, or `HEAD` when detached). A valid object that is not a ref prints nothing (exit 0); an unresolvable name fails with exit 128. |
+| `--symbolic` | Print the spec in symbolic form, as close to the original input as possible: a resolvable ref, revision expression, or object id is echoed **verbatim** (e.g. `main` stays `main`, not `refs/heads/main`). An unresolvable name fails with exit 128. Mutually exclusive with `--symbolic-full-name`/`--short`/`--abbrev-ref`. |
 | `--show-toplevel` | Print the absolute path to the top-level working tree. |
 | `--is-inside-git-dir` | Print `true` when the current directory is inside the `.libra` directory (Libra's `$GIT_DIR` equivalent), `false` otherwise. |
 | `--git-dir` | Print the path to the `.libra` directory (Libra's `$GIT_DIR`). In Libra this is always absolute. |
@@ -86,7 +87,7 @@ With `--show-toplevel`:
 }
 ```
 
-`mode` is one of `resolve`, `short`, `abbrev_ref`, `symbolic_full_name`, `show_toplevel`, `show_prefix`, `show_cdup`, `is_inside_work_tree`, `is_inside_git_dir`, `is_bare_repository`, `git_dir`, or `absolute_git_dir`.
+`mode` is one of `resolve`, `short`, `abbrev_ref`, `symbolic_full_name`, `symbolic`, `show_toplevel`, `show_prefix`, `show_cdup`, `is_inside_work_tree`, `is_inside_git_dir`, `is_bare_repository`, `git_dir`, or `absolute_git_dir`.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -96,6 +97,7 @@ With `--show-toplevel`:
 | Abbreviated commit ID | `--short` | `--short` | `jj log -r <rev> -T change_id.short()` |
 | Symbolic branch name | `--abbrev-ref` | `--abbrev-ref` | N/A |
 | Full ref name | `--symbolic-full-name` | `--symbolic-full-name` | N/A |
+| Symbolic (verbatim) name | `--symbolic` | `--symbolic` | N/A |
 | Shell-quoted output | `--sq` | `--sq` | N/A |
 | Work tree root | `--show-toplevel` | `--show-toplevel` | `jj root` |
 | JSON output | `--json` | No | No |

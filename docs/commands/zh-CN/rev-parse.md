@@ -26,6 +26,7 @@ libra rev-parse [OPTIONS] [SPEC]
 | `--sq` | 对解析出的对象名做单引号 shell 引用，便于安全地交给 shell 消费。仅影响解析出的修订输出，不影响 `--show-toplevel` 等查询模式。 |
 | `--abbrev-ref` | 打印符号分支名，而不是提交哈希。 |
 | `--symbolic-full-name` | 将 spec 解析为完整 ref 名（`refs/heads/<分支>`、`refs/tags/<标签>`、`refs/remotes/<远程>/<分支>`，分离 HEAD 时为 `HEAD`）。有效但非 ref 的对象不输出（退出码 0）；不可解析名以退出码 128 失败。 |
+| `--symbolic` | 按“尽量接近原始输入”的形式打印 spec：可解析的 ref、revision 表达式或对象 id 一律**原样回显**（如 `main` 保持 `main`，而非 `refs/heads/main`）。不可解析名以退出码 128 失败。与 `--symbolic-full-name`/`--short`/`--abbrev-ref` 互斥。 |
 | `--show-toplevel` | 打印顶层工作树的绝对路径。 |
 | `--git-dir` | 打印 `.libra` 目录路径（Libra 的 `$GIT_DIR`）；在 Libra 中始终为绝对路径。 |
 | `--absolute-git-dir` | 同 `--git-dir`，但始终为规范化后的绝对路径。（Libra 中 `--git-dir` 已是绝对路径，故两者一致。） |
@@ -83,7 +84,7 @@ main
 }
 ```
 
-`mode` 是 `resolve`、`short`、`abbrev_ref`、`symbolic_full_name`、`show_toplevel`、`show_prefix`、`show_cdup`、`is_inside_work_tree`、`is_inside_git_dir`、`is_bare_repository`、`git_dir` 或 `absolute_git_dir` 之一。
+`mode` 是 `resolve`、`short`、`abbrev_ref`、`symbolic_full_name`、`symbolic`、`show_toplevel`、`show_prefix`、`show_cdup`、`is_inside_work_tree`、`is_inside_git_dir`、`is_bare_repository`、`git_dir` 或 `absolute_git_dir` 之一。
 
 ## 参数对比：Libra vs Git vs jj
 
@@ -93,6 +94,7 @@ main
 | 缩写提交 ID | `--short` | `--short` | `jj log -r <rev> -T change_id.short()` |
 | 符号分支名 | `--abbrev-ref` | `--abbrev-ref` | N/A |
 | 完整 ref 名 | `--symbolic-full-name` | `--symbolic-full-name` | N/A |
+| 符号（原样）名 | `--symbolic` | `--symbolic` | N/A |
 | Shell 引用输出 | `--sq` | `--sq` | N/A |
 | 工作树根目录 | `--show-toplevel` | `--show-toplevel` | `jj root` |
 | JSON 输出 | `--json` | 无 | 无 |

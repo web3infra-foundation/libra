@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。基础 revision 解析、`--short[=<n>]`、`--abbrev-ref`、`--symbolic-full-name`（将 spec 解析为完整 ref 名：`refs/heads/…`/`refs/tags/…`/`refs/remotes/…`，分离 HEAD 输出 `HEAD`；有效但非 ref 的对象不输出且退出码 0，不可解析名退出码 128——Libra 在 stderr 报错而非像 git 那样把 spec 回显到 stdout）、`--show-toplevel`、`--verify`/`--default`、`--sq`（对解析出的对象名做 shell 引用）及仓库状态查询（`--show-prefix`/`--show-cdup`/`--is-inside-work-tree`/`--is-inside-git-dir`/`--is-bare-repository`/`--git-dir`/`--absolute-git-dir`）已支持；其余输出过滤（`--symbolic`/`--flags`/`--abbrev=<n>`）和 parseopt 子模式尚未公开。
+- 兼容级别：`partial`。基础 revision 解析、`--short[=<n>]`、`--abbrev-ref`、`--symbolic-full-name`（将 spec 解析为完整 ref 名：`refs/heads/…`/`refs/tags/…`/`refs/remotes/…`，分离 HEAD 输出 `HEAD`；有效但非 ref 的对象不输出且退出码 0，不可解析名退出码 128——Libra 在 stderr 报错而非像 git 那样把 spec 回显到 stdout）、`--symbolic`（把可解析的 spec 按“尽量接近原始输入”原样回显：ref/revision/对象 id 均原样输出、不展开为完整 ref 名，与 `--symbolic-full-name` 不同；不可解析名退出 128，复用 `--symbolic-full-name` 的解析做有效性校验）、`--show-toplevel`、`--verify`/`--default`、`--sq`（对解析出的对象名做 shell 引用）及仓库状态查询（`--show-prefix`/`--show-cdup`/`--is-inside-work-tree`/`--is-inside-git-dir`/`--is-bare-repository`/`--git-dir`/`--absolute-git-dir`）已支持；其余输出过滤（`--flags`/`--revs-only`/`--abbrev=<n>`）和 parseopt 子模式尚未公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -46,7 +46,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/rev-parse.md`。
 - Synopsis：`libra rev-parse [OPTIONS] [SPEC]`。
-- 公开参数/子命令包括：`--short[=<n>]`、`--abbrev-ref`、`--show-toplevel`、`--show-prefix`、`--show-cdup`、`--verify`、`--default <ARG>`、`--sq`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir`、`--absolute-git-dir`、`[SPEC]`（位置参数，缺省为 `HEAD`）。`--sq` 仅对 `resolve`/`short` 模式的对象名做整值单引号 shell 引用（嵌入单引号转义为 `'\''`），仓库查询模式不受影响。
+- 公开参数/子命令包括：`--short[=<n>]`、`--abbrev-ref`、`--symbolic-full-name`、`--symbolic`、`--show-toplevel`、`--show-prefix`、`--show-cdup`、`--verify`、`--default <ARG>`、`--sq`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir`、`--absolute-git-dir`、`[SPEC]`（位置参数，缺省为 `HEAD`）。`--symbolic` 与 `--symbolic-full-name`/`--short`/`--abbrev-ref`/仓库查询模式互斥（clap `conflicts_with_all`，冲突映射为退出 129）。`--sq` 仅对 `resolve`/`short` 模式的对象名做整值单引号 shell 引用（嵌入单引号转义为 `'\''`），仓库查询模式不受影响。
 - `--verify`：断言 SPEC 解析为唯一对象，失败退出 128；配合全局 `--quiet`/`-q` 时静默退出 1。`--default <ARG>`：未提供位置 SPEC 时回退到该修订。`--is-inside-work-tree` / `--is-bare-repository` 打印 `true`/`false`；`--git-dir` 打印 `.libra` 目录路径（Git `$GIT_DIR` 等价；Libra 始终为绝对路径）。`--absolute-git-dir` 复用 `--git-dir` 路径并经 `std::fs::canonicalize` 规范化，保证 Git「canonicalized absolute path」契约（Libra 中两者结果一致）。`--is-inside-git-dir` 在当前目录位于 `.libra` 目录内时打印 `true`，否则 `false`（复用 `util::is_sub_path` 判定 cwd 是否为 `.libra` 的子路径，含相等）。
 
 
@@ -56,7 +56,8 @@ flowchart TD
 |---|---|---|
 | ✅ 已实现（仓库状态查询） | `--show-toplevel`、`--show-prefix`、`--show-cdup`、`--is-inside-work-tree`、`--is-inside-git-dir`、`--is-bare-repository`、`--git-dir`、`--absolute-git-dir` 均已支持。 | `--is-inside-git-dir` 带单元测试与集成测试（worktree→`false`，`.libra` 内→`true`）；`--absolute-git-dir` 带集成测试（绝对路径、以 `.libra` 结尾、与 `--git-dir` 一致、与 `--git-dir` 互斥）。 |
 | ✅ 已实现（部分输出过滤） | `--symbolic-full-name`（spec → 完整 ref 名；`resolve_symbolic_full_name`：HEAD→分支全名/分离时 `HEAD`，分支→`refs/heads/…`，tag→`refs/tags/…`，远程跟踪→`refs/remotes/…`；有效非 ref 对象→空输出退出 0：先试 commit-ish（`get_commit_base_typed`，并按 `CommitBaseError` 区分 ReadFailure/CorruptReference 透传正确错误码），再按任意类型对象 id 查存储（`ClientStorage::search_result`，覆盖 tree/blob/tag 原始 SHA）；不可解析→fatal 退出 128）已实现，带集成测试 `test_rev_parse_symbolic_full_name` 与解析冲突单元测试（与全部仓库查询模式互斥）。 | 与 git 的有意/既有差异：①不可解析 spec 不回显到 stdout（git 会回显），改为 stderr 报错+退出 128；②`^{tree}`/`^{commit}` 等剥离到非 commit 对象的 revision 语法 → 退出 128（libra rev-parse 的 revision 解析器本就不支持剥离到非 commit 类型，全命令共有，非本 flag 引入）。原始 tree/blob/commit SHA 与 ref 名均与 git 一致。 |
-| 输出过滤（仍缺口） | Git `--symbolic`（更宽松、保留缩写形式，与 `--symbolic-full-name` 不同）、`--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>` 等输出/过滤选项。（`--short[=<n>]`、`--sq`、`--abbrev-ref`、`--symbolic-full-name` 已实现，不再列为缺口。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
+| ✅ 已实现（部分输出过滤） | `--symbolic`（把可解析的 spec 按“尽量接近原始输入”原样回显，与 `--symbolic-full-name` 展开为完整 ref 名不同；`resolve_symbolic` 复用 `resolve_symbolic_full_name` 做有效性门控——ref、revision 表达式、任意类型对象 id 均接受——随后原样回显该 spec。带集成测试 `test_rev_parse_symbolic_echoes_resolvable_specs_verbatim`。） | 与 git 的有意/既有差异：①不可解析 spec 不回显到 stdout（git 会回显），改为 stderr 报错+退出 128（与 `--symbolic-full-name` 一致）；②`@`（git 的 HEAD 别名）不被 Libra 的 revision 解析器识别（全命令共有，非本 flag 引入），故 `--symbolic @` 退出 128 而非回显 `@`；③`^{<type>}` 剥离（如 `HEAD^{commit}`/`HEAD^{tree}`）与完整 ref 的 `~N` 导航（如 `refs/heads/main~0`）不被 Libra revision 解析器支持——这是**全命令共有**的限制（plain `rev-parse`、`--symbolic-full-name`、`--verify` 同样如此，非本 flag 引入；扩展该解析器属跨全部模式的独立工作，超出本 flag 范围），故 `--symbolic` 对这些 git 可解析的 spec 退出 128。其余可解析 ref/revision/对象 id 与 git 逐字节一致。带 `test_rev_parse_symbolic_echoes_resolvable_specs_verbatim` 中的命令级限制断言锁定。 |
+| 输出过滤（仍缺口） | Git `--flags`、`--no-flags`、`--revs-only`、`--no-revs`、`--abbrev=<n>` 等输出/过滤选项。（`--short[=<n>]`、`--sq`、`--abbrev-ref`、`--symbolic-full-name`、`--symbolic` 已实现，不再列为缺口。） | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 | 参数解析模式 | Git `--parseopt`、`--keep-dashdash`、`--stuck-long`、`--sq-quote` 等 `--parseopt` 子模式；当前未实现。 | 后续以新增测试、兼容矩阵或用户命令文档变更为准。 |
 
 ## 维护要求
