@@ -298,9 +298,24 @@ pub struct FsckArgs {
     /// and tree entries must be in Git's canonical sort order.
     #[arg(long)]
     pub strict: bool,
+
+    /// Also verify packfile integrity (this is the default, like Git). Each
+    /// `.pack` and its `.idx` are checked against their trailing checksum.
+    #[arg(long, overrides_with = "no_full")]
+    pub full: bool,
+
+    /// Skip the packfile-integrity check.
+    #[arg(long = "no-full", overrides_with = "full")]
+    pub no_full: bool,
 }
 
 impl FsckArgs {
+    /// Whether packfile integrity is verified. Git's `--full` is the default;
+    /// `--no-full` disables it.
+    fn full_enabled(&self) -> bool {
+        !self.no_full
+    }
+
     /// Returns whether dangling objects should be reported.
     /// Default is true (only dangling commits).
     /// Use --dangling or --dangling=true to enable, --no-dangling to disable.
@@ -586,10 +601,203 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         find_and_report_tags().await?;
     }
 
+    // Stage 11: Verify packfile integrity (Git's `--full`, on by default).
+    if args.full_enabled() {
+        check_packs(storage, &mut result, args.verbose)?;
+    }
+
     // Print notices
     print_notices(head_is_unborn, &result);
 
     Ok(result)
+}
+
+/// Verify the integrity of every packfile by checking its trailing checksum
+/// (Git's `fsck --full`). This reads the raw `.pack` / `.idx` bytes and compares
+/// the trailing hash against a recomputation of the preceding content — it does
+/// NOT decode pack objects, so a body-corrupt pack is reported rather than
+/// crashing the decoder. Panic-safe by construction.
+fn check_packs(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) -> CliResult<()> {
+    let pack_dir = storage.base_path().join("pack");
+    if !pack_dir.exists() {
+        return Ok(());
+    }
+
+    // A pack-directory read failure is itself an integrity problem — report it
+    // and fail rather than silently skipping packfile verification.
+    let read_dir = match fs::read_dir(&pack_dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            eprintln!(
+                "error: cannot read pack directory {}: {e}",
+                pack_dir.display()
+            );
+            result.has_errors = true;
+            return Ok(());
+        }
+    };
+    let mut packs: Vec<std::path::PathBuf> = Vec::new();
+    for entry in read_dir {
+        match entry {
+            Ok(e) => {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) == Some("pack") {
+                    packs.push(path);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: cannot read pack directory entry: {e}");
+                result.has_errors = true;
+            }
+        }
+    }
+    packs.sort();
+
+    let kind = git_internal::hash::get_hash_kind();
+    let hash_len = kind.size();
+
+    for pack in &packs {
+        if verbose && !stdout_suppressed() {
+            println!("Checking pack {}", pack.display());
+        }
+        // The `.pack` self-checksum (detects body corruption without decoding),
+        // streamed so a multi-GB pack is not read into memory at once.
+        let pack_trailer = match verify_pack_self_checksum(pack, kind, hash_len) {
+            Ok(trailer) => Some(trailer),
+            Err(detail) => {
+                report_pack_error(result, pack, &detail);
+                None
+            }
+        };
+        // The paired `.idx`: validate via the shared index parser (checks the
+        // index checksum — accepting Git's and Libra's index-hash variants — and
+        // the fanout/entry structure) without decoding pack objects.
+        let idx = pack.with_extension("idx");
+        if idx.exists() {
+            match fs::read(&idx) {
+                Ok(idx_bytes) => match super::verify_pack_index::parse_index(&idx_bytes) {
+                    Ok(parsed) => {
+                        // Cross-check: the index's recorded pack checksum must
+                        // match the pack's own trailer (catches a stale/swapped
+                        // index paired with the wrong pack).
+                        if let Some(trailer) = &pack_trailer
+                            && parsed.pack_hash.to_string() != hex::encode(trailer)
+                        {
+                            report_pack_error(
+                                result,
+                                &idx,
+                                "index pack checksum does not match the packfile",
+                            );
+                        }
+                    }
+                    Err(detail) => report_pack_error(result, &idx, &detail),
+                },
+                Err(e) => report_pack_error(result, &idx, &format!("cannot read index: {e}")),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Record a packfile integrity error against the fsck result.
+fn report_pack_error(result: &mut FsckResult, path: &std::path::Path, detail: &str) {
+    eprintln!("error: {}: {}", path.display(), detail);
+    result.has_errors = true;
+    result.objects_corrupted += 1;
+    if result.overall_status == CheckStatus::Ok {
+        result.overall_status = CheckStatus::HashMismatch;
+    }
+}
+
+/// Incremental hasher over the repository's object hash algorithm. The `sha1`
+/// and `sha2` crates expose different `Digest` trait versions, so the two arms
+/// bring the matching trait into scope locally.
+enum PackHasher {
+    Sha1(sha1::Sha1),
+    Sha256(sha2::Sha256),
+}
+
+impl PackHasher {
+    fn new(kind: git_internal::hash::HashKind) -> Self {
+        use git_internal::hash::HashKind;
+        match kind {
+            HashKind::Sha1 => {
+                use sha1::Digest as _;
+                PackHasher::Sha1(sha1::Sha1::new())
+            }
+            HashKind::Sha256 => {
+                use sha2::Digest as _;
+                PackHasher::Sha256(sha2::Sha256::new())
+            }
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            PackHasher::Sha1(h) => {
+                use sha1::Digest as _;
+                h.update(data);
+            }
+            PackHasher::Sha256(h) => {
+                use sha2::Digest as _;
+                h.update(data);
+            }
+        }
+    }
+
+    fn finalize(self) -> Vec<u8> {
+        match self {
+            PackHasher::Sha1(h) => {
+                use sha1::Digest as _;
+                h.finalize().to_vec()
+            }
+            PackHasher::Sha256(h) => {
+                use sha2::Digest as _;
+                h.finalize().to_vec()
+            }
+        }
+    }
+}
+
+/// Verify a `.pack` ends with a trailing hash equal to the hash of all the
+/// preceding bytes, streaming the body so the whole file is never buffered.
+/// Returns the verified trailer bytes (for the index cross-check), or an error
+/// detail string. Does NOT decode pack objects, so it is panic-safe.
+fn verify_pack_self_checksum(
+    path: &std::path::Path,
+    kind: git_internal::hash::HashKind,
+    hash_len: usize,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(path).map_err(|e| format!("cannot read packfile: {e}"))?;
+    let total = file
+        .metadata()
+        .map_err(|e| format!("cannot stat packfile: {e}"))?
+        .len();
+    if total < hash_len as u64 {
+        return Err("file is too short to contain a checksum trailer".to_string());
+    }
+
+    let mut hasher = PackHasher::new(kind);
+    let mut remaining = total - hash_len as u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        file.read_exact(&mut buf[..want])
+            .map_err(|e| format!("cannot read packfile: {e}"))?;
+        hasher.update(&buf[..want]);
+        remaining -= want as u64;
+    }
+    let mut trailer = vec![0u8; hash_len];
+    file.read_exact(&mut trailer)
+        .map_err(|e| format!("cannot read packfile: {e}"))?;
+
+    if hasher.finalize() != trailer {
+        return Err("bad packfile checksum (corrupt or truncated)".to_string());
+    }
+    Ok(trailer)
 }
 
 /// Check all 256 object directories and print progress
@@ -684,7 +892,7 @@ async fn check_objects(
             None => continue,
         };
 
-        if verbose {
+        if verbose && !stdout_suppressed() {
             // Get object type for verbose output only
             if let Ok(obj_type) = storage.get_object_type(&hash) {
                 let type_name = match obj_type {
@@ -853,7 +1061,7 @@ async fn check_reflogs(
         .map_err(|e| CliError::fatal(format!("failed to load reflogs: {}", e)))?;
 
     for entry in reflogs {
-        if verbose {
+        if verbose && !stdout_suppressed() {
             println!("Checking reflog {}->{}", entry.old_oid, entry.new_oid);
         }
 
@@ -881,7 +1089,7 @@ async fn check_reflogs(
 
 /// Check index
 fn check_index(storage: &ClientStorage, result: &mut FsckResult, verbose: bool) -> CliResult<()> {
-    if verbose {
+    if verbose && !stdout_suppressed() {
         println!("Checking cache tree of .libra/index");
     }
 
@@ -904,7 +1112,7 @@ async fn check_connectivity(
     connectivity_only: bool,
 ) -> CliResult<()> {
     let count = all_hashes.len();
-    if verbose {
+    if verbose && !stdout_suppressed() {
         println!("Checking connectivity ({} objects)", count);
     }
 
@@ -916,7 +1124,7 @@ async fn check_connectivity(
     };
 
     for hash in all_hashes {
-        if verbose {
+        if verbose && !stdout_suppressed() {
             let hash_str = hash.to_string();
             if name_objects {
                 let name = object_names

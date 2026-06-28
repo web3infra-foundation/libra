@@ -147,6 +147,20 @@ Note: this is an intentionally narrowed subset of `git fsck --strict`. The
 `.gitmodules`/HFS+/NTFS pathname checks and per-message `fsck.<msg-id>` severity
 configuration are not implemented.
 
+### `--full` / `--no-full`
+
+Verify packfile integrity. This is **on by default** (like Git); pass
+`--no-full` to skip it. Each `.pack` is checked against its trailing checksum
+and each `.idx` against its index checksum, so corruption (including a truncated
+or body-corrupt pack) is reported as an error with a non-zero exit. The check
+reads raw bytes and does **not** decode pack objects, so a corrupt pack is
+reported rather than crashing.
+
+```bash
+libra fsck --full      # default behaviour, stated explicitly
+libra fsck --no-full   # skip packfile verification
+```
+
 ## Examples
 
 ```bash

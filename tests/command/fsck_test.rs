@@ -888,3 +888,143 @@ fn test_strict_tree_unsorted() {
     );
     assert_eq!(strict.status.code(), Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// --full: packfile integrity verification (panic-safe checksum)
+// ---------------------------------------------------------------------------
+
+/// Copy a pack fixture into the repo's `.libra/objects/pack/` and build its idx.
+fn install_pack_fixture(repo: &std::path::Path) -> std::path::PathBuf {
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/packs/small-sha1.pack");
+    let pack_dir = repo.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create pack dir");
+    let pack = pack_dir.join("test.pack");
+    fs::copy(&src, &pack).expect("copy pack fixture");
+    let out = run_libra_command(
+        &["index-pack", pack.to_str().unwrap(), "--index-version", "2"],
+        repo,
+    );
+    assert_cli_success(&out, "index-pack builds the fixture idx");
+    pack
+}
+
+#[test]
+#[serial]
+fn fsck_full_passes_on_a_valid_pack() {
+    let repo = tempdir().expect("repo");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    install_pack_fixture(repo.path());
+
+    // Both the default (full on, like Git) and explicit `--full` accept a valid
+    // pack without error.
+    assert_cli_success(
+        &run_libra_command(&["fsck", "--full"], repo.path()),
+        "fsck --full valid",
+    );
+    assert_cli_success(
+        &run_libra_command(&["fsck"], repo.path()),
+        "fsck default valid",
+    );
+}
+
+#[test]
+#[serial]
+fn fsck_full_reports_corrupt_pack_without_panicking() {
+    let repo = tempdir().expect("repo");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    let pack = install_pack_fixture(repo.path());
+
+    // Corrupt a byte in the pack body — `fsck --full` must REPORT it (exit 1),
+    // not crash the pack decoder.
+    let mut bytes = fs::read(&pack).unwrap();
+    bytes[20] ^= 0xff;
+    fs::write(&pack, &bytes).unwrap();
+
+    let full = run_libra_command(&["fsck", "--full"], repo.path());
+    assert_eq!(
+        full.status.code(),
+        Some(1),
+        "corrupt pack fails fsck --full"
+    );
+    let stderr = String::from_utf8_lossy(&full.stderr);
+    assert!(
+        stderr.contains("bad packfile checksum"),
+        "reports the corrupt pack: {stderr}"
+    );
+    assert!(!stderr.contains("panic"), "must not panic: {stderr}");
+
+    // `--no-full` skips the pack check, so the corrupt pack is not flagged.
+    assert_cli_success(
+        &run_libra_command(&["fsck", "--no-full"], repo.path()),
+        "fsck --no-full skips pack verification",
+    );
+}
+
+#[test]
+#[serial]
+fn fsck_full_reports_corrupt_index() {
+    let repo = tempdir().expect("repo");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    let pack = install_pack_fixture(repo.path());
+
+    let idx = pack.with_extension("idx");
+    let mut bytes = fs::read(&idx).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff; // corrupt the index trailing checksum
+    fs::write(&idx, &bytes).unwrap();
+
+    let full = run_libra_command(&["fsck", "--full"], repo.path());
+    assert_eq!(full.status.code(), Some(1), "corrupt idx fails fsck --full");
+    let stderr = String::from_utf8_lossy(&full.stderr);
+    assert!(
+        stderr.contains("test.idx"),
+        "reports the corrupt idx: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn fsck_full_detects_mismatched_index() {
+    let repo = tempdir().expect("repo");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    let pack = install_pack_fixture(repo.path());
+
+    // Replace the pack with a DIFFERENT valid pack while keeping the original
+    // index: the index's recorded pack checksum no longer matches the pack's
+    // trailer, which the cross-check must catch.
+    let other = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/packs/ref-delta-sha1.pack");
+    fs::copy(&other, &pack).expect("swap in a different pack");
+
+    let full = run_libra_command(&["fsck", "--full"], repo.path());
+    assert_eq!(
+        full.status.code(),
+        Some(1),
+        "mismatched index fails fsck --full"
+    );
+    assert!(
+        String::from_utf8_lossy(&full.stderr).contains("does not match the packfile"),
+        "reports the pack/index mismatch"
+    );
+}
+
+#[test]
+#[serial]
+fn fsck_full_json_verbose_emits_clean_json() {
+    let repo = tempdir().expect("repo");
+    init_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+    install_pack_fixture(repo.path());
+
+    // `--json --verbose` must not interleave human progress lines into the JSON
+    // stream — stdout has to parse as a single JSON document.
+    let out = run_libra_command(&["--json", "fsck", "--full", "--verbose"], repo.path());
+    assert_cli_success(&out, "fsck --json --full --verbose");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["command"], "fsck");
+}

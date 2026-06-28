@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；`--strict` 已支持（commit email/timezone、commit tree/parent 存在性与类型、tree 条目存在性/类型/排序检查，刻意窄于 Git：未实现 `.gitmodules`/pathname-charset 检查与 `fsck.<msg-id>` 严重级别配置）；JSON/machine 输出和 pack 校验 surface（`--full`/`--no-full`）尚未完整公开。
+- 兼容级别：`partial`。对象、refs、索引、reflog 和 connectivity 检查已支持；`--strict` 已支持（commit email/timezone、commit tree/parent 存在性与类型、tree 条目存在性/类型/排序检查，刻意窄于 Git：未实现 `.gitmodules`/pathname-charset 检查与 `fsck.<msg-id>` 严重级别配置）；`--full`/`--no-full` pack 校验已公开（默认开启，与 git 一致；逐个校验 `.pack` 的尾部校验和 + 经 `verify_pack_index::parse_index` 校验 `.idx`，**不解码 pack 对象**故对 body-corrupt pack 报错而非 panic）；JSON/machine 输出已公开。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -55,7 +55,7 @@ flowchart TD
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
 | 输出契约 | `execute_safe` 当前未使用 `OutputConfig` 渲染 JSON/machine 输出。 | 后续实现时需要同步源码、测试和兼容矩阵。 |
-| Git 参数缺口 | pack 校验入口（`--full`/`--no-full`）当前未公开。 | 后续实现时需要补对应回归测试并同步兼容矩阵。 |
+| ✅ 已实现 | pack 校验入口（`--full`/`--no-full`） | 已公开：`FsckArgs` 增 `--full`（默认）/`--no-full`，Stage 11 `check_packs` 对 `.libra/objects/pack/*.pack` 逐个校验——`verify_pack_self_checksum` **流式**重算 `.pack` 尾部哈希（`PackHasher` 按 `get_hash_kind` 选 SHA1/SHA256，64KiB 分块读取、不整文件载入内存，检出 body corruption），`.idx` 经 `verify_pack_index::parse_index`（接受 git/libra 索引哈希变体 + fanout/排序校验），并**交叉校验** `parsed.pack_hash` 与 `.pack` 实测尾部哈希一致（检出 stale/swapped idx）。pack 目录/条目读取失败上报为错误而非静默跳过。`--verbose` 进度行经 `stdout_suppressed()` 守护（含既有 check_index/connectivity/objects/reflog 阶段），故 `--json --verbose` 不污染 JSON。**不调用 `decode_pack`**，故 body-corrupt pack 报 `error:` + 退出 1 而非 panic（这正是历史 v1407 集成被移除的原因，现以校验和路径绕开）。带集成测试 `fsck_full_passes_on_a_valid_pack`、`fsck_full_reports_corrupt_pack_without_panicking`、`fsck_full_reports_corrupt_index`、`fsck_full_detects_mismatched_index`、`fsck_full_json_verbose_emits_clean_json`。 |
 
 ## 维护要求
 

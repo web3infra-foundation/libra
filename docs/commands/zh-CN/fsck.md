@@ -123,6 +123,15 @@ libra fsck --tags
 libra fsck --connectivity-only
 ```
 
+### `--full` / `--no-full`
+
+校验 packfile 完整性。**默认开启**（与 Git 一致），用 `--no-full` 跳过。逐个校验 `.pack` 的尾部校验和与 `.idx` 的索引校验和，故损坏（含截断或 body 损坏的 pack）会被报告为错误并以非零码退出。该检查读取原始字节、**不解码** pack 对象，因此对损坏 pack 是报错而非崩溃。
+
+```bash
+libra fsck --full      # 默认行为，显式写出
+libra fsck --no-full   # 跳过 packfile 校验
+```
+
 ## 示例
 
 ```bash
