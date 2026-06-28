@@ -15,7 +15,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
+use git_internal::{
+    hash::{HashKind, ObjectHash},
+    internal::object::commit::Commit,
+};
 use serde::Serialize;
 
 use crate::{
@@ -68,6 +71,9 @@ Examples:
   # Send the patch as a MIME attachment (or inline) part
   libra format-patch --attach --stdout HEAD~2..HEAD
   libra format-patch --inline --stdout HEAD~2..HEAD
+
+  # Record the base commit (and prerequisite patch-ids) for `git am --base`
+  libra format-patch --base=origin/main --stdout origin/main..HEAD
 ";
 
 // ---------------------------------------------------------------------------
@@ -165,6 +171,13 @@ pub struct FormatPatchArgs {
     /// the given ref. Commits without a note are emitted unchanged.
     #[arg(long = "notes", value_name = "REF", num_args = 0..=1, require_equals = true)]
     pub notes: Option<Option<String>>,
+
+    /// Record the base tree/commit the series applies to (Git's `--base`). Emits
+    /// a `base-commit:` trailer (and `prerequisite-patch-id:` lines for commits
+    /// between the base and the series) on the last patch, or the cover letter
+    /// when `--cover-letter` is given. The base must be an ancestor of the series.
+    #[arg(long = "base", value_name = "COMMIT")]
+    pub base: Option<String>,
 
     /// Create multipart/mixed messages with the commit log in the body and the
     /// patch itself as a separate `attachment` part.
@@ -333,6 +346,10 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
             .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
 
+    // `--base`: compute the base-commit / prerequisite-patch-id trailer. It is
+    // attached to the cover letter when present, otherwise to the last patch.
+    let base_block = build_base_block(&args, &commits).await?;
+
     // 3. Determine output directory
     let out_dir = resolve_output_dir(&args)?;
 
@@ -349,7 +366,12 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
     // 6. Generate cover letter if requested
     let mut records = Vec::new();
     if args.cover_letter {
-        let cover_body = format_cover_letter(&args, &commits, from_identity.as_ref())?;
+        let cover_body = format_cover_letter(
+            &args,
+            &commits,
+            from_identity.as_ref(),
+            base_block.as_deref(),
+        )?;
         let path = write_patch_file(&args, &out_dir, 0, total, start_num, "", &cover_body)?;
         if !output.quiet {
             eprintln!("{}", path.display());
@@ -365,6 +387,12 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
     // 7. Iterate commits and generate patches
     for (idx, commit) in commits.iter().enumerate() {
         let patch_num = start_num + idx;
+        // Without a cover letter, the base trailer rides on the last patch.
+        let patch_base_block = if !args.cover_letter && idx == total - 1 {
+            base_block.as_deref()
+        } else {
+            None
+        };
         let patch_body = format_patch_body(
             &args,
             commit,
@@ -373,6 +401,7 @@ pub async fn execute_safe(mut args: FormatPatchArgs, output: &OutputConfig) -> C
             start_num,
             &thread_id,
             from_identity.as_ref(),
+            patch_base_block,
         )
         .await?;
         let slug = patch_slug(commit, &args);
@@ -530,6 +559,7 @@ async fn resolve_current_head() -> Result<ObjectHash, CliError> {
 // ---------------------------------------------------------------------------
 
 /// Assemble the complete mbox body for a single patch.
+#[allow(clippy::too_many_arguments)]
 async fn format_patch_body(
     args: &FormatPatchArgs,
     commit: &Commit,
@@ -538,6 +568,7 @@ async fn format_patch_body(
     start_num: usize,
     thread_id: &Option<String>,
     from_identity: Option<&(String, String)>,
+    base_block: Option<&str>,
 ) -> Result<String, CliError> {
     let mut out = String::new();
 
@@ -706,10 +737,22 @@ async fn format_patch_body(
             "Content-Disposition: {disposition}; filename=\"{filename}\"\n\n"
         ));
         out.push_str(&diff);
+        // The `--base` trailer (last patch only) goes inside the patch part,
+        // after the diff and before the closing boundary, matching Git.
+        if let Some(block) = base_block {
+            out.push('\n');
+            out.push_str(block);
+        }
         out.push_str(&format!("\n--{boundary}--\n"));
     } else {
         out.push_str(&message_section);
         out.push_str(&diff);
+        // `--base` trailer (last patch only): a blank line, then the
+        // base-commit / prerequisite-patch-id block, before the signature.
+        if let Some(block) = base_block {
+            out.push('\n');
+            out.push_str(block);
+        }
         push_signature(&mut out, args);
     }
 
@@ -786,6 +829,205 @@ fn push_signature(out: &mut String, args: &FormatPatchArgs) {
 }
 
 // ---------------------------------------------------------------------------
+// `--base`: base-commit / prerequisite-patch-id trailer
+// ---------------------------------------------------------------------------
+
+/// Hash a byte buffer with the repository's object hash algorithm, returning the
+/// raw digest bytes (20 for SHA-1, 32 for SHA-256).
+fn patch_id_digest(kind: HashKind, bytes: &[u8]) -> Vec<u8> {
+    use sha1::Digest as _;
+    match kind {
+        HashKind::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
+        HashKind::Sha256 => {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(bytes).to_vec()
+        }
+    }
+}
+
+/// `git`'s `remove_space`: drop every ASCII whitespace byte (space, tab, the
+/// vertical-tab/form-feed/carriage-return controls, and newline) from a line, so
+/// the patch-id is whitespace-insensitive exactly like Git's default.
+fn strip_whitespace(line: &str) -> Vec<u8> {
+    line.bytes()
+        .filter(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+        .collect()
+}
+
+/// Parse a hunk header `@@ -a,b +c,d @@` into the old/new line counts (`b`/`d`),
+/// defaulting an omitted count to 1 (`@@ -a +c @@`). Matches Git's
+/// `scan_hunk_header`, which uses only the counts (not the line numbers) so the
+/// patch-id is independent of where the hunk sits in the file.
+fn scan_hunk_header(line: &str) -> (i64, i64) {
+    let count = |seg: &str| -> i64 {
+        seg.split_once(',')
+            .map(|(_, c)| c.parse::<i64>().unwrap_or(1))
+            .unwrap_or(1)
+    };
+    let mut parts = line.trim_start_matches("@@ ").split_whitespace();
+    let old = parts.next().unwrap_or("").trim_start_matches('-');
+    let new = parts.next().unwrap_or("").trim_start_matches('+');
+    (count(old), count(new))
+}
+
+/// Compute Git's (stable) patch-id for a single commit: the diff against its
+/// first parent, canonicalised line-by-line (skip `index` lines, ignore hunk
+/// line numbers, strip whitespace), hashed per-file and combined with a
+/// byte-wise add-with-carry so the result is independent of file order.
+/// Byte-for-byte compatible with `git patch-id --stable` / `format-patch`'s
+/// `prerequisite-patch-id`.
+async fn git_patch_id_for_commit(commit: &Commit) -> Result<String, CliError> {
+    // NOTE: text diffs are byte-exact with `git patch-id --stable`. BINARY-file
+    // prerequisites are a documented limitation: Libra's diff renderer emits a
+    // bare `Binary files differ` marker (Git writes `Binary files a/X and b/X
+    // differ`), and Git's format-patch even computes binary prerequisite ids via
+    // an internal path that differs from its own `git patch-id`, so a binary
+    // prerequisite's id is not guaranteed to match Git. Binary blobs in mailed
+    // patch series are rare; the text case (the real-world use) is exact.
+    let diff = log::generate_diff(commit, vec![]).await?;
+    let kind = commit.id.kind();
+
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut before: i64 = -1;
+    let mut after: i64 = -1;
+    let mut patchlen = 0usize;
+
+    for line in diff.split_inclusive('\n') {
+        // Skip the leading commit comments until the first file header.
+        if patchlen == 0 && !line.starts_with("diff ") {
+            continue;
+        }
+        // Parsing the per-file header.
+        if before == -1 {
+            if line.starts_with("index ") {
+                continue;
+            } else if line.starts_with("--- ") {
+                before = 1;
+                after = 1;
+            } else if !line.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                break;
+            }
+        }
+        // End of the current hunk: either the next hunk header or the next file.
+        if before == 0 && after == 0 {
+            if line.starts_with("@@ -") {
+                (before, after) = scan_hunk_header(line);
+                continue;
+            }
+            if !line.starts_with("diff ") {
+                break;
+            }
+            // A new file: finalise the current file's bytes and reset.
+            files.push(std::mem::take(&mut cur));
+            before = -1;
+            after = -1;
+        }
+        match line.as_bytes().first() {
+            Some(b'-') => before -= 1,
+            Some(b'+') => after -= 1,
+            Some(b' ') => {
+                before -= 1;
+                after -= 1;
+            }
+            _ => {}
+        }
+        let chunk = strip_whitespace(line);
+        patchlen += chunk.len();
+        cur.extend_from_slice(&chunk);
+    }
+    if !cur.is_empty() {
+        files.push(cur);
+    }
+
+    // Stable mode combines the per-file digests with a byte-wise addition and
+    // carry (Git's `flush_one_hunk`), so the result is independent of file order
+    // but — unlike a plain XOR — matches `git patch-id --stable` byte-for-byte on
+    // multi-file diffs.
+    let mut acc = vec![0u8; kind.size()];
+    for file in &files {
+        let digest = patch_id_digest(kind, file);
+        let mut carry: u16 = 0;
+        for (a, b) in acc.iter_mut().zip(digest) {
+            carry += u16::from(*a) + u16::from(b);
+            *a = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+    }
+    Ok(acc.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Build the `--base` trailer block (`base-commit:` plus any
+/// `prerequisite-patch-id:` lines), or `None` when `--base` is not given.
+///
+/// The base must be an ancestor of the series; the prerequisites are the commits
+/// between the base and the parent of the first patch, oldest-first — each
+/// rendered as its Git patch-id. Returns a usage/fatal error for a non-ancestor
+/// base or the unsupported `auto` form, matching Git's diagnostics.
+async fn build_base_block(
+    args: &FormatPatchArgs,
+    commits: &[Commit],
+) -> Result<Option<String>, CliError> {
+    let Some(base_spec) = args.base.as_deref() else {
+        return Ok(None);
+    };
+
+    // `--base=auto` infers the base from the upstream of the range; that requires
+    // upstream tracking Libra does not resolve here, so it is rejected (matching
+    // Git, which also fails when it cannot determine the upstream).
+    if base_spec == "auto" {
+        return Err(CliError::command_usage(
+            "--base=auto is not supported; specify the base commit explicitly with \
+             --base=<commit>",
+        ));
+    }
+
+    let base = resolve_single_rev(base_spec).await?;
+
+    // The series applies on top of the first patch's parent.
+    let Some(series_parent) = commits[0].parent_commit_ids.first().copied() else {
+        return Err(CliError::fatal(
+            "base commit should be the ancestor of revision list".to_string(),
+        )
+        .with_exit_code(128)
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
+    };
+
+    // Commits reachable from the series parent (newest-first, inclusive).
+    let reach_parent = log::get_reachable_commits(series_parent.to_string(), None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to walk commits: {e}")))?;
+    if !reach_parent.iter().any(|c| c.id == base) {
+        return Err(CliError::fatal(
+            "base commit should be the ancestor of revision list".to_string(),
+        )
+        .with_exit_code(128)
+        .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
+
+    // Prerequisites = reachable(series_parent) \ reachable(base), oldest-first.
+    let base_reach = log::get_reachable_commits(base.to_string(), None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to walk commits: {e}")))?;
+    let base_set: HashSet<ObjectHash> = base_reach.iter().map(|c| c.id).collect();
+    let mut prereqs: Vec<&Commit> = reach_parent
+        .iter()
+        .filter(|c| !base_set.contains(&c.id))
+        // Git prepares prerequisites with a non-merge walk (`max_parents = 1`),
+        // so merge commits are not emitted as prerequisite patch-ids.
+        .filter(|c| c.parent_commit_ids.len() <= 1)
+        .collect();
+    prereqs.reverse(); // newest-first -> oldest-first
+
+    let mut block = format!("base-commit: {base}\n");
+    for commit in prereqs {
+        let id = git_patch_id_for_commit(commit).await?;
+        block.push_str(&format!("prerequisite-patch-id: {id}\n"));
+    }
+    Ok(Some(block))
+}
+
+// ---------------------------------------------------------------------------
 // Threading helpers
 // ---------------------------------------------------------------------------
 
@@ -839,6 +1081,7 @@ fn format_cover_letter(
     args: &FormatPatchArgs,
     commits: &[Commit],
     from_identity: Option<&(String, String)>,
+    base_block: Option<&str>,
 ) -> Result<String, CliError> {
     let now = Utc::now();
 
@@ -897,6 +1140,12 @@ fn format_cover_letter(
         ));
     }
     out.push('\n');
+
+    // `--base` trailer rides on the cover letter when one is present (the blank
+    // line above separates it from the shortlog), before the signature.
+    if let Some(block) = base_block {
+        out.push_str(block);
+    }
 
     push_signature(&mut out, args);
 

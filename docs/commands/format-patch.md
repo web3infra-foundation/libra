@@ -43,6 +43,7 @@ commits, the command exits with an error.
 | `--notes[=<REF>]` | | Append each commit's notes after the `---` line, before the diffstat. Bare `--notes` uses the default ref (`refs/notes/commits`); `--notes=<ref>` reads `<ref>`. Rendered as `Notes:` (default ref) or `Notes (<ref>):`, each line indented four spaces; commits without a note are emitted unchanged | off |
 | `--attach` | | Emit each patch as a `multipart/mixed` MIME message: the log message + diffstat in a `text/plain` part, the diff in a `text/x-patch` part with `Content-Disposition: attachment`. Mutually exclusive with `--inline` | off |
 | `--inline` | | Like `--attach`, but the patch part uses `Content-Disposition: inline` | off |
+| `--base <COMMIT>` | | Record a `base-commit:` trailer (and a `prerequisite-patch-id:` line for each non-merge commit between the base and the series, oldest-first) so `git am --base` can verify the series applies. The trailer rides on the last patch, or the cover letter under `--cover-letter`. The base must be an ancestor of the series (otherwise exit 128). `--base=auto` is not supported (exit 129). Patch-ids match `git patch-id --stable` for text diffs; **binary-file prerequisites are not guaranteed to match Git** | off |
 | `--full-index` | | Show full object IDs in diff index header lines | false |
 | `--no-stat` | | Suppress the diffstat summary | false |
 | `--keep-subject` | | Keep the original `[PATCH]` prefix in the commit subject | false |
@@ -72,6 +73,9 @@ libra format-patch -v 2 --in-reply-to '<msgid@example>' origin/main..
 
 # Pipe to an external tool
 libra format-patch --stdout origin/main.. | git am
+
+# Record the base the series applies to (for `git am --base`)
+libra format-patch --base=origin/main --stdout origin/main..HEAD
 ```
 
 ## Output Format
@@ -115,5 +119,7 @@ under `--numbered-files`.
 |----------|-----------------|
 | Not in a Libra repository | `LBR-REPO-001` |
 | Unknown revision or empty range | `LBR-CLI-003` |
+| `--base` is not an ancestor of the series | `LBR-CLI-003` (exit 128) |
+| `--base=auto` (unsupported) | `LBR-CLI-002` (exit 129) |
 | Output file write failure | `LBR-IO-002` |
 | Output directory creation failure | `LBR-IO-002` |

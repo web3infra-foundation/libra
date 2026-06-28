@@ -1414,3 +1414,254 @@ fn from_header_rewrites_author() {
         "cover letter carries the --from identity (not a blank From:): {cover_text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --base: base-commit / prerequisite-patch-id trailer
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn base_records_base_commit_and_prerequisite_patch_ids() {
+    // create_committed_repo_via_cli gives 1 commit; +3 → 4 commits total.
+    let repo = repo_with_commits(3);
+    let p = repo.path();
+
+    let base_sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD~3"], p).stdout)
+        .trim()
+        .to_string();
+
+    // Base older than the series parent → base-commit plus one prerequisite per
+    // commit between the base and the series parent (oldest-first).
+    let out = run_libra_command(
+        &["format-patch", "--base=HEAD~3", "--stdout", "HEAD~1..HEAD"],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --base");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("base-commit: {base_sha}\n")),
+        "records the base commit: {text}"
+    );
+    let prereqs = text.matches("prerequisite-patch-id: ").count();
+    assert_eq!(
+        prereqs, 2,
+        "two commits lie between base and series parent: {text}"
+    );
+    // The base trailer precedes the signature footer.
+    let base_pos = text.find("base-commit:").unwrap();
+    let sig_pos = text.find("\n-- \n").unwrap();
+    assert!(
+        base_pos < sig_pos,
+        "base trailer comes before the signature"
+    );
+}
+
+#[test]
+#[serial]
+fn base_multi_file_prerequisite_patch_id_matches_git() {
+    // A prerequisite commit that touches TWO files exercises Git's stable
+    // patch-id combiner (byte-wise add-with-carry, NOT XOR). The patch-id is
+    // derived purely from the diff content, so the expected value is the one
+    // `git patch-id --stable` produces for the same change (a->A, b->B).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f1"), "a\n").unwrap();
+    fs::write(p.join("f2"), "b\n").unwrap();
+    run_libra_command(&["add", "f1", "f2"], p);
+    run_libra_command(&["commit", "-m", "base", "--no-verify"], p);
+    fs::write(p.join("f1"), "A\n").unwrap();
+    fs::write(p.join("f2"), "B\n").unwrap();
+    run_libra_command(&["add", "f1", "f2"], p);
+    run_libra_command(&["commit", "-m", "multi", "--no-verify"], p);
+    fs::write(p.join("f3"), "c\n").unwrap();
+    run_libra_command(&["add", "f3"], p);
+    run_libra_command(&["commit", "-m", "tip", "--no-verify"], p);
+
+    let out = run_libra_command(
+        &["format-patch", "--base=HEAD~2", "--stdout", "HEAD~1..HEAD"],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --base multi-file prereq");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("prerequisite-patch-id: 41738f97b408e386f1d209bee7dc2096eeafa713"),
+        "multi-file prerequisite patch-id must match git patch-id --stable: {text}"
+    );
+}
+
+#[test]
+#[serial]
+fn base_prerequisites_skip_merge_commits() {
+    // base -> main2 -> merge(feat) -> tip. With base at the root and the series =
+    // tip, the prerequisites are main2 + feat — the MERGE commit is skipped, like
+    // git's non-merge (`max_parents = 1`) prerequisite walk.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f"), "1\n").unwrap();
+    run_libra_command(&["add", "f"], p);
+    run_libra_command(&["commit", "-m", "base", "--no-verify"], p);
+    let base = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    run_libra_command(&["branch", "feat"], p);
+    run_libra_command(&["switch", "feat"], p);
+    fs::write(p.join("f"), "1\n2\n").unwrap();
+    run_libra_command(&["add", "f"], p);
+    run_libra_command(&["commit", "-m", "feat", "--no-verify"], p);
+
+    run_libra_command(&["switch", "main"], p);
+    fs::write(p.join("g"), "1\n0\n").unwrap();
+    run_libra_command(&["add", "g"], p);
+    run_libra_command(&["commit", "-m", "main2", "--no-verify"], p);
+    let merge = run_libra_command(&["merge", "feat", "-m", "merge feat"], p);
+    assert_cli_success(&merge, "merge feat");
+
+    fs::write(p.join("h"), "x\n").unwrap();
+    run_libra_command(&["add", "h"], p);
+    run_libra_command(&["commit", "-m", "tip", "--no-verify"], p);
+
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            &format!("--base={base}"),
+            "--stdout",
+            "HEAD~1..HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --base with a merge in the prereqs");
+    let prereqs = String::from_utf8_lossy(&out.stdout)
+        .matches("prerequisite-patch-id: ")
+        .count();
+    assert_eq!(
+        prereqs, 2,
+        "merge commit must not be emitted as a prerequisite"
+    );
+}
+
+#[test]
+#[serial]
+fn base_with_attach_emits_trailer_in_patch_part() {
+    let repo = repo_with_commits(3);
+    let p = repo.path();
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "--attach",
+            "--base=HEAD~3",
+            "--stdout",
+            "HEAD~1..HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --attach --base");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("base-commit: "),
+        "attach output carries the base trailer: {text}"
+    );
+    // The trailer sits inside the patch part, before the closing MIME boundary.
+    let base_pos = text.find("base-commit:").unwrap();
+    let close_pos = text.rfind("--\n").unwrap();
+    assert!(
+        base_pos < close_pos,
+        "base trailer precedes the closing boundary"
+    );
+}
+
+#[test]
+#[serial]
+fn base_direct_parent_has_no_prerequisites() {
+    let repo = repo_with_commits(3);
+    let p = repo.path();
+    // Base == the series parent → base-commit only, no prerequisites.
+    let out = run_libra_command(
+        &["format-patch", "--base=HEAD~1", "--stdout", "HEAD~1..HEAD"],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --base direct parent");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("base-commit: "), "has base-commit: {text}");
+    assert!(
+        !text.contains("prerequisite-patch-id:"),
+        "no prerequisites when base is the direct parent: {text}"
+    );
+}
+
+#[test]
+#[serial]
+fn base_on_non_ancestor_fails() {
+    let repo = repo_with_commits(3);
+    let p = repo.path();
+    // A sibling commit that is not an ancestor of the series.
+    run_libra_command(&["branch", "side", "HEAD~2"], p);
+    run_libra_command(&["switch", "side"], p);
+    fs::write(p.join("side.txt"), "side\n").unwrap();
+    run_libra_command(&["add", "side.txt"], p);
+    run_libra_command(&["commit", "-m", "side", "--no-verify"], p);
+    run_libra_command(&["switch", "main"], p);
+
+    let out = run_libra_command(
+        &["format-patch", "--base=side", "--stdout", "HEAD~1..HEAD"],
+        p,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "non-ancestor base is rejected: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn base_auto_is_rejected() {
+    let repo = repo_with_commits(3);
+    let out = run_libra_command(
+        &["format-patch", "--base=auto", "--stdout", "HEAD~1..HEAD"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "--base=auto is a usage error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn base_with_cover_letter_lands_on_cover() {
+    let repo = repo_with_commits(3);
+    let p = repo.path();
+    let dir = tempdir().unwrap();
+    let out = run_libra_command(
+        &[
+            "format-patch",
+            "-o",
+            dir.path().to_str().unwrap(),
+            "--cover-letter",
+            "--base=HEAD~3",
+            "HEAD~1..HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&out, "format-patch --cover-letter --base");
+    let cover = fs::read_to_string(dir.path().join("0000-cover-letter.patch")).expect("cover");
+    assert!(
+        cover.contains("base-commit: "),
+        "base trailer on the cover: {cover}"
+    );
+    // Exactly one file (the cover letter) carries the base trailer — the patch
+    // files must not duplicate it.
+    let with_base = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| fs::read_to_string(e.unwrap().path()).ok())
+        .filter(|t| t.contains("base-commit:"))
+        .count();
+    assert_eq!(
+        with_base, 1,
+        "only the cover letter carries the base trailer"
+    );
+}
