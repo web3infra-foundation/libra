@@ -1495,10 +1495,26 @@ fn render_format(
     } else {
         CommitFields::default()
     };
+    // `%(worktreepath)`: the absolute path of the worktree that has this ref
+    // checked out, else empty. Libra worktrees share a single HEAD, so the
+    // checked-out branch is the current HEAD branch and the reported path is the
+    // CURRENT worktree — the one the command runs in (`util::working_dir()`).
+    // Computed lazily, only when the atom is present. Matches Git for a
+    // single-worktree repository.
+    let worktreepath =
+        if format.contains("%(worktreepath)") && head_refname == Some(entry.refname.as_str()) {
+            util::working_dir()
+                .canonicalize()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
     // Atom name (inside `%(...)`) -> value. Single-pass substitution below
     // writes each value literally, so a value containing `%(` is never
     // re-parsed as an atom and never trips the unknown-atom check.
-    let atoms: [(&str, &str); 36] = [
+    let atoms: [(&str, &str); 37] = [
+        ("worktreepath", worktreepath.as_str()),
         ("raw:size", raw_size.as_str()),
         ("raw", raw.as_str()),
         ("objectsize", objectsize.as_str()),

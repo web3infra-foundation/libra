@@ -2760,3 +2760,33 @@ async fn test_for_each_ref_symref_atom() {
         "an ordinary remote-tracking ref has an empty %(symref): {s:?}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn test_for_each_ref_worktreepath_atom() {
+    let temp = tempdir().unwrap();
+    setup_repo_with_commit(&temp).await;
+    let p = temp.path();
+    run_libra_command(&["branch", "feature"], p);
+    run_libra_command(&["tag", "v1"], p);
+
+    let out = run_libra_command(&["for-each-ref", "--format=%(refname)|%(worktreepath)"], p);
+    assert_cli_success(&out, "for-each-ref %(worktreepath)");
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The checked-out branch reports the (canonicalized, absolute) current
+    // worktree path; every other ref is empty — matching git for a
+    // single-worktree repo.
+    let want = p.canonicalize().unwrap().to_string_lossy().into_owned();
+    assert!(
+        s.lines().any(|l| l == format!("refs/heads/main|{want}")),
+        "current branch reports the worktree path: {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == "refs/heads/feature|"),
+        "a non-checked-out branch has an empty %(worktreepath): {s:?}"
+    );
+    assert!(
+        s.lines().any(|l| l == "refs/tags/v1|"),
+        "a tag has an empty %(worktreepath): {s:?}"
+    );
+}
