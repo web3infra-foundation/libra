@@ -274,9 +274,10 @@ pub struct BranchArgs {
 
     /// Sort the listed branches by key: `refname` (default), `version:refname` /
     /// `v:refname` (numeric-aware), `committerdate` / `creatordate` / `authordate`
-    /// (the tip commit's committer / author date), or `objectsize` (the tip
-    /// object's byte size). A leading `-` reverses (e.g. `-committerdate` lists
-    /// newest first). Implies --list.
+    /// (the tip commit's committer / author date), `objectsize` (the tip
+    /// object's byte size), or `objectname` (the tip commit's object id). A
+    /// leading `-` reverses (e.g. `-committerdate` lists newest first). Implies
+    /// --list.
     #[clap(long, group = "query", value_name = "key")]
     pub sort: Option<String>,
 
@@ -488,7 +489,7 @@ impl From<BranchError> for CliError {
             ))
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint(
-                "supported keys: refname, version:refname (v:refname), committerdate, creatordate, authordate, objectsize, each reversible with a leading '-'",
+                "supported keys: refname, version:refname (v:refname), committerdate, creatordate, authordate, objectsize, objectname, each reversible with a leading '-'",
             ),
             BranchError::InvalidUpstream(upstream) => {
                 CliError::fatal(format!("invalid upstream '{upstream}'"))
@@ -1878,8 +1879,9 @@ async fn resolve_commits(commits: &[String]) -> Result<HashSet<ObjectHash>, Bran
 }
 
 /// Sort branch list entries in place by `--sort` key. Supports `refname`,
-/// `version:refname` / `v:refname` (numeric-aware), and `committerdate` /
-/// `creatordate` (the tip commit's committer date), with a
+/// `version:refname` / `v:refname` (numeric-aware), `committerdate` /
+/// `creatordate` / `authordate` (the tip commit's date), `objectsize` (the tip
+/// object's byte size), and `objectname` (the tip commit's object id), with a
 /// leading `-` reversing. Unknown keys are a usage error.
 fn sort_branch_entries(
     entries: &mut [BranchListEntry],
@@ -1955,6 +1957,7 @@ fn sort_branch_entries(
             | "creatordate"
             | "authordate"
             | "objectsize"
+            | "objectname"
     ) {
         return Err(BranchError::InvalidSortKey(base.to_string()));
     }
@@ -1986,6 +1989,10 @@ fn sort_branch_entries(
                 let sb = sizes.get(&b.commit).copied().unwrap_or(0);
                 sa.cmp(&sb)
             }
+            // `objectname` compares the tip commit's object id. Branch hashes are
+            // equal-length hex, so a lexicographic string compare matches Git's
+            // binary-oid ordering; equal ids fall through to the refname tie-break.
+            "objectname" => a.commit.cmp(&b.commit),
             _ => std::cmp::Ordering::Equal,
         }
     };

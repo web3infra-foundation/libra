@@ -2499,6 +2499,47 @@ fn test_branch_sort_by_committer_date() {
         "-objectsize: larger aaa must precede smaller zzz: {by_size_rev:?}"
     );
 
+    // objectname sorts by the tip commit's object id (lexicographic on the hex
+    // hash, matching Git's binary-oid order), with the refname tie-break for
+    // branches sharing a tip. Read the hash alongside each name and assert the
+    // listing matches a hash-sorted expectation derived from the same data, so
+    // the check is deterministic regardless of which hashes are produced.
+    let with_hash = |args: &[&str]| -> Vec<(String, String)> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "branch sort objectname");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim_start_matches(['*', ' ']).trim();
+                let (h, n) = l.split_once(' ')?;
+                Some((h.to_string(), n.to_string()))
+            })
+            .collect()
+    };
+    let asc = with_hash(&[
+        "branch",
+        "--sort=objectname",
+        "--format=%(objectname) %(refname:short)",
+    ]);
+    let mut expect = asc.clone();
+    expect.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    assert_eq!(
+        asc, expect,
+        "objectname: branches ordered by ascending tip hash"
+    );
+    let desc = with_hash(&[
+        "branch",
+        "--sort=-objectname",
+        "--format=%(objectname) %(refname:short)",
+    ]);
+    let mut expect_rev = desc.clone();
+    // `-` reverses the primary (hash) key but the refname tie-break stays ascending.
+    expect_rev.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    assert_eq!(
+        desc, expect_rev,
+        "-objectname: branches ordered by descending tip hash"
+    );
+
     // An unknown sort key is a usage error (exit 129).
     let bad = run_libra_command(&["branch", "--sort=bogus"], p);
     assert_eq!(bad.status.code(), Some(129), "unknown sort key exits 129");

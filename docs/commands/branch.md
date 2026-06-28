@@ -50,7 +50,7 @@ The `--contains` and `--no-contains` filters (aliased as `--with` and `--without
 | | `--points-at` | `<object>` | Only list branches whose tip points at the object |
 | | `--merged` | `[commit]` (default HEAD) | Only list branches already merged into the commit (tip reachable from it) |
 | | `--no-merged` | `[commit]` (default HEAD) | Only list branches not yet merged into the commit |
-| | `--sort` | `<key>` | Sort the list by `refname`, `version:refname` (`v:refname`), `committerdate`/`creatordate`/`authordate` (the tip commit's committer date — or author date for `authordate`), or `objectsize` (the tip object's byte size); a leading `-` reverses (use `--sort=-committerdate` for the dash form) |
+| | `--sort` | `<key>` | Sort the list by `refname`, `version:refname` (`v:refname`), `committerdate`/`creatordate`/`authordate` (the tip commit's committer date — or author date for `authordate`), `objectsize` (the tip object's byte size), or `objectname` (the tip commit's object id); a leading `-` reverses (use `--sort=-committerdate` for the dash form) |
 | | `--ignore-case` | | Sort branch names case-insensitively where applicable |
 | | `--format` | `<format>` | Render each branch with a for-each-ref format string (e.g. `%(refname:short)`, `%(objectname)`, `%(HEAD)`, `%(upstream)`, `%(if)`…`%(end)`). Replaces the default `* name` listing (and `-v`/`--column`); shares the for-each-ref atom engine |
 | | `--column[=<mode>]` | `always` / `auto` / `never` | Lay the branch list out in columns instead of one per line (bare `--column` means `always`; `auto` only when stdout is a terminal). Column mode shows plain, uncolored names. |
@@ -245,7 +245,7 @@ The trade-off is that refs are not directly inspectable as plain files. Libra co
 | Contains filter | `git branch --contains <commit>` | `libra branch --contains <commit>` | `jj log -r 'branches() & ancestors(<rev>)'` |
 | Merged filter | `git branch --merged [<commit>]` / `--no-merged` | `libra branch --merged [<commit>]` / `--no-merged` | `jj log -r 'branches() & ::<rev>'` |
 | Points-at filter | `git branch --points-at <object>` | `libra branch --points-at <object>` | N/A |
-| Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname / committerdate / creatordate / authordate / objectsize) | `jj branch list` (revset order) |
+| Sort list | `git branch --sort <key>` | `libra branch --sort <key>` (refname / version:refname / committerdate / creatordate / authordate / objectsize / objectname) | `jj branch list` (revset order) |
 | Custom format | `git branch --format <format>` | `libra branch --format <format>` (for-each-ref atoms; replaces `* name`/`-v`/`--column`) | N/A |
 | Column layout | `git branch --column[=<mode>]` | `libra branch --column[=<mode>]` (`--no-column` countermands) | N/A |
 | Verbose listing | `git branch -v` / `-vv` | `libra branch -v` (sha + subject) / `-vv` (+ upstream tracking) | N/A |
