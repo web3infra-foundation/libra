@@ -100,10 +100,13 @@ pub struct TagArgs {
     #[clap(long, value_name = "key")]
     pub sort: Option<String>,
 
-    /// Display the tag list in columns. Modes: `always`, `auto` (only when
-    /// stdout is a terminal), `never`. Bare `--column` means `always`. Cannot
-    /// be combined with `-n`.
-    #[clap(long, value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "n_lines", overrides_with = "no_column")]
+    /// Display the tag list in columns. Accepts a comma/space-separated list of
+    /// options: enablement `always` / `auto` (only when stdout is a terminal) /
+    /// `never`; fill order `column` (top-to-bottom, default) / `row`
+    /// (left-to-right) / `plain` (single column); and column widths `dense`
+    /// (per-column) / `nodense` (uniform, default). Bare `--column` means
+    /// `always`. Cannot be combined with `-n`.
+    #[clap(long, value_name = "options", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "n_lines", overrides_with = "no_column")]
     pub column: Option<String>,
 
     /// Do not display the tag list in columns (equivalent to `--column=never`),
@@ -688,8 +691,9 @@ fn render_tag_output(
     match result {
         TagOutput::List { tags } => {
             if let Some(mode) = column {
-                if resolve_column_enabled(mode)? {
-                    print!("{}", format_tag_columns(tags, column_layout_width()));
+                let spec = parse_column_spec(mode)?;
+                if spec.enabled {
+                    print!("{}", format_tag_columns(tags, column_layout_width(), spec));
                 } else {
                     print!("{}", format_tag_entries(tags));
                 }
@@ -987,21 +991,71 @@ fn trim_tag_message(message: &str, show_lines: usize) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-/// Resolve `--column=<mode>` to whether column layout is active. `always`
-/// forces it, `auto` enables it only when stdout is a terminal, `never`
-/// disables it. Any other value is a usage error.
-pub(crate) fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
+/// Parsed `--column=<options>` spec (Git's comma/space-separated option list).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ColumnSpec {
+    /// Whether column layout is active.
+    pub enabled: bool,
+    /// `dense` → each column is sized to its own widest entry; otherwise
+    /// (`nodense`, the Git default) all columns share the widest entry's width.
+    pub dense: bool,
+    /// `row` → fill row-major (left-to-right); otherwise (`column`, the Git
+    /// default) fill column-major (top-to-bottom).
+    pub row_major: bool,
+    /// `plain` → a single column (one entry per line), regardless of width.
+    pub plain: bool,
+}
+
+/// Parse `--column=<options>`: a comma/space-separated list mixing an enablement
+/// (`always` / `auto` / `never`), a fill order (`column` / `row` / `plain`), and
+/// a density (`dense` / `nodense`), in any order (Git semantics; later tokens of
+/// a kind win). `plain` forces a single column. `auto` enables columns only when
+/// stdout is a terminal. An unknown token is a usage error.
+pub(crate) fn parse_column_spec(mode: &str) -> Result<ColumnSpec, CliError> {
     use std::io::IsTerminal;
-    match mode {
-        "always" => Ok(true),
-        "auto" => Ok(std::io::stdout().is_terminal()),
-        "never" => Ok(false),
-        other => Err(
-            CliError::command_usage(format!("unsupported --column mode '{other}'"))
+    let mut enabled: Option<bool> = None;
+    let mut dense = false; // Git default: nodense
+    let mut row_major = false; // Git default: column-major
+    let mut plain = false;
+    for token in mode.split([',', ' ']).filter(|t| !t.is_empty()) {
+        match token {
+            "always" => enabled = Some(true),
+            "auto" => enabled = Some(std::io::stdout().is_terminal()),
+            "never" => enabled = Some(false),
+            "column" => {
+                row_major = false;
+                plain = false;
+            }
+            "row" => {
+                row_major = true;
+                plain = false;
+            }
+            "plain" => plain = true,
+            "dense" => dense = true,
+            "nodense" => dense = false,
+            other => {
+                return Err(CliError::command_usage(format!(
+                    "unsupported --column mode '{other}'"
+                ))
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint("supported modes: always, auto, never"),
-        ),
+                .with_hint(
+                    "supported options: always, auto, never, column, row, plain, dense, nodense",
+                ));
+            }
+        }
     }
+    // A bare `--column` (or one giving only order/density) enables columns.
+    Ok(ColumnSpec {
+        enabled: enabled.unwrap_or(true),
+        dense,
+        row_major,
+        plain,
+    })
+}
+
+/// Resolve `--column=<options>` to whether column layout is active.
+pub(crate) fn resolve_column_enabled(mode: &str) -> Result<bool, CliError> {
+    Ok(parse_column_spec(mode)?.enabled)
 }
 
 /// Width used for column layout: the `COLUMNS` environment variable if set and
@@ -1014,28 +1068,100 @@ pub(crate) fn column_layout_width() -> usize {
         .unwrap_or(80)
 }
 
-/// Lay out tag names in dense, column-major order to fit `width` (matching
-/// Git's `tag --column`): column width is the longest name plus two padding
-/// spaces, the number of columns is `width / col_width` (at least one), and
-/// entries fill down each column before moving right. Trailing padding on each
-/// row is trimmed.
-fn format_tag_columns(tags: &[TagListEntry], width: usize) -> String {
+/// Lay out tag names in columns to fit `width`, byte-compatible with Git's
+/// `tag --column`. Mirrors Git's `display_table`: try the fewest rows (most
+/// columns) whose total padded width is strictly less than `width`, using the
+/// per-spec fill order and density.
+///
+/// * Column count: for `rows` = 1, 2, … (`cols = ceil(n / rows)`), compute each
+///   column's width — the widest entry in that column (for `dense`) or the
+///   overall widest entry (for `nodense`) — plus two padding spaces, and pick
+///   the first `rows` whose summed widths are `< width`; fall back to one column.
+/// * Fill order: column-major (top-to-bottom, default) or row-major
+///   (left-to-right, with `row`).
+/// * Trailing padding on each rendered row is trimmed.
+fn format_tag_columns(tags: &[TagListEntry], width: usize, spec: ColumnSpec) -> String {
     let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
     if names.is_empty() {
         return String::new();
     }
-    let max_len = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
-    let col_width = max_len + 2;
-    let cols = std::cmp::max(1, width / col_width);
-    let rows = names.len().div_ceil(cols);
+    // `plain` is a single column (one entry per line), matching Git.
+    if spec.plain {
+        let mut out = String::new();
+        for name in &names {
+            out.push_str(name);
+            out.push('\n');
+        }
+        return out;
+    }
+
+    let n = names.len();
+    // Git lays columns out by terminal DISPLAY width (wide CJK = 2, combining = 0),
+    // not character count, so the column count/padding match at width boundaries.
+    use unicode_width::UnicodeWidthStr;
+    let lens: Vec<usize> = names.iter().map(|s| UnicodeWidthStr::width(*s)).collect();
+    let max_len = *lens.iter().max().unwrap_or(&0);
+    const PAD: usize = 2;
+
+    let idx_at = |row_major: bool, r: usize, c: usize, cols: usize, rows: usize| -> usize {
+        if row_major {
+            r * cols + c
+        } else {
+            c * rows + r
+        }
+    };
+
+    let (rows, col_widths) = if spec.dense {
+        // DENSE: each column is sized to its own widest entry. Pick the fewest
+        // rows (most columns) whose summed padded widths are `< width`. The
+        // per-column widths depend on the fill order, so this is computed for the
+        // actual order. (Matches Git's `display_dense`.)
+        let try_rows = |rows: usize| -> Option<Vec<usize>> {
+            let cols = n.div_ceil(rows);
+            let mut col_widths = vec![0usize; cols];
+            for (c, w) in col_widths.iter_mut().enumerate() {
+                let mut m = 0;
+                for r in 0..rows {
+                    let idx = idx_at(spec.row_major, r, c, cols, rows);
+                    if idx < n {
+                        m = m.max(lens[idx]);
+                    }
+                }
+                *w = m + PAD;
+            }
+            (col_widths.iter().sum::<usize>() < width).then_some(col_widths)
+        };
+        (1..=n)
+            .find_map(|rows| try_rows(rows).map(|w| (rows, w)))
+            .unwrap_or_else(|| (n, vec![max_len + PAD]))
+    } else {
+        // NODENSE: every column shares the widest entry's width. The column count
+        // is the most such columns whose total is strictly `< width` (Git's fit
+        // test), i.e. `(width - 1) / colw`. Column-major then recomputes
+        // `cols = ceil(n / rows)` to drop empty trailing columns (Git's `layout`);
+        // row-major keeps the fitted count (Git does not recompute it).
+        let colw = max_len + PAD;
+        let cols0 = (width.saturating_sub(1) / colw).clamp(1, n);
+        let rows = n.div_ceil(cols0);
+        let cols = if spec.row_major {
+            cols0
+        } else {
+            n.div_ceil(rows).max(1)
+        };
+        (rows, vec![colw; cols])
+    };
+    let cols = col_widths.len();
 
     let mut out = String::new();
     for r in 0..rows {
         let mut line = String::new();
-        for c in 0..cols {
-            let idx = c * rows + r;
-            if idx < names.len() {
-                line.push_str(&format!("{:<col_width$}", names[idx]));
+        for (c, w) in col_widths.iter().enumerate() {
+            let idx = idx_at(spec.row_major, r, c, cols, rows);
+            if idx < n {
+                // Pad by DISPLAY width (Rust's `{:<w}` pads by char count, which
+                // is wrong for wide/zero-width characters).
+                line.push_str(names[idx]);
+                line.extend(std::iter::repeat_n(' ', w.saturating_sub(lens[idx])));
             }
         }
         out.push_str(line.trim_end());

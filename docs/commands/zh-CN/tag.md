@@ -30,7 +30,7 @@ libra tag -d <name>
 | `-e` | `--edit` | | 打开编辑器撰写或编辑附注标签消息。有 `-m`/`-F` 时编辑器以该消息预填，否则撰写新消息（Libra 无独立的 `-a`，故 `-e` 是经编辑器创建附注标签的方式）。注释行被剥离；结果为空则中止。 |
 | `-f` | `--force` | | 覆盖已有标签 |
 | `-n` | `--n-lines` | `<lines>` | 列出时显示的附注行数（0 = 只显示名称） |
-| | `--column` | `[mode]` | 以多列布局列出标签。模式 `always`/`auto`/`never`（缺省 = `always`）。不能与 `-n` 同用。 |
+| | `--column` | `[options]` | 以多列布局列出标签。逗号/空格分隔的选项：启用 `always`/`auto`/`never`（缺省 = `always`）、填充顺序 `column`（自上而下，默认）/ `row`（自左而右）/ `plain`（单列）、列宽 `dense`（每列自适应）/ `nodense`（等宽，默认）。与 `git tag --column` 字节一致。不能与 `-n` 同用。 |
 | | `--no-column` | | 不以多列布局列出标签（等价于 `--column=never`），撤销先前的 `--column`（最后出现者生效）。标签默认每行一个，故单独使用时为 no-op。 |
 | `-s` | `--sign` | | 用 vault PGP 密钥为附注标签签名（需要 `-m`；不与 Git GPG 互操作）。 |
 | | `--no-sign` | | 不签名标签，撤销先前的 `-s`/`--sign`（命令行最后出现者生效）。标签默认不签名，故单独使用时为 no-op。 |
@@ -181,7 +181,7 @@ Libra 保留 Git 的两层标签模型，以保持磁盘格式兼容。轻量标
 | 编辑器编辑消息 | `git tag -e <name>`（配合 `-a`/`-m`/`-F`） | `libra tag -e <name>`（撰写附注消息；`-m`/`-F` 预填；无独立 `-a`） | N/A |
 | 列出标签 | `git tag -l` | `libra tag -l` | `jj tag list` |
 | 带消息列出 | `git tag -l -n3` | `libra tag -l -n 3` | N/A |
-| 多列布局 | `git tag --column[=<mode>]` | `libra tag --column[=<mode>]`（always/auto/never；`--no-column` 撤销） | N/A |
+| 多列布局 | `git tag --column[=<options>]` | `libra tag --column[=<options>]`（always/auto/never + column/row/plain + dense/nodense；`--no-column` 撤销） | N/A |
 | 删除 | `git tag -d <name>` | `libra tag -d <name>` | `jj tag delete <name>` |
 | 强制覆盖 | `git tag -f <name>` | `libra tag -f <name>` | `jj tag create <name>`（总是覆盖） |
 | 签名标签 | `git tag -s <name>` | `libra tag -s -m "msg" <name>`（vault PGP；`--no-sign` 撤销） | N/A |

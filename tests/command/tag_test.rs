@@ -1454,13 +1454,14 @@ fn tag_column_lays_out_in_column_major_order() {
         assert_cli_success(&run_libra_command(&["tag", t], p), t);
     }
 
-    // COLUMNS=8, col_width = 2 + 2 = 4, cols = 8/4 = 2, rows = ceil(4/2) = 2.
-    // Column-major (fill down then across):
+    // COLUMNS=10, col_width = 2 + 2 = 4. The most columns whose total is strictly
+    // < 10 is 2 (2*4 = 8 < 10; 3*4 = 12 too wide). rows = ceil(4/2) = 2.
+    // Column-major (fill down then across), matching `git tag --column`:
     //   v1  v3
     //   v2  v4
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(p)
-        .env("COLUMNS", "8")
+        .env("COLUMNS", "10")
         .args(["tag", "--column=always"])
         .output()
         .expect("run tag --column=always");
@@ -1475,6 +1476,22 @@ fn tag_column_lays_out_in_column_major_order() {
         lines,
         vec!["v1  v3", "v2  v4"],
         "column-major layout: {stdout:?}"
+    );
+
+    // `--column=row` fills left-to-right instead (same 2x2 grid):
+    //   v1  v2
+    //   v3  v4
+    let row = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(p)
+        .env("COLUMNS", "10")
+        .args(["tag", "--column=always,row"])
+        .output()
+        .expect("run tag --column=always,row");
+    let row_out = String::from_utf8_lossy(&row.stdout);
+    assert_eq!(
+        row_out.lines().collect::<Vec<_>>(),
+        vec!["v1  v2", "v3  v4"],
+        "row-major layout: {row_out:?}"
     );
 
     // `never` falls back to one tag per line.
@@ -1675,4 +1692,147 @@ fn tag_edit_rejected_outside_create_mode() {
         !with_delete.status.success(),
         "`tag -e -d` is rejected as a non-create mode"
     );
+}
+
+/// Helper: run `tag -l --sort=refname --column=<spec>` at a fixed COLUMNS width
+/// and return the output lines.
+fn tag_column_lines(p: &std::path::Path, spec: &str, columns: &str) -> Vec<String> {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(p)
+        .env("COLUMNS", columns)
+        .args(["tag", "-l", "--sort=refname", &format!("--column={spec}")])
+        .output()
+        .expect("run tag --column");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn tag_column_dense_row_and_boundaries_match_git() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Widest name is "longtag-xyz" (11) → column width 13.
+    for t in [
+        "v1.0",
+        "v1.1",
+        "v1.2",
+        "v2.0",
+        "v2.1",
+        "v10.0",
+        "alpha",
+        "beta",
+        "rc-1",
+        "longtag-xyz",
+    ] {
+        assert_cli_success(&run_libra_command(&["tag", t], p), t);
+    }
+    let entries = |lines: &[String]| -> Vec<usize> {
+        lines.iter().map(|l| l.split_whitespace().count()).collect()
+    };
+
+    // NODENSE column-major at COLUMNS=80: floor((80-1)/13)=6 columns fit, but
+    // column-major recomputes cols=ceil(10/2)=5 to drop the empty trailing slot.
+    let cols80 = tag_column_lines(p, "always", "80");
+    assert_eq!(
+        entries(&cols80),
+        vec![5, 5],
+        "column,nodense w=80 → 5 cols: {cols80:?}"
+    );
+    // First row is the heads of each (top-to-bottom) column.
+    assert_eq!(
+        cols80[0].split_whitespace().collect::<Vec<_>>(),
+        vec!["alpha", "longtag-xyz", "v1.0", "v1.2", "v2.0"],
+        "column-major fills down each column"
+    );
+
+    // NODENSE row-major at COLUMNS=80: keeps the fitted 6 columns (Git does NOT
+    // recompute for row-major), filled left-to-right.
+    let row80 = tag_column_lines(p, "always,row", "80");
+    assert_eq!(
+        entries(&row80),
+        vec![6, 4],
+        "row,nodense w=80 → 6 cols: {row80:?}"
+    );
+    assert_eq!(
+        row80[0].split_whitespace().collect::<Vec<_>>(),
+        vec!["alpha", "beta", "longtag-xyz", "rc-1", "v1.0", "v1.1"],
+        "row-major fills left-to-right"
+    );
+
+    // Strict-`<` width boundary: 6 columns need 6*13=78, which is NOT < 78, so
+    // width 78 yields 5 columns but width 79 yields 6 (row-major, no recompute).
+    assert_eq!(
+        entries(&tag_column_lines(p, "always,row", "78")),
+        vec![5, 5]
+    );
+    assert_eq!(
+        entries(&tag_column_lines(p, "always,row", "79")),
+        vec![6, 4]
+    );
+
+    // DENSE packs more columns by sizing each to its own widest entry.
+    let dense37 = tag_column_lines(p, "always,dense", "37");
+    assert_eq!(
+        entries(&dense37),
+        vec![4, 3, 3],
+        "dense w=37 → 4 cols: {dense37:?}"
+    );
+    // Exact padding (dense per-column widths 13/6/7): locks byte fidelity.
+    assert_eq!(dense37[0], "alpha        rc-1  v1.2   v2.1");
+
+    // `plain` is one entry per line regardless of width.
+    assert_eq!(tag_column_lines(p, "plain", "200").len(), 10);
+    assert_eq!(tag_column_lines(p, "always,plain", "200").len(), 10);
+
+    // Space-separated tokens parse like comma-separated.
+    assert_eq!(tag_column_lines(p, "always row", "80"), row80);
+
+    // Later token of a kind wins: `always,never` disables columns.
+    let off = tag_column_lines(p, "always,never", "80");
+    assert_eq!(off.len(), 10, "never (last) disables columns: {off:?}");
+}
+
+#[test]
+fn tag_column_unknown_option_is_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    let out = run_libra_command(&["tag", "-l", "--column=always,bogus"], repo.path());
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "unknown column option → usage error"
+    );
+}
+
+#[test]
+fn tag_column_uses_display_width_for_cjk() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // Wide CJK names: "中文" is 2 chars / display width 4; "条目目录" is 4 chars /
+    // display width 8. Column width is the widest DISPLAY width + 2 = 10.
+    for t in ["aa", "bb", "中文", "条目目录"] {
+        assert_cli_success(&run_libra_command(&["tag", t], p), t);
+    }
+
+    // COLUMNS=22: display-width sizing fits 2 columns (2*10=20 < 22). A
+    // character-count implementation would size columns at 4+2=6 and wrongly fit
+    // 3 columns, so this exact output locks display-width layout AND padding.
+    let cols = tag_column_lines(p, "always", "22");
+    assert_eq!(
+        cols,
+        vec![
+            "aa        中文".to_string(),
+            "bb        条目目录".to_string(),
+        ],
+        "CJK columns are laid out and padded by display width: {cols:?}"
+    );
+
+    // COLUMNS=20: the width-8 entry forces a single column (matching git).
+    assert_eq!(tag_column_lines(p, "always", "20").len(), 4);
 }
