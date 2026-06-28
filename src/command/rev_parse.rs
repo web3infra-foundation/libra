@@ -40,6 +40,7 @@ EXAMPLES:
     libra rev-parse --abbrev-ref HEAD   Print the branch name (or HEAD when detached)
     libra rev-parse --symbolic-full-name HEAD  Print HEAD's full ref name (refs/heads/...)
     libra rev-parse --symbolic main     Echo a resolvable spec verbatim (main, not refs/heads/main)
+    libra rev-parse --revs-only \"$@\"     Print only the arguments that are revisions (drop flags/paths)
     libra rev-parse --show-toplevel     Print the absolute path of the repository root
     libra rev-parse --verify HEAD       Assert HEAD resolves to one object (exit 128 if not)
     libra rev-parse --is-inside-work-tree  Print true/false for working-tree context
@@ -120,9 +121,41 @@ pub struct RevParseArgs {
     #[clap(long = "show-prefix", conflicts_with_all = ["short", "abbrev_ref", "show_toplevel", "spec"])]
     pub show_prefix: bool,
 
-    /// Revision to parse. Defaults to HEAD when omitted.
-    #[clap(value_name = "SPEC")]
-    pub spec: Option<String>,
+    /// Output-filter mode (Git's `--flags`): print only the SPEC arguments that
+    /// are flags (begin with `-`), plus any revisions, dropping non-flag paths.
+    #[clap(long = "flags")]
+    pub flags: bool,
+
+    /// Output-filter mode (Git's `--no-flags`): drop flag arguments from the
+    /// output, keeping revisions (resolved) and non-flag paths.
+    #[clap(long = "no-flags")]
+    pub no_flags: bool,
+
+    /// Output-filter mode (Git's `--revs-only`): print only the arguments that
+    /// resolve to revisions (as object names), dropping flags and paths.
+    #[clap(long = "revs-only")]
+    pub revs_only: bool,
+
+    /// Output-filter mode (Git's `--no-revs`): drop revision arguments, keeping
+    /// flags and non-revision paths.
+    #[clap(long = "no-revs")]
+    pub no_revs: bool,
+
+    /// Revisions / arguments to parse (everything BEFORE a `--` separator).
+    /// Defaults to HEAD when omitted. Multiple arguments are each resolved (and,
+    /// with the output-filter flags above, classified as flag / rev / path).
+    /// `allow_hyphen_values` lets unknown `-`-prefixed arguments (e.g. `-x`) be
+    /// captured for classification, like `git rev-parse`. (Defined options must
+    /// precede the SPECs.)
+    #[clap(value_name = "SPEC", allow_hyphen_values = true)]
+    pub spec: Vec<String>,
+
+    /// Arguments AFTER a `--` separator. clap strips the `--` itself, so this
+    /// dedicated `last = true` field is what tells the output-filter modes that a
+    /// `--` was present and that these arguments are paths (never revisions),
+    /// matching `git rev-parse --revs-only -- <path>`.
+    #[clap(last = true, value_name = "PATH", allow_hyphen_values = true)]
+    pub after_dashdash: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,46 +171,169 @@ pub async fn execute(args: RevParseArgs) -> Result<(), String> {
         .map_err(|err| err.render())
 }
 
+/// Recover a value-less LEADING `--` that clap discards entirely.
+///
+/// clap routes a `--` separator three ways depending on position: a `--` after a
+/// positional stays verbatim inside `spec` (via `allow_hyphen_values`); a leading
+/// `--` followed by paths routes those paths to the `last = true` `after_dashdash`
+/// field; but a leading `--` with *nothing* after it leaves no trace in the parsed
+/// struct. Git still prints that `--` (so an argv can be reconstructed), so we
+/// recover its presence from the raw process arguments.
+///
+/// Guarded by a preceding `rev-parse` token so the test harness's own argv (which
+/// never contains that token) can never spuriously report a separator — this is
+/// only consulted when `spec` is empty and `after_dashdash` is empty.
+fn leading_bare_dashdash_in_argv() -> bool {
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.iter().position(|a| a == "rev-parse") {
+        Some(idx) => argv[idx + 1..].iter().any(|a| a == "--"),
+        None => false,
+    }
+}
+
+/// Split the positional arguments at the first `--` separator into the
+/// revision specs (before `--`) and the paths (after `--`), plus whether a
+/// separator was present at all. Normalises clap's three `--` routings (see
+/// [`leading_bare_dashdash_in_argv`]) into one consistent view.
+fn split_positionals(args: &RevParseArgs) -> (Vec<String>, Vec<String>, bool) {
+    if let Some(pos) = args.spec.iter().position(|a| a == "--") {
+        // `--` after a positional: kept verbatim inside `spec`.
+        (
+            args.spec[..pos].to_vec(),
+            args.spec[pos + 1..].to_vec(),
+            true,
+        )
+    } else if !args.after_dashdash.is_empty() {
+        // Leading `--` followed by paths.
+        (args.spec.clone(), args.after_dashdash.clone(), true)
+    } else if args.spec.is_empty() && leading_bare_dashdash_in_argv() {
+        // Value-less leading `--` that clap discarded.
+        (Vec::new(), Vec::new(), true)
+    } else {
+        (args.spec.clone(), Vec::new(), false)
+    }
+}
+
 pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResult<()> {
     if !args.show_toplevel {
         util::require_repo().map_err(|_| CliError::repo_not_found())?;
     }
-    let result = match resolve_rev_parse(&args).await {
-        Ok(result) => result,
-        Err(error) => {
-            // Git's `rev-parse --verify` fails with exit 128 when the argument does
-            // not name exactly one object; with the global `-q`/`--quiet` it fails
-            // silently with exit code 1 instead of printing a diagnostic.
-            if args.verify {
-                if output.quiet {
-                    return Err(CliError::silent_exit(1));
-                }
-                let spec = args
-                    .spec
-                    .as_deref()
-                    .or(args.default.as_deref())
-                    .unwrap_or("HEAD");
-                return Err(CliError::fatal(format!(
-                    "Needed a single revision (could not resolve '{spec}')"
-                ))
-                .with_exit_code(128)
-                .with_stable_code(StableErrorCode::CliInvalidTarget));
-            }
-            return Err(error);
-        }
+
+    let any_filter = args.flags || args.no_flags || args.revs_only || args.no_revs;
+
+    // `--verify` / `--short` are single-revision modes; Git's behavior when they
+    // are combined with the output-filter flags is ill-defined (e.g. `--short
+    // --no-revs HEAD -- file` prints nothing at all), so Libra rejects that
+    // combination with a clear usage error rather than guessing.
+    if (args.verify || args.short.is_some()) && any_filter {
+        return Err(CliError::command_usage(
+            "the output-filter flags (--flags/--no-flags/--revs-only/--no-revs) \
+             cannot be combined with --verify or --short"
+                .to_string(),
+        ));
+    }
+
+    // Output-filter modes (`--flags`/`--no-flags`/`--revs-only`/`--no-revs`)
+    // classify each positional argument as a flag / revision / path and print a
+    // filtered subset, rather than resolving a single revision.
+    if any_filter {
+        return run_rev_parse_filter(&args, output).await;
+    }
+
+    // Split the positional args at the `--` separator (revisions vs paths),
+    // matching `git rev-parse <rev> -- <path>`.
+    let (rev_specs, post_paths, saw_dashdash) = split_positionals(&args);
+
+    // Git groups the non-filter modes into three categories that handle the `--`
+    // separator differently:
+    //   * REPOSITORY-QUERY modes (`--show-toplevel`, `--git-dir`, `--is-*`, …)
+    //     ignore the revision and print exactly one query value; the `--` and
+    //     paths are still echoed.
+    //   * SINGLE-REVISION modes (`--verify`, `--short`) require EXACTLY one
+    //     revision and print ONLY that object — never the post-`--` paths.
+    //   * PER-REVISION modes (`--abbrev-ref`, `--symbolic`, `--symbolic-full-name`,
+    //     and plain resolve) resolve each revision and echo the `--` and paths.
+    let is_query_mode = args.show_toplevel
+        || args.git_dir
+        || args.absolute_git_dir
+        || args.is_inside_work_tree
+        || args.is_inside_git_dir
+        || args.is_bare_repository
+        || args.show_prefix
+        || args.show_cdup;
+    let single_revision = (args.verify || args.short.is_some()) && !is_query_mode;
+
+    // Resolve one revision per pre-`--` SPEC. Defaulting rules (matching Git):
+    //   * a query mode runs exactly once with a placeholder it ignores;
+    //   * explicit `--default <arg>` supplies the revision whenever there are no
+    //     revision args before the separator — even when paths follow a `--`;
+    //   * the implicit HEAD default applies only when there is no SPEC and no `--`
+    //     at all (`rev-parse` alone).
+    let specs: Vec<String> = if is_query_mode {
+        vec!["HEAD".to_string()]
+    } else if !rev_specs.is_empty() {
+        rev_specs
+    } else if let Some(default) = &args.default {
+        vec![default.clone()]
+    } else if !saw_dashdash {
+        vec!["HEAD".to_string()]
+    } else {
+        Vec::new()
     };
 
+    // The single-revision modes require EXACTLY one revision (paths after `--` do
+    // not count); zero or more than one is an error ("Needed a single revision").
+    if single_revision && specs.len() != 1 {
+        if output.quiet {
+            return Err(CliError::silent_exit(1));
+        }
+        return Err(CliError::fatal("Needed a single revision".to_string())
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::CliInvalidTarget));
+    }
+
+    let mut results = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        match resolve_rev_parse(spec, &args).await {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                // The single-revision modes fail with exit 128 when the argument
+                // does not name exactly one object; with the global `-q`/`--quiet`
+                // they fail silently with exit code 1 instead of printing.
+                if single_revision {
+                    if output.quiet {
+                        return Err(CliError::silent_exit(1));
+                    }
+                    return Err(CliError::fatal(format!(
+                        "Needed a single revision (could not resolve '{spec}')"
+                    ))
+                    .with_exit_code(128)
+                    .with_stable_code(StableErrorCode::CliInvalidTarget));
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    // JSON: one envelope for a single spec (the unchanged single-spec contract),
+    // a JSON array of results for multiple specs. Text: one line per result.
     if output.is_json() {
-        emit_json_data("rev-parse", &result, output)
-    } else if output.quiet {
-        Ok(())
-    } else if result.mode == "symbolic_full_name" && result.value.is_empty() {
-        // `--symbolic-full-name` of a valid object that is not a ref prints
-        // nothing at all (not even a blank line), matching Git.
-        Ok(())
-    } else {
-        let stdout = std::io::stdout();
-        let mut writer = stdout.lock();
+        return match results.as_slice() {
+            [single] => emit_json_data("rev-parse", single, output),
+            many => emit_json_data("rev-parse", &many.to_vec(), output),
+        };
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    for result in &results {
+        if result.mode == "symbolic_full_name" && result.value.is_empty() {
+            // `--symbolic-full-name` of a valid object that is not a ref prints
+            // nothing at all (not even a blank line), matching Git.
+            continue;
+        }
         // `--sq` shell-quotes the resolved object name (the `resolve`/`short`
         // modes), matching Git; the repository-query modes are left verbatim.
         let value = if args.sq && matches!(result.mode, "resolve" | "short") {
@@ -185,8 +341,123 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
         } else {
             result.value.clone()
         };
-        write_rev_parse_output(&mut writer, &value)
+        write_rev_parse_output(&mut writer, &value)?;
     }
+    // After the resolved revisions, Git prints the `--` separator and each path
+    // after it verbatim (so an argv can be reconstructed). The single-revision
+    // modes (`--verify`/`--short`) are the exception: they print only the single
+    // object, never the paths.
+    if saw_dashdash && !single_revision {
+        write_rev_parse_output(&mut writer, "--")?;
+        for p in &post_paths {
+            write_rev_parse_output(&mut writer, p)?;
+        }
+    }
+    Ok(())
+}
+
+/// Handle the output-filter modes. Each positional argument is classified as a
+/// flag (begins with `-`, before any `--` terminator), a revision (resolves to a
+/// commit-ish object), or a path (anything else). What prints is then gated by
+/// the active flags: a revision prints (as its object name) unless `--no-revs`;
+/// a flag prints verbatim unless `--no-flags`/`--revs-only`; a path prints
+/// verbatim unless `--flags`/`--revs-only`. Matches `git rev-parse`.
+async fn run_rev_parse_filter(args: &RevParseArgs, output: &OutputConfig) -> CliResult<()> {
+    let print_rev = !args.no_revs;
+    let print_flag = !args.no_flags && !args.revs_only;
+    let print_path = !args.flags && !args.revs_only;
+
+    // Reconstruct the logical argument sequence as typed. `split_positionals`
+    // normalises clap's three `--` routings into a pre-`--` revision segment, the
+    // post-`--` paths, and whether a separator was present. With no revision arg
+    // before the separator, `--default <arg>` supplies it (applies even with a
+    // leading `--`). The `--` is restored so a single classification loop with an
+    // `after_dashdash` toggle handles every case.
+    let (pre, post, saw_dashdash) = split_positionals(args);
+    let mut seq: Vec<String> = if pre.is_empty() {
+        args.default.clone().into_iter().collect()
+    } else {
+        pre
+    };
+    if saw_dashdash {
+        seq.push("--".to_string());
+        seq.extend(post);
+    }
+
+    // Collect the filtered output tokens first, so `--json` can emit them as one
+    // array (and `--quiet` simply drops them) rather than streaming text.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut after_dashdash = false;
+    for arg in &seq {
+        // The first `--` terminates flag/revision detection: everything after it
+        // is a path. Git emits the `--` itself when path output is enabled (so an
+        // argv can be reconstructed).
+        if !after_dashdash && arg == "--" {
+            after_dashdash = true;
+            if print_path {
+                tokens.push("--".to_string());
+            }
+            continue;
+        }
+        // A leading `-` (other than a lone `-`), before `--`, is a flag.
+        if !after_dashdash && arg.len() > 1 && arg.starts_with('-') {
+            if print_flag {
+                tokens.push(arg.clone());
+            }
+            continue;
+        }
+        // Otherwise it is a revision if it resolves to a commit-ish object, else a
+        // path. Args after `--` are always paths (never re-resolved, so a real
+        // branch name after `--` stays a path). A genuine read/corruption failure
+        // is NOT silently reclassified as a path — it propagates.
+        let resolved = if after_dashdash {
+            None
+        } else {
+            match util::get_commit_base_typed(arg).await {
+                Ok(commit) => Some(commit),
+                // Expected "not a revision" → treat as a path.
+                Err(CommitBaseError::InvalidReference(_) | CommitBaseError::HeadUnborn) => None,
+                // Real I/O / corruption failures surface with their own code.
+                Err(CommitBaseError::ReadFailure(detail)) => {
+                    return Err(
+                        CliError::fatal(format!("failed to resolve '{arg}': {detail}"))
+                            .with_stable_code(StableErrorCode::IoReadFailed),
+                    );
+                }
+                Err(CommitBaseError::CorruptReference(detail)) => {
+                    return Err(
+                        CliError::fatal(format!("failed to resolve '{arg}': {detail}"))
+                            .with_stable_code(StableErrorCode::RepoCorrupt),
+                    );
+                }
+            }
+        };
+        match resolved {
+            Some(commit) => {
+                if print_rev {
+                    tokens.push(commit.to_string());
+                }
+            }
+            None => {
+                if print_path {
+                    tokens.push(arg.clone());
+                }
+            }
+        }
+    }
+
+    if output.is_json() {
+        return emit_json_data("rev-parse", &tokens, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    for token in &tokens {
+        write_rev_parse_output(&mut writer, token)?;
+    }
+    Ok(())
 }
 
 /// Single-quote a value for safe shell consumption (Git's `--sq`): wrap the
@@ -208,7 +479,7 @@ fn write_rev_parse_output<W: Write>(writer: &mut W, value: &str) -> CliResult<()
     }
 }
 
-async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
+async fn resolve_rev_parse(spec: &str, args: &RevParseArgs) -> CliResult<RevParseOutput> {
     if args.show_toplevel {
         let workdir = resolve_show_toplevel_path().await?;
         return Ok(RevParseOutput {
@@ -306,13 +577,8 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
-    // `--default <arg>` supplies the revision when no positional SPEC is given.
-    let spec = args
-        .spec
-        .as_deref()
-        .or(args.default.as_deref())
-        .unwrap_or("HEAD");
-
+    // The revision to resolve is supplied by the caller (one per positional SPEC,
+    // defaulting to HEAD / `--default`).
     if args.abbrev_ref {
         let value = resolve_abbrev_ref(spec).await?;
         return Ok(RevParseOutput {
@@ -755,7 +1021,7 @@ mod tests {
         assert!(args.short.is_none());
         assert!(!args.abbrev_ref);
         assert!(!args.show_toplevel);
-        assert!(args.spec.is_none());
+        assert!(args.spec.is_empty());
     }
 
     #[test]
@@ -764,14 +1030,14 @@ mod tests {
         // `--short` without `=<n>` takes its default_missing_value ("7"); "HEAD"
         // is consumed as the positional spec.
         assert_eq!(args.short.as_deref(), Some("7"));
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.spec, vec!["HEAD".to_string()]);
     }
 
     #[test]
     fn test_rev_parse_args_abbrev_ref() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
         assert!(args.abbrev_ref);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.spec, vec!["HEAD".to_string()]);
     }
 
     #[test]
@@ -784,14 +1050,14 @@ mod tests {
     fn test_rev_parse_args_verify() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--verify", "HEAD"]).unwrap();
         assert!(args.verify);
-        assert_eq!(args.spec.as_deref(), Some("HEAD"));
+        assert_eq!(args.spec, vec!["HEAD".to_string()]);
     }
 
     #[test]
     fn test_rev_parse_args_default_revision() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--default", "main"]).unwrap();
         assert_eq!(args.default.as_deref(), Some("main"));
-        assert!(args.spec.is_none());
+        assert!(args.spec.is_empty());
     }
 
     #[test]

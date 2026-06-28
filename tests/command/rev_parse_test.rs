@@ -899,3 +899,377 @@ async fn test_rev_parse_symbolic_full_name_remote_tracking_ref() {
         "refs/remotes/origin/main"
     );
 }
+
+#[test]
+fn test_rev_parse_multiple_specs_resolve_each() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    // Each positional spec resolves on its own line (matching git rev-parse).
+    let out = run_libra_command(&["rev-parse", "HEAD", "feature"], p);
+    assert_cli_success(&out, "rev-parse HEAD feature");
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, vec![sha.clone(), sha.clone()], "both specs resolve");
+}
+
+#[test]
+fn test_rev_parse_output_filter_modes() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "rev-parse filter");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // --flags: keep revisions (resolved) + flags, drop non-flag paths.
+    assert_eq!(
+        lines(&["rev-parse", "--flags", "HEAD", "feature", "-x", "--foo"]),
+        vec![
+            sha.clone(),
+            sha.clone(),
+            "-x".to_string(),
+            "--foo".to_string()
+        ]
+    );
+    // --no-flags: drop flags, keep revisions (and paths).
+    assert_eq!(
+        lines(&["rev-parse", "--no-flags", "HEAD", "-x", "feature"]),
+        vec![sha.clone(), sha.clone()]
+    );
+    // --revs-only: keep only revisions, drop flags and non-rev paths.
+    assert_eq!(
+        lines(&[
+            "rev-parse",
+            "--revs-only",
+            "HEAD",
+            "-x",
+            "definitely-not-a-rev"
+        ]),
+        vec![sha.clone()]
+    );
+    // --no-revs: drop revisions, keep flags and non-rev paths.
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "HEAD", "-x", "afile"]),
+        vec!["-x".to_string(), "afile".to_string()]
+    );
+    // `--` terminates flag detection and is itself emitted as part of the path
+    // output (Git emits it so an argv can be reconstructed): a following `-x` is
+    // then a path.
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "HEAD", "--", "-x"]),
+        vec!["--".to_string(), "-x".to_string()]
+    );
+    // ...but `--revs-only` (which drops paths) drops the `--` too.
+    assert_eq!(
+        lines(&["rev-parse", "--revs-only", "HEAD", "--", "-x"]),
+        vec![sha.clone()]
+    );
+
+    // `--default` supplies the single arg to classify when no positional is given.
+    assert_eq!(
+        lines(&["rev-parse", "--revs-only", "--default", "HEAD"]),
+        vec![sha.clone()]
+    );
+
+    // --quiet suppresses filter output (exit 0, nothing printed).
+    let quiet = run_libra_command(&["--quiet", "rev-parse", "--flags", "HEAD", "-x"], p);
+    assert_cli_success(&quiet, "quiet filter");
+    assert!(quiet.stdout.is_empty(), "--quiet prints nothing");
+}
+
+#[test]
+fn test_rev_parse_json_single_object_multi_array_and_filter() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "rev-parse --json");
+        serde_json::from_slice(&out.stdout).expect("valid JSON")
+    };
+
+    // Single spec: `data` is a single object (the unchanged contract).
+    let single = json(&["--json", "rev-parse", "HEAD"]);
+    assert!(
+        single["data"].is_object(),
+        "single-spec data is an object: {single}"
+    );
+
+    // Multiple specs: `data` is a JSON array (one entry per spec), not multiple
+    // envelopes.
+    let multi = json(&["--json", "rev-parse", "HEAD", "feature"]);
+    assert!(
+        multi["data"].is_array(),
+        "multi-spec data is an array: {multi}"
+    );
+    assert_eq!(multi["data"].as_array().unwrap().len(), 2);
+
+    // Filter mode: `data` is a JSON array of the filtered tokens.
+    let filter = json(&["--json", "rev-parse", "--revs-only", "HEAD", "-x"]);
+    assert!(
+        filter["data"].is_array(),
+        "filter data is an array: {filter}"
+    );
+    assert_eq!(
+        filter["data"].as_array().unwrap().len(),
+        1,
+        "only the rev kept"
+    );
+}
+
+#[test]
+fn test_rev_parse_dashdash_separator() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "rev-parse --");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // A LEADING `--` (clap strips it, routing paths to a separate field): in
+    // `--revs-only` the path is dropped (empty output); in `--no-revs` the `--`
+    // and path are both emitted.
+    assert!(lines(&["rev-parse", "--revs-only", "--", "HEAD"]).is_empty());
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "--", "HEAD"]),
+        vec!["--".to_string(), "HEAD".to_string()]
+    );
+
+    // After `--`, a real branch name is a PATH, not a revision: `--revs-only`
+    // must DROP it (not re-resolve it to a commit).
+    assert_eq!(
+        lines(&["rev-parse", "--revs-only", "HEAD", "--", "feature"]),
+        vec![sha.clone()]
+    );
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "HEAD", "--", "feature"]),
+        vec!["--".to_string(), "feature".to_string()]
+    );
+
+    // Non-filter mode also splits at `--`: resolved revision, then the `--` and
+    // the paths after it verbatim (matching `git rev-parse <rev> -- <path>`).
+    assert_eq!(
+        lines(&["rev-parse", "HEAD", "--", "file"]),
+        vec![sha.clone(), "--".to_string(), "file".to_string()]
+    );
+    assert_eq!(
+        lines(&["rev-parse", "--", "file"]),
+        vec!["--".to_string(), "file".to_string()]
+    );
+
+    // A BARE leading `--` (no paths after) is discarded by clap; its presence is
+    // recovered from the raw argv so the `--` still prints, matching git.
+    assert_eq!(lines(&["rev-parse", "--"]), vec!["--".to_string()]);
+    assert_eq!(
+        lines(&["rev-parse", "HEAD", "--"]),
+        vec![sha.clone(), "--".to_string()]
+    );
+    // The bare `--` under filters: `--revs-only` drops it, `--no-revs` keeps it.
+    assert!(lines(&["rev-parse", "--revs-only", "--"]).is_empty());
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "--"]),
+        vec!["--".to_string()]
+    );
+}
+
+#[test]
+fn test_rev_parse_verify_requires_single_revision() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+
+    // `--verify` with one spec succeeds; with multiple it fails (exit 128) like
+    // git's "Needed a single revision".
+    assert_cli_success(
+        &run_libra_command(&["rev-parse", "--verify", "HEAD"], p),
+        "verify one",
+    );
+    let multi = run_libra_command(&["rev-parse", "--verify", "HEAD", "feature"], p);
+    assert_eq!(
+        multi.status.code(),
+        Some(128),
+        "--verify with >1 revision exits 128: {}",
+        String::from_utf8_lossy(&multi.stderr)
+    );
+
+    // The single-revision modes (`--verify`/`--short`) cannot be combined with
+    // the output-filter flags — Git's behavior there is ill-defined, so Libra
+    // rejects the combination with a usage error (exit 129).
+    for args in [
+        ["rev-parse", "--verify", "--revs-only", "HEAD"].as_slice(),
+        ["rev-parse", "--short", "--no-revs", "HEAD"].as_slice(),
+        ["rev-parse", "--short", "--revs-only", "HEAD", "feature"].as_slice(),
+    ] {
+        let out = run_libra_command(args, p);
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "{args:?} (single-rev mode + filter) is a usage error: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // `--verify` requires EXACTLY one revision: zero revisions before a `--`
+    // (only paths, or a bare `--`) is an error, like git's "Needed a single
+    // revision".
+    for args in [
+        ["rev-parse", "--verify", "--", "file"].as_slice(),
+        ["rev-parse", "--verify", "--"].as_slice(),
+    ] {
+        let out = run_libra_command(args, p);
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} (no revision) exits 128: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // `--verify <rev> -- <path>` verifies the one revision and prints ONLY its
+    // object — never the post-`--` paths.
+    let verify_path = run_libra_command(&["rev-parse", "--verify", "HEAD", "--", "file"], p);
+    assert_cli_success(&verify_path, "verify with trailing path");
+    let lines: Vec<&str> = std::str::from_utf8(&verify_path.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 1, "only the verified object prints: {lines:?}");
+    assert!(
+        !lines[0].contains("file"),
+        "path is not echoed under --verify"
+    );
+}
+
+#[test]
+fn test_rev_parse_short_and_query_with_dashdash() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], p),
+        "branch feature",
+    );
+
+    // `--short` is a SINGLE-REVISION mode (like `--verify`): it prints only the
+    // one abbreviated object and never the post-`--` paths.
+    let short_path = run_libra_command(&["rev-parse", "--short", "HEAD", "--", "file"], p);
+    assert_cli_success(&short_path, "--short HEAD -- file");
+    let lines: Vec<&str> = std::str::from_utf8(&short_path.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 1, "--short prints only the object: {lines:?}");
+    assert!(!lines[0].contains("file"));
+
+    // `--short` requires EXACTLY one revision: zero (bare `--`) or more than one
+    // is an error (exit 128).
+    for args in [
+        ["rev-parse", "--short", "--"].as_slice(),
+        ["rev-parse", "--short", "HEAD", "feature"].as_slice(),
+    ] {
+        let out = run_libra_command(args, p);
+        assert_eq!(
+            out.status.code(),
+            Some(128),
+            "{args:?} is not a single revision: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Repository-query modes still print their value, THEN the `--`, when a
+    // separator is present (git emits both).
+    let toplevel_dd = run_libra_command(&["rev-parse", "--show-toplevel", "--"], p);
+    assert_cli_success(&toplevel_dd, "--show-toplevel --");
+    let lines: Vec<&str> = std::str::from_utf8(&toplevel_dd.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 2, "query value + separator: {lines:?}");
+    assert_eq!(lines[1], "--");
+}
+
+#[test]
+fn test_rev_parse_default_with_dashdash() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let sha = String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], p).stdout)
+        .trim()
+        .to_string();
+    let lines = |args: &[&str]| -> Vec<String> {
+        let out = run_libra_command(args, p);
+        assert_cli_success(&out, "rev-parse --default --");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // `--default` supplies the revision when there are no revision args before the
+    // separator — even with paths after `--` (matching git).
+    assert_eq!(
+        lines(&["rev-parse", "--default", "HEAD", "--", "file"]),
+        vec![sha.clone(), "--".to_string(), "file".to_string()]
+    );
+    assert_eq!(
+        lines(&[
+            "rev-parse",
+            "--revs-only",
+            "--default",
+            "HEAD",
+            "--",
+            "file"
+        ]),
+        vec![sha.clone()]
+    );
+    assert_eq!(
+        lines(&["rev-parse", "--no-revs", "--default", "HEAD", "--", "file"]),
+        vec!["--".to_string(), "file".to_string()]
+    );
+
+    // `--default` with a bare trailing `--` (no paths): the default resolves and
+    // the `--` still prints.
+    assert_eq!(
+        lines(&["rev-parse", "--default", "HEAD", "--"]),
+        vec![sha.clone(), "--".to_string()]
+    );
+}
