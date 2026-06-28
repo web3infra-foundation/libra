@@ -2272,6 +2272,7 @@ async fn test_log_all_includes_branches() {
     .await;
 
     execute(BranchArgs {
+        format: None,
         no_column: false,
         new_branch: Some("side".to_string()),
         commit_hash: None,

@@ -328,6 +328,7 @@ async fn test_grep_tree_accepts_branch_revisions() {
 
     branch::execute_safe(
         BranchArgs {
+            format: None,
             no_column: false,
             new_branch: Some("feature/grep-tree".to_string()),
             commit_hash: None,

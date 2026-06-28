@@ -640,6 +640,7 @@ async fn setup_standard_repo(
     .await;
     let commit1 = Head::current_commit().await.unwrap();
     branch::execute(BranchArgs {
+        format: None,
         no_column: false,
         new_branch: Some("1".to_string()),
         commit_hash: None,
@@ -699,6 +700,7 @@ async fn setup_standard_repo(
     .await;
     let commit2 = Head::current_commit().await.unwrap();
     branch::execute(BranchArgs {
+        format: None,
         no_column: false,
         new_branch: Some("2".to_string()),
         commit_hash: None,
@@ -758,6 +760,7 @@ async fn setup_standard_repo(
     .await;
     let commit3 = Head::current_commit().await.unwrap();
     branch::execute(BranchArgs {
+        format: None,
         no_column: false,
         new_branch: Some("3".to_string()),
         commit_hash: None,
@@ -817,6 +820,7 @@ async fn setup_standard_repo(
     .await;
     let commit4 = Head::current_commit().await.unwrap();
     branch::execute(BranchArgs {
+        format: None,
         no_column: false,
         new_branch: Some("4".to_string()),
         commit_hash: None,

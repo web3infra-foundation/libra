@@ -73,6 +73,7 @@ EXAMPLES:
     libra branch --merged main            List branches already merged into main
     libra branch --sort version:refname   List branches sorted by version-aware name
     libra branch --sort=-committerdate    List branches by tip commit date (newest first)
+    libra branch --format='%(refname:short) %(objectname:short)'  Render branches with a for-each-ref format
     libra branch --column                 List branches laid out in columns
     libra branch -v                       List branches with tip sha and subject
     libra branch -vv                      Also show upstream tracking [ahead/behind]
@@ -282,6 +283,13 @@ pub struct BranchArgs {
     #[clap(long = "ignore-case", group = "query")]
     pub ignore_case: bool,
 
+    /// Render each branch with a for-each-ref format string (e.g.
+    /// `%(refname:short)` / `%(objectname:short)` / `%(HEAD)` / `%(upstream)`).
+    /// Replaces the default `* name` listing (and `-v`/`--column`). Implies
+    /// --list.
+    #[clap(long, group = "query", value_name = "format")]
+    pub format: Option<String>,
+
     /// Display the branch list in columns. Modes: `always`, `auto` (only when
     /// stdout is a terminal), `never`. Bare `--column` means `always`.
     #[clap(long, num_args = 0..=1, default_missing_value = "always", value_name = "MODE", overrides_with = "no_column")]
@@ -323,7 +331,14 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
         super::tag::resolve_column_enabled(mode)?;
     }
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output, args.column.as_deref(), args.verbose).await?;
+    render_branch_output(
+        &result,
+        output,
+        args.column.as_deref(),
+        args.verbose,
+        args.format.as_deref(),
+    )
+    .await?;
     if result.mutated_repo_state() {
         dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
     }
@@ -1504,6 +1519,7 @@ async fn render_branch_output(
     output: &OutputConfig,
     column: Option<&str>,
     verbose: u8,
+    format: Option<&str>,
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
@@ -1521,21 +1537,8 @@ async fn render_branch_output(
             ignore_case,
             sorted: presorted,
         } => {
-            if let Some(detached_head) = detached_head {
-                println!(
-                    "HEAD detached at {}",
-                    short_display_hash(detached_head).green()
-                );
-            }
-            if *show_unborn_head && let Some(head_name) = head_name {
-                println!("* {}", head_name.green());
-            }
-            if branches.is_empty() {
-                return Ok(());
-            }
-
-            // `--sort` already ordered the entries; otherwise apply the default
-            // current-first, then name (case-aware) ordering.
+            // Order the entries (shared by `--format` and the default listing):
+            // `--sort` already ordered them; otherwise current-first, then name.
             let mut sorted = branches.clone();
             if !*presorted {
                 sorted.sort_by(|a, b| {
@@ -1549,6 +1552,49 @@ async fn render_branch_output(
                         a.name.cmp(&b.name)
                     }
                 });
+            }
+
+            // `--format`: render each branch via the for-each-ref atom engine,
+            // replacing the default `* name` listing, `-v`, and `--column`. A
+            // remote entry's `plain_name` carries the `<remote>/<branch>` form
+            // (so `plain_name != name`); a local entry's matches its `name`.
+            if let Some(fmt) = format {
+                use std::io::IsTerminal;
+                let color_enabled = match output.color {
+                    crate::utils::output::ColorChoice::Always => true,
+                    crate::utils::output::ColorChoice::Never => false,
+                    crate::utils::output::ColorChoice::Auto => std::io::stdout().is_terminal(),
+                };
+                let refs: Vec<(String, String)> = sorted
+                    .iter()
+                    .map(|b| {
+                        let refname = if b.plain_name == b.name {
+                            format!("refs/heads/{}", b.name)
+                        } else {
+                            format!("refs/remotes/{}", b.plain_name)
+                        };
+                        (refname, b.commit.clone())
+                    })
+                    .collect();
+                let lines =
+                    super::for_each_ref::render_ref_format_lines(&refs, fmt, color_enabled).await?;
+                for line in lines {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
+
+            if let Some(detached_head) = detached_head {
+                println!(
+                    "HEAD detached at {}",
+                    short_display_hash(detached_head).green()
+                );
+            }
+            if *show_unborn_head && let Some(head_name) = head_name {
+                println!("* {}", head_name.green());
+            }
+            if branches.is_empty() {
+                return Ok(());
             }
 
             // `-v` (per-branch sha + subject) takes precedence over `--column`
@@ -1754,6 +1800,7 @@ pub async fn list_branches(
         no_merged: None,
         sort: None,
         ignore_case: false,
+        format: None,
         column: None,
         verbose: 0,
     };
@@ -1763,6 +1810,7 @@ pub async fn list_branches(
         &OutputConfig::default(),
         args.column.as_deref(),
         args.verbose,
+        args.format.as_deref(),
     )
     .await
 }

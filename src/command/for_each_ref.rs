@@ -1124,6 +1124,51 @@ fn render_output(
     Ok(())
 }
 
+/// Render `format` (for-each-ref atom syntax) for each `(refname, objectname)`
+/// pair using the full for-each-ref atom engine, returning one rendered line per
+/// ref. Shared with `branch --format` so it inherits the exact atom set, lazy
+/// commit/tag field loading, `%(align)`/`%(if)` blocks, `%(color)` support, and
+/// the trailing-`GIT_COLOR_RESET` behavior. All refs are treated as commit
+/// objects (branch tips); no `--shell`-style quoting is applied.
+pub(crate) async fn render_ref_format_lines(
+    refs: &[(String, String)],
+    format: &str,
+    color_enabled: bool,
+) -> CliResult<Vec<String>> {
+    let entries: Vec<RefEntry> = refs
+        .iter()
+        .map(|(refname, objectname)| {
+            direct_ref_entry(refname.clone(), objectname.clone(), "commit")
+        })
+        .collect();
+    let head_refname = match Head::current().await {
+        Head::Branch(name) => Some(format!("refs/heads/{name}")),
+        Head::Detached(_) => None,
+    };
+    let upstreams = resolve_upstreams(&entries).await;
+    let pushes = resolve_pushes(&entries).await;
+
+    let mut lines = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let need_color_reset = std::cell::Cell::new(false);
+        let mut line = render_format(
+            format,
+            entry,
+            head_refname.as_deref(),
+            &upstreams,
+            &pushes,
+            color_enabled,
+            &need_color_reset,
+            None,
+        )?;
+        if color_enabled && need_color_reset.get() {
+            line.push_str("\x1b[m");
+        }
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_format(
     format: &str,
