@@ -1192,31 +1192,56 @@ fn test_diff_reverse_swaps_sides() {
 }
 
 #[test]
-fn diff_text_flag_is_accepted_noop() {
+fn diff_text_flag_forces_content_for_binary() {
     let repo = create_committed_repo_via_cli();
     let p = repo.path();
-    // Stage a change including a NUL byte (Git would call this "binary").
+    // Stage a change including a NUL byte (Git/Libra call this "binary").
     std::fs::write(p.join("data.bin"), b"line\x00\x01\x02\n").unwrap();
     assert_cli_success(
         &run_libra_command(&["add", "data.bin"], p),
         "stage data.bin",
     );
 
+    // By default a binary file shows the "Binary files … differ" line, not content.
     let plain = run_libra_command(&["diff", "--cached"], p);
     assert_cli_success(&plain, "diff --cached");
     let plain_out = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain_out.contains("Binary files") && !plain_out.contains("\n@@ "),
+        "a binary file shows 'Binary files … differ', not a content diff: {plain_out:?}"
+    );
 
-    // `--text` and its short `-a` are accepted and produce identical output:
-    // Libra's diff never detects binary files, so it already shows content.
+    // `--text` / `-a` force the content diff (a hunk with the raw bytes).
     for flag in ["--text", "-a"] {
         let out = run_libra_command(&["diff", "--cached", flag], p);
         assert_cli_success(&out, &format!("diff --cached {flag}"));
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            plain_out,
-            "diff --cached {flag} matches plain diff (no-op)"
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            s.contains("@@ ") && !s.contains("Binary files"),
+            "diff --cached {flag} forces a content diff: {s:?}"
         );
     }
+
+    // `--text` also forces content for a NON-UTF-8 file that git_internal collapsed
+    // to a bare `Binary files differ` (a distinguishable lossy-UTF-8 change shows).
+    std::fs::write(p.join("nonutf8"), b"\xfflead\nfoo\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "nonutf8"], p), "stage nonutf8");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "nonutf8", "--no-verify"], p),
+        "commit nonutf8",
+    );
+    std::fs::write(p.join("nonutf8"), b"\xfflead\nbar\n").unwrap();
+    assert!(
+        String::from_utf8_lossy(&run_libra_command(&["diff", "nonutf8"], p).stdout)
+            .contains("Binary files"),
+        "non-UTF-8 file is binary by default"
+    );
+    let forced = run_libra_command(&["diff", "--text", "nonutf8"], p);
+    let fs = String::from_utf8_lossy(&forced.stdout);
+    assert!(
+        fs.contains("-foo") && fs.contains("+bar") && !fs.contains("Binary files"),
+        "--text forces a (lossy) content diff for a non-UTF-8 file: {fs:?}"
+    );
 }
 
 #[test]
@@ -2521,6 +2546,199 @@ fn test_diff_textconv_literal_largefile_content() {
     assert!(
         s.contains("-<LARGEFILE>ABC") && s.contains("+<LARGEFILE>XYZ"),
         "a literal <LargeFile> content line is still textconv'd: {s}"
+    );
+}
+
+/// A file with a NUL byte is detected as binary: it shows `Binary files … differ`
+/// by default, `Bin <old> -> <new> bytes` under `--stat`, `-`/`-` under
+/// `--numstat`, and a `GIT binary patch` (full-index header + base85 `literal`
+/// chunks) under `--binary`.
+#[test]
+fn test_diff_binary() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("b.bin"), b"A\x00B\x00C\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "b.bin"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("b.bin"), b"A\x00X\x00Y\x00Z\n").unwrap();
+
+    // Default: Binary files differ, no content hunk.
+    let def = run_libra_command(&["diff", "b.bin"], p);
+    let ds = String::from_utf8_lossy(&def.stdout);
+    assert!(
+        ds.contains("Binary files a/b.bin and b/b.bin differ") && !ds.contains("@@ "),
+        "default shows Binary files differ: {ds:?}"
+    );
+
+    // --stat: Bin <old> -> <new> bytes.
+    let stat = run_libra_command(&["diff", "--stat", "b.bin"], p);
+    assert!(
+        String::from_utf8_lossy(&stat.stdout).contains("b.bin | Bin 6 -> 8 bytes"),
+        "--stat shows Bin sizes: {:?}",
+        String::from_utf8_lossy(&stat.stdout)
+    );
+
+    // --numstat: dashes for binary.
+    let num = run_libra_command(&["diff", "--numstat", "b.bin"], p);
+    assert!(
+        String::from_utf8_lossy(&num.stdout).contains("-\t-\tb.bin"),
+        "--numstat shows -/- for binary: {:?}",
+        String::from_utf8_lossy(&num.stdout)
+    );
+
+    // --binary: GIT binary patch with a full-index header and forward+reverse
+    // literal chunks.
+    let bin = run_libra_command(&["diff", "--binary", "b.bin"], p);
+    let bs = String::from_utf8_lossy(&bin.stdout);
+    assert!(
+        bs.contains("GIT binary patch")
+            && bs.contains("literal 8")
+            && bs.contains("literal 6")
+            // full (40-hex sha1) index, not the abbreviated 7-char form
+            && bs.lines().any(|l| l.starts_with("index ") && l.len() > 80),
+        "--binary emits a GIT binary patch with full index: {bs:?}"
+    );
+    // The patch must end with the blank-line terminator Git's parser requires
+    // (so `git apply` accepts it); the renderer must not trim it.
+    assert!(
+        bs.ends_with("\n\n"),
+        "--binary patch keeps its trailing blank-line terminator: {bs:?}"
+    );
+
+    // A non-UTF-8 file with NO NUL is still detected (git_internal collapses it to
+    // a bare marker) and reformatted to the full "Binary files a/… and b/…" form.
+    fs::write(p.join("u.bin"), b"\xff\xfe\xfd\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "u.bin"], p), "add u");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "u", "--no-verify"], p),
+        "commit u",
+    );
+    fs::write(p.join("u.bin"), b"\xff\xfe\xfc\n").unwrap();
+    let nonutf8 = run_libra_command(&["diff", "u.bin"], p);
+    assert!(
+        String::from_utf8_lossy(&nonutf8.stdout)
+            .contains("Binary files a/u.bin and b/u.bin differ"),
+        "non-UTF-8 binary uses the full a/… b/… label form: {:?}",
+        String::from_utf8_lossy(&nonutf8.stdout)
+    );
+
+    // `--binary` is `--full-index` for text files in the same diff too.
+    fs::write(p.join("t.txt"), "one\ntwo\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "t.txt"], p), "add t");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "t", "--no-verify"], p),
+        "commit t",
+    );
+    fs::write(p.join("t.txt"), "one\nTWO\n").unwrap();
+    let txt = run_libra_command(&["diff", "--binary", "t.txt"], p);
+    assert!(
+        String::from_utf8_lossy(&txt.stdout)
+            .lines()
+            .any(|l| l.starts_with("index ") && l.len() > 80),
+        "--binary full-indexes text files too: {:?}",
+        String::from_utf8_lossy(&txt.stdout)
+    );
+
+    // A TEXT file whose content contains a literal `Binary files differ` line must
+    // NOT be misdetected as binary (the bare marker is matched exactly, and a
+    // context line is `  `/`+`/`-`-prefixed).
+    fs::write(p.join("c.txt"), "Binary files differ\nkeep\nold\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "c.txt"], p), "add c");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c", "--no-verify"], p),
+        "commit c",
+    );
+    fs::write(p.join("c.txt"), "Binary files differ\nkeep\nnew\n").unwrap();
+    let ctx = run_libra_command(&["diff", "c.txt"], p);
+    let cx = String::from_utf8_lossy(&ctx.stdout);
+    assert!(
+        cx.contains("-old") && cx.contains("+new") && !cx.contains("a/c.txt and b/c.txt differ"),
+        "a text file with a 'Binary files differ' context line stays a content diff: {cx:?}"
+    );
+}
+
+/// A detected rename (`-M`) of a non-UTF-8 binary file (no NUL) is shown as a
+/// rename + `Binary files … differ`, not a lossy content diff — the rename body
+/// was reconstructed via lossy UTF-8, so detection scans the actual blob bytes.
+#[test]
+fn test_diff_binary_rename() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // 10 non-UTF-8 lines; rename + change one line → high similarity.
+    let mut old = Vec::new();
+    for _ in 0..10 {
+        old.extend_from_slice(b"\xff\xfe\xfd\n");
+    }
+    fs::write(p.join("old.bin"), &old).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.bin"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::remove_file(p.join("old.bin")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.bin"], p), "stage deletion");
+    let mut new = Vec::new();
+    for _ in 0..9 {
+        new.extend_from_slice(b"\xff\xfe\xfd\n");
+    }
+    new.extend_from_slice(b"\xaa\xbb\xcc\n");
+    fs::write(p.join("new.bin"), &new).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "new.bin"], p), "add new");
+
+    let out = run_libra_command(&["diff", "-M", "--cached"], p);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("rename from old.bin")
+            && s.contains("Binary files a/old.bin and b/new.bin differ")
+            && !s.contains("@@ "),
+        "a non-UTF-8 binary rename shows rename headers + Binary files differ: {s:?}"
+    );
+
+    // An EXACT binary rename (identical bytes) is header-only — no "Binary files
+    // … differ" body (matching Git, which shows similarity 100% + rename headers).
+    fs::write(p.join("ex.bin"), b"\xff\xfe\xfd\x00\xfc\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ex.bin"], p), "add ex");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ex", "--no-verify"], p),
+        "commit ex",
+    );
+    fs::remove_file(p.join("ex.bin")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "ex.bin"], p),
+        "stage ex deletion",
+    );
+    fs::write(p.join("ex2.bin"), b"\xff\xfe\xfd\x00\xfc\n").unwrap(); // identical bytes
+    assert_cli_success(&run_libra_command(&["add", "ex2.bin"], p), "add ex2");
+    let exact = run_libra_command(&["diff", "-M", "--cached", "ex.bin", "ex2.bin"], p);
+    let es = String::from_utf8_lossy(&exact.stdout);
+    assert!(
+        es.contains("similarity index 100%")
+            && es.contains("rename from ex.bin")
+            && !es.contains("Binary files"),
+        "an exact binary rename is header-only, no Binary-files body: {es:?}"
+    );
+    // It is still binary metadata: `--stat` shows a bare `Bin` (no sizes, since the
+    // content is unchanged), `--numstat` shows `-`/`-`.
+    let xstat = run_libra_command(
+        &["diff", "-M", "--cached", "--stat", "ex.bin", "ex2.bin"],
+        p,
+    );
+    assert!(
+        String::from_utf8_lossy(&xstat.stdout).contains("ex.bin => ex2.bin | Bin\n"),
+        "exact binary rename --stat is a bare `Bin`: {:?}",
+        String::from_utf8_lossy(&xstat.stdout)
+    );
+    let xnum = run_libra_command(
+        &["diff", "-M", "--cached", "--numstat", "ex.bin", "ex2.bin"],
+        p,
+    );
+    assert!(
+        String::from_utf8_lossy(&xnum.stdout).contains("-\t-\tex.bin => ex2.bin"),
+        "exact binary rename --numstat is `-`/`-`: {:?}",
+        String::from_utf8_lossy(&xnum.stdout)
     );
 }
 

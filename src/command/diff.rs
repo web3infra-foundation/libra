@@ -191,11 +191,19 @@ pub struct DiffArgs {
     #[clap(short = 'R', long = "reverse")]
     pub reverse: bool,
 
-    /// Treat all files as text. Accepted for Git parity and is a no-op: Libra's
-    /// diff never performs binary detection, so it already shows the content
-    /// diff of every file (it never prints "Binary files differ").
+    /// Treat all files as text: diff the content even of files Libra would
+    /// otherwise detect as binary (a NUL byte in either side), suppressing the
+    /// "Binary files … differ" line and the `--binary` patch.
     #[clap(short = 'a', long = "text")]
     pub text: bool,
+
+    /// Output a binary patch (`GIT binary patch` with base85-encoded literals for
+    /// both directions) for files detected as binary, instead of "Binary files …
+    /// differ". The patch is valid and appliable, but its compressed bytes are not
+    /// byte-identical to Git's (Libra deflates with `flate2`, and always emits a
+    /// `literal` chunk rather than Git's smaller-of-literal/delta choice).
+    #[clap(long = "binary")]
+    pub binary: bool,
 
     /// Disable the external diff driver (`diff.external`) for this run, forcing
     /// the built-in diff engine even when one is configured.
@@ -327,6 +335,11 @@ pub struct DiffFileStat {
     /// For a detected rename, the similarity index as a whole percent (0-100).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<u32>,
+    /// For a binary file, the `(old_size, new_size)` byte counts (used by
+    /// `--stat`'s `Bin <old> -> <new> bytes` and to mark `--numstat` with `-`).
+    /// `None` for text files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -341,6 +354,11 @@ pub struct DiffOutput {
     /// bodies; the caller then skips the internal word-diff/relative transforms.
     #[serde(skip)]
     pub external_diff_applied: bool,
+    /// Set when `--binary` produced a `GIT binary patch`; the patch body must be
+    /// rendered verbatim so the blank-line terminator after each literal survives
+    /// (Git's binary-patch parser requires it).
+    #[serde(skip)]
+    pub binary_patch: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -869,8 +887,10 @@ fn strip_relative_prefix_in_line(line: &str, strip: &str, full: &str, stripped: 
         || line.starts_with("--- ")
         || line.starts_with("+++ ")
         || line.starts_with("<LargeFile>")
+        || line.starts_with("Binary files ")
     {
-        // Exact replacement of the `a/<full>`/`b/<full>` path positions, plus the
+        // Exact replacement of the `a/<full>`/`b/<full>` path positions (also in a
+        // `Binary files a/<full> and b/<full> differ` line), plus the
         // `<LargeFile><full>:…</LargeFile>` marker emitted for over-large files.
         return line
             .replace(&format!("a/{full}"), &format!("a/{stripped}"))
@@ -1178,6 +1198,64 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
             std::collections::HashSet::new()
         };
 
+    // Binary detection: a file whose content carries a NUL byte is shown as
+    // `Binary files … differ` (or, with `--binary`, a `GIT binary patch`) instead
+    // of a content diff. `--text` forces the content diff; `--check` and an active
+    // external driver take over the body, and textconv'd files are already text.
+    // The context/whitespace post-pass below then skips binary files.
+    let mut binary_patch = false;
+    if !args.text && !args.check && external_command.is_none() {
+        binary_patch = apply_binary_detection(
+            &mut files,
+            &first_map,
+            &second_map,
+            &ext_worktree_entries,
+            &textconv_paths,
+            args.binary,
+        )?;
+    } else if args.text && !args.check && external_command.is_none() {
+        // `--text` forces content even for non-UTF-8 files git_internal already
+        // collapsed to a bare `Binary files differ`.
+        force_text_for_bare_binary(
+            &mut files,
+            &first_map,
+            &second_map,
+            &ext_worktree_entries,
+            regen_context,
+        )?;
+    }
+
+    // `--binary` implies `--full-index`: rewrite EVERY file's `index` line to full
+    // object ids (binary files were already given full ids above; this covers the
+    // text files in the same diff).
+    if args.binary && external_command.is_none() {
+        for file in files.iter_mut() {
+            // Binary files were already given full ids (with the correct
+            // blank-line terminator) in `apply_binary_detection`; don't re-process.
+            if file.binary.is_some() {
+                continue;
+            }
+            let old_path = file.rename_from.as_deref().unwrap_or(&file.path);
+            let old_id = first_map
+                .get(&PathBuf::from(old_path))
+                .map(|h| h.to_string());
+            let new_id = second_map
+                .get(&PathBuf::from(&file.path))
+                .map(|h| h.to_string());
+            let width = old_id
+                .as_ref()
+                .or(new_id.as_ref())
+                .map(String::len)
+                .unwrap_or(40);
+            let zeros = "0".repeat(width);
+            file.raw_diff = binary_index_full(
+                &file.raw_diff,
+                &old_id.unwrap_or_else(|| zeros.clone()),
+                &new_id.unwrap_or(zeros),
+            );
+        }
+    }
+
     // `--check` (whitespace-error scan) ignores the whitespace-ignore flags and
     // operates on git_internal's original diff — matching Git, where
     // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
@@ -1265,8 +1343,12 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
                 // Rename entries already rendered their content diff at the
                 // requested context in `build_rename_entry`; do not re-diff them
                 // (their old side is at `rename_from`, not `file.path`). Textconv'd
-                // files were likewise already re-diffed at this context.
-                if file.status == "renamed" || textconv_paths.contains(&file.path) {
+                // files were likewise already re-diffed at this context, and binary
+                // files have no text body.
+                if file.status == "renamed"
+                    || textconv_paths.contains(&file.path)
+                    || file.binary.is_some()
+                {
                     continue;
                 }
                 let path = PathBuf::from(&file.path);
@@ -1314,6 +1396,7 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         total_deletions,
         files_changed,
         external_diff_applied,
+        binary_patch,
     })
 }
 
@@ -1605,6 +1688,7 @@ pub(crate) async fn diff_stat_between_commits(
         total_deletions,
         files_changed,
         external_diff_applied: false,
+        binary_patch: false,
     };
     Ok(format_diff_stat_output(&output))
 }
@@ -2048,6 +2132,7 @@ fn build_rename_entry(
         raw_diff: raw,
         rename_from: Some(old_path.to_string()),
         similarity: Some(percent),
+        binary: None,
     }
 }
 
@@ -2324,6 +2409,279 @@ fn apply_textconv(
         true
     });
     Ok(done)
+}
+
+/// zlib-deflate `data` (for `--binary` literal chunks). Uses `flate2` at the
+/// default level; the bytes are valid zlib but NOT byte-identical to Git's own
+/// `zlib` output (a documented divergence).
+fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_default()
+}
+
+/// Encode `data` with Git's base85 (the `binary-patch` line format): each line
+/// carries up to 52 bytes, prefixed by a length char (`A`-`Z` for 1-26 bytes,
+/// `a`-`z` for 27-52), then 5 base85 digits per 4 bytes (zero-padded), big-endian.
+fn git_base85(data: &[u8]) -> String {
+    const ALPHABET: &[u8] =
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < data.len() {
+        let n = (data.len() - i).min(52);
+        out.push(if n <= 26 {
+            (b'A' + n as u8 - 1) as char
+        } else {
+            (b'a' + n as u8 - 27) as char
+        });
+        let mut j = 0;
+        while j < n {
+            let mut acc: u32 = 0;
+            for k in 0..4 {
+                acc = (acc << 8) | if j + k < n { data[i + j + k] as u32 } else { 0 };
+            }
+            let mut digits = [0u8; 5];
+            for d in (0..5).rev() {
+                digits[d] = ALPHABET[(acc % 85) as usize];
+                acc /= 85;
+            }
+            for &d in &digits {
+                out.push(d as char);
+            }
+            j += 4;
+        }
+        out.push('\n');
+        i += 52;
+    }
+    out
+}
+
+/// Rewrite the `index <old>..<new>[ <mode>]` line in a diff header to use FULL
+/// object ids (Git's `--binary` implies `--full-index`), preserving the optional
+/// trailing mode.
+fn binary_index_full(header: &str, old_full: &str, new_full: &str) -> String {
+    let had_trailing_newline = header.ends_with('\n');
+    let mut result = header
+        .lines()
+        .map(|line| match line.strip_prefix("index ") {
+            Some(rest) => {
+                let suffix = rest
+                    .split_once(' ')
+                    .map(|(_, mode)| format!(" {mode}"))
+                    .unwrap_or_default();
+                format!("index {old_full}..{new_full}{suffix}")
+            }
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `.lines()` drops the trailing terminator; restore it so a verbatim-rendered
+    // patch keeps its structure (a text file's final newline; binary files are
+    // already full-indexed and are not re-processed here).
+    if had_trailing_newline {
+        result.push('\n');
+    }
+    result
+}
+
+/// `--text`/`-a`: git_internal collapses a non-UTF-8 file to a bare
+/// `Binary files differ`, but `--text` must show its content — re-diff such files
+/// from the raw bytes (lossy UTF-8) and splice a content body onto the header.
+fn force_text_for_bare_binary(
+    files: &mut [DiffFileStat],
+    first_map: &HashMap<PathBuf, ObjectHash>,
+    second_map: &HashMap<PathBuf, ObjectHash>,
+    worktree_entries: &HashMap<PathBuf, ObjectHash>,
+    context: usize,
+) -> Result<(), DiffError> {
+    let load = |path: &str, map: &HashMap<PathBuf, ObjectHash>| -> Result<Vec<u8>, DiffError> {
+        let pb = PathBuf::from(path);
+        let Some(hash) = map.get(&pb) else {
+            return Ok(Vec::new());
+        };
+        if worktree_entries.get(&pb) == Some(hash) {
+            read_worktree_blob_content(&pb)
+        } else {
+            load_repo_blob_content(hash)
+        }
+    };
+    for file in files.iter_mut() {
+        // Exact match (no `trim`) so a text hunk's context line ` Binary files
+        // differ` is not mistaken for git_internal's bare binary marker.
+        if !file
+            .raw_diff
+            .lines()
+            .any(|line| line == "Binary files differ")
+        {
+            continue;
+        }
+        let old_path = file.rename_from.as_deref().unwrap_or(&file.path);
+        let old_text = String::from_utf8_lossy(&load(old_path, first_map)?).into_owned();
+        let new_text = String::from_utf8_lossy(&load(&file.path, second_map)?).into_owned();
+        let hunks = compute_unified_hunks(&old_text, &new_text, context);
+        if hunks.trim().is_empty() {
+            continue;
+        }
+        let (old_label, new_label) = match file.status.as_str() {
+            "added" => ("/dev/null".to_string(), format!("b/{}", file.path)),
+            "deleted" => (format!("a/{old_path}"), "/dev/null".to_string()),
+            _ => (format!("a/{old_path}"), format!("b/{}", file.path)),
+        };
+        let header = {
+            let cut = file.raw_diff.find("\nBinary files ");
+            match cut {
+                Some(pos) => file.raw_diff[..pos].to_string(),
+                None => file.raw_diff.trim_end_matches('\n').to_string(),
+            }
+        };
+        file.raw_diff = format!("{header}\n--- {old_label}\n+++ {new_label}\n{hunks}");
+        file.hunks = parse_diff_hunks(&file.raw_diff);
+        let (insertions, deletions) = count_body_changes(&hunks);
+        file.insertions = insertions;
+        file.deletions = deletions;
+    }
+    Ok(())
+}
+
+/// Detect binary files (a NUL byte in either side's content, surfaced as a NUL in
+/// the internal content diff) and replace their patch body: with `--binary`, a
+/// `GIT binary patch` (full-index header + base85 `literal` chunks for the new
+/// then the old side); otherwise the `Binary files … differ` line. Sets each
+/// file's `binary` marker (old/new sizes) so `--stat`/`--numstat` render `Bin …`
+/// / `-`. Skipped for `--text` and textconv'd files (those are diffed as text).
+fn apply_binary_detection(
+    files: &mut [DiffFileStat],
+    first_map: &HashMap<PathBuf, ObjectHash>,
+    second_map: &HashMap<PathBuf, ObjectHash>,
+    worktree_entries: &HashMap<PathBuf, ObjectHash>,
+    textconv_paths: &std::collections::HashSet<String>,
+    want_patch: bool,
+) -> Result<bool, DiffError> {
+    let mut emitted_patch = false;
+    let load = |path: &str, map: &HashMap<PathBuf, ObjectHash>| -> Result<Vec<u8>, DiffError> {
+        let pb = PathBuf::from(path);
+        let Some(hash) = map.get(&pb) else {
+            return Ok(Vec::new());
+        };
+        if worktree_entries.get(&pb) == Some(hash) {
+            read_worktree_blob_content(&pb)
+        } else {
+            load_repo_blob_content(hash)
+        }
+    };
+
+    for file in files.iter_mut() {
+        if textconv_paths.contains(&file.path) {
+            continue;
+        }
+        // A file is binary if its content diff carries a NUL byte (a text diff
+        // never does), OR git_internal already collapsed it to a bare
+        // `Binary files differ` line (it does that for non-UTF-8 content). The
+        // marker is matched EXACTLY (no `trim`) so a text hunk's context line
+        // ` Binary files differ` is not mistaken for it.
+        let bare_binary = file
+            .raw_diff
+            .lines()
+            .any(|line| line == "Binary files differ");
+        let raw_signal = file.raw_diff.contains('\0') || bare_binary;
+        let old_path = file.rename_from.as_deref().unwrap_or(&file.path);
+        // A rename's body was reconstructed via lossy UTF-8 (`build_rename_entry`),
+        // so the raw-diff signal is unreliable for it — scan the actual blob bytes
+        // (NUL or non-UTF-8 = binary, matching git_internal). Non-rename files
+        // keep the cheap raw-diff signal (no blob load when clearly text).
+        let (old_bytes, new_bytes, is_binary) = if raw_signal {
+            (
+                load(old_path, first_map)?,
+                load(&file.path, second_map)?,
+                true,
+            )
+        } else if file.status == "renamed" {
+            let is_binary_bytes = |b: &[u8]| b.contains(&0) || std::str::from_utf8(b).is_err();
+            let old = load(old_path, first_map)?;
+            let new = load(&file.path, second_map)?;
+            let binary = is_binary_bytes(&old) || is_binary_bytes(&new);
+            (old, new, binary)
+        } else {
+            continue;
+        };
+        if !is_binary {
+            continue;
+        }
+        // An exact rename of a binary file (identical bytes) stays header-only —
+        // Git shows the rename headers with no `Binary files … differ` body — but
+        // it is still binary metadata for `--stat` (bare `Bin`), `--numstat`
+        // (`-`/`-`), and JSON, so record the marker without touching the body.
+        if old_bytes == new_bytes {
+            file.binary = Some((old_bytes.len() as u64, new_bytes.len() as u64));
+            continue;
+        }
+
+        // The `Binary files <a> and <b> differ` labels come from the existing
+        // `---`/`+++` lines when present; the bare-marker form has none, so fall
+        // back to the status (so a created/deleted side uses `/dev/null`).
+        let label = |prefix: &str| {
+            file.raw_diff
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix).map(str::to_string))
+        };
+        let (default_old, default_new) = match file.status.as_str() {
+            "added" => ("/dev/null".to_string(), format!("b/{}", file.path)),
+            "deleted" => (format!("a/{old_path}"), "/dev/null".to_string()),
+            _ => (format!("a/{old_path}"), format!("b/{}", file.path)),
+        };
+        let old_label = label("--- ").unwrap_or(default_old);
+        let new_label = label("+++ ").unwrap_or(default_new);
+
+        // Header = `diff --git` + mode + `index`, stopping before the body —
+        // which for the bare-marker form is the `Binary files differ` line itself.
+        let header = {
+            let cut = file
+                .raw_diff
+                .find("\n--- ")
+                .or_else(|| file.raw_diff.find("\n@@ "))
+                .or_else(|| file.raw_diff.find("\nBinary files "));
+            match cut {
+                Some(pos) => file.raw_diff[..pos].to_string(),
+                None => file.raw_diff.trim_end_matches('\n').to_string(),
+            }
+        };
+        let raw = if want_patch {
+            let hash_of = |map: &HashMap<PathBuf, ObjectHash>, p: &str| {
+                map.get(&PathBuf::from(p)).map(|h| h.to_string())
+            };
+            let old_id = hash_of(first_map, old_path);
+            let new_id = hash_of(second_map, &file.path);
+            let width = old_id
+                .as_ref()
+                .or(new_id.as_ref())
+                .map(String::len)
+                .unwrap_or(40);
+            let zeros = "0".repeat(width);
+            let old_full = old_id.unwrap_or_else(|| zeros.clone());
+            let new_full = new_id.unwrap_or(zeros);
+            format!(
+                "{}\nGIT binary patch\nliteral {}\n{}\nliteral {}\n{}\n",
+                binary_index_full(&header, &old_full, &new_full),
+                new_bytes.len(),
+                git_base85(&zlib_deflate(&new_bytes)),
+                old_bytes.len(),
+                git_base85(&zlib_deflate(&old_bytes)),
+            )
+        } else {
+            format!("{header}\nBinary files {old_label} and {new_label} differ\n")
+        };
+        file.raw_diff = raw;
+        file.binary = Some((old_bytes.len() as u64, new_bytes.len() as u64));
+        file.insertions = 0;
+        file.deletions = 0;
+        file.hunks = Vec::new();
+        if want_patch {
+            emitted_patch = true;
+        }
+    }
+    Ok(emitted_patch)
 }
 
 /// Replace each file's patch body with the output of the configured external
@@ -2603,24 +2961,22 @@ fn render_diff_output(
     } else if args.numstat {
         join_diff_records(
             result.files.iter().map(|file| {
+                // Binary files report `-` for both counts (matching Git).
+                let (ins, del) = if file.binary.is_some() {
+                    ("-".to_string(), "-".to_string())
+                } else {
+                    (file.insertions.to_string(), file.deletions.to_string())
+                };
                 if file.status == "renamed" {
                     let from = file.rename_from.as_deref().unwrap_or("");
                     if args.null {
                         // `<ins>\t<del>\t\0<old>\0<new>` (empty path column, then NUL-separated).
-                        format!(
-                            "{}\t{}\t\0{}\0{}",
-                            file.insertions, file.deletions, from, file.path
-                        )
+                        format!("{ins}\t{del}\t\0{from}\0{}", file.path)
                     } else {
-                        format!(
-                            "{}\t{}\t{}",
-                            file.insertions,
-                            file.deletions,
-                            rename_display(from, &file.path)
-                        )
+                        format!("{ins}\t{del}\t{}", rename_display(from, &file.path))
                     }
                 } else {
-                    format!("{}\t{}\t{}", file.insertions, file.deletions, file.path)
+                    format!("{ins}\t{del}\t{}", file.path)
                 }
             }),
             args.null,
@@ -2635,9 +2991,10 @@ fn render_diff_output(
         // `-s` / `--no-patch`: suppress the patch body (used for status-only
         // checks, typically with `--exit-code`).
         String::new()
-    } else if result.external_diff_applied {
-        // External driver output is emitted verbatim — exact concatenation, no
-        // trailing-newline normalization, no coloring.
+    } else if result.external_diff_applied || result.binary_patch {
+        // External-driver and `--binary` output is emitted verbatim — exact
+        // concatenation, no trailing-newline normalization (a `GIT binary patch`
+        // ends with a blank line that Git's parser requires), no coloring.
         result
             .files
             .iter()
@@ -2679,6 +3036,7 @@ fn render_diff_output(
         || args.summary
         || word_diff_active(args)
         || result.external_diff_applied
+        || result.binary_patch
     {
         rendered
     } else {
@@ -2696,7 +3054,12 @@ fn render_diff_output(
     // `-z` records carry their own NUL terminators, and external-driver output is
     // emitted byte-for-byte, so neither gets an appended trailing newline.
     let z_records = args.null && (args.name_only || args.name_status || args.numstat);
-    if z_records || result.external_diff_applied {
+    // The verbatim (no trailing-newline) write path applies only when the PATCH
+    // body is actually rendered — `--binary --stat`/`--numstat` still get the
+    // normal trailing newline even though `binary_patch` is set.
+    let verbatim_patch =
+        result.external_diff_applied || (result.binary_patch && patch_body_is_shown(args));
+    if z_records || verbatim_patch {
         pager.write_str(&rendered)?;
     } else {
         pager.write_str(&format!("{rendered}\n"))?;
@@ -3479,6 +3842,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         check: false,
         reverse: false,
         text: false,
+        binary: false,
         no_ext_diff: false,
         color_moved: None,
         no_color_moved: false,
@@ -3572,17 +3936,30 @@ fn format_diff_stat_output(result: &DiffOutput) -> String {
         .files
         .iter()
         .map(|file| {
+            let name = if file.status == "renamed" {
+                rename_display(file.rename_from.as_deref().unwrap_or(""), &file.path)
+            } else {
+                file.path.clone()
+            };
+            // Binary files show `Bin <old> -> <new> bytes` instead of a graph; an
+            // UNCHANGED binary (an exact rename, which keeps a header-only body
+            // with no `Binary files`/`GIT binary patch`) shows a bare `Bin`,
+            // matching Git.
+            if let Some((old_size, new_size)) = file.binary {
+                let changed = file.raw_diff.contains("Binary files ")
+                    || file.raw_diff.contains("GIT binary patch");
+                return if changed {
+                    format!(" {name} | Bin {old_size} -> {new_size} bytes")
+                } else {
+                    format!(" {name} | Bin")
+                };
+            }
             let total = file.insertions + file.deletions;
             let bar = format!(
                 "{}{}",
                 "+".repeat(file.insertions.min(40)),
                 "-".repeat(file.deletions.min(40))
             );
-            let name = if file.status == "renamed" {
-                rename_display(file.rename_from.as_deref().unwrap_or(""), &file.path)
-            } else {
-                file.path.clone()
-            };
             // Git omits the trailing space when the change graph is empty
             // (e.g. a pure rename with 0 line changes shows `name | 0`).
             if bar.is_empty() {
@@ -3621,6 +3998,7 @@ fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
         raw_diff: item.data.clone(),
         rename_from: None,
         similarity: None,
+        binary: None,
     }
 }
 

@@ -48,7 +48,8 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | NUL output | `-z` | `--null` | NUL-terminate `--name-only`/`--name-status`/`--numstat` records (and split the `--name-status` status and path into separate NUL fields); other modes are unaffected. |
 | Whitespace check | | `--check` | Instead of the diff, warn about whitespace errors on added lines (trailing whitespace and space-before-tab in the indent), printing `<path>:<line>: <message>` and exiting 2 when any are found. Git's blank-at-eof check is not performed; takes precedence over other output modes. |
 | Reverse | `-R` | `--reverse` | Swap the two sides so additions become deletions and vice-versa (the patch that would undo the change). |
-| Text | `-a` | `--text` | Treat all files as text. Accepted no-op: Libra's diff never detects binary files, so it always shows the content diff (it never prints "Binary files differ"). Distinct from `--binary` (binary-patch format), which is not supported. |
+| Text | `-a` | `--text` | Treat all files as text: diff the content even of files detected as binary (a NUL byte in either side, or non-UTF-8 content), suppressing the "Binary files … differ" line. Libra's diff is text-based, so a non-UTF-8 change that is identical after lossy-UTF-8 conversion still shows "Binary files … differ". |
+| Binary patch | | `--binary` | Emit a `GIT binary patch` (base85 `literal` chunks for both directions) for binary files instead of "Binary files … differ". The patch is valid and appliable, but its compressed bytes are not byte-identical to Git's (Libra deflates with a different zlib and always emits `literal`, not Git's smaller-of-literal/delta). |
 | No external diff | | `--no-ext-diff` | Disable the external diff driver for this run, forcing the built-in engine. |
 | External diff | | `--ext-diff` | Allow the configured external diff driver (`diff.external`) to generate each file's patch (it is used by default when configured; this flag is the explicit opposite of `--no-ext-diff`). |
 | Color moved lines | | `--color-moved[=<mode>]` | In colored output, color lines that were deleted in one place and added in another with a distinct color (removed → bold magenta, added → bold cyan). Bare `--color-moved` and the block modes (`default`/`zebra`/`blocks`/`dimmed-zebra`) are accepted but approximated by `plain` — every moved line is colored; Libra does not implement Git's conservative moved-block significance/zebra striping. `--color-moved=no` / `--no-color-moved` turns it off. Only affects colored output (a terminal or `--color=always`). |
@@ -229,6 +230,8 @@ The `status` field is one of: `added`, `deleted`, `modified`, or `renamed`. A
 }
 ```
 
+A binary file (unless `--text`) carries `binary` as a `[old_size, new_size]` byte-count pair, its `insertions`/`deletions` are `0`, and `hunks` is empty.
+
 The `old_ref` and `new_ref` fields indicate what was compared (e.g., `"index"`, `"working tree"`, `"HEAD"`, or a commit reference).
 
 ## Design Rationale
@@ -276,9 +279,9 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | NUL-terminated output | `-z` / `--null` | `-z` | N/A |
 | Whitespace check | `--check` (trailing-ws / space-before-tab) | `--check` | N/A |
 | Reverse diff | `-R` / `--reverse` | `-R` | N/A |
-| Treat as text | `-a` / `--text` (no-op; always shown) | `-a` / `--text` | N/A |
+| Treat as text | `-a` / `--text` (force content diff of binary files) | `-a` / `--text` | N/A |
 | Word diff | `--word-diff[=<mode>]` (no `--color-words`/`--word-diff-regex`) | `--word-diff` / `--color-words` | N/A |
-| Binary diff (binary patch) | Not supported | `--binary` | N/A |
+| Binary diff (binary patch) | `--binary` (valid/appliable; compressed bytes differ from Git's) | `--binary` | N/A |
 | Context lines | `-U<n>` / `--unified=<n>` (default 3) | `-U<n>` / `--unified=<n>` | `--context <n>` |
 | Ignore whitespace | `-w` / `--ignore-all-space` | `-w` / `--ignore-all-space` | N/A |
 | Ignore whitespace amount | `-b` / `--ignore-space-change` | `-b` / `--ignore-space-change` | N/A |
