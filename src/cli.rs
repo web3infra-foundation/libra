@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -398,6 +398,11 @@ enum Commands {
         after_help = command::read_tree::READ_TREE_EXAMPLES
     )]
     ReadTree(command::read_tree::ReadTreeArgs),
+    #[command(
+        about = "Modify the index directly (add/remove/cacheinfo)",
+        after_help = command::update_index::UPDATE_INDEX_EXAMPLES
+    )]
+    UpdateIndex(command::update_index::UpdateIndexArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
 
@@ -1306,6 +1311,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             command::write_tree::execute_safe(cmd_args, &output).await?
         }
         Commands::ReadTree(cmd_args) => command::read_tree::execute_safe(cmd_args, &output).await?,
+        Commands::UpdateIndex(cmd_args) => {
+            command::update_index::execute_safe(cmd_args, &output).await?
+        }
         Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?

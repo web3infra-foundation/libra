@@ -80,6 +80,7 @@ mod show_ref_exclude_existing;
 mod show_ref_render;
 pub mod symbolic_ref;
 pub mod tag;
+pub mod update_index;
 pub mod usage;
 pub mod verify_pack;
 mod verify_pack_decode;

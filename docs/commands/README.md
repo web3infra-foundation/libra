@@ -119,6 +119,7 @@ Every Libra command accepts the following global flags:
 | `libra hash-object` | | Compute Git-compatible blob object IDs from files or standard input | [hash-object.md](hash-object.md) |
 | `libra write-tree` | | Write the current index out as a tree object | [write-tree.md](write-tree.md) |
 | `libra read-tree` | | Read a tree object into the index (index-only) | [read-tree.md](read-tree.md) |
+| `libra update-index` | | Modify the index directly (add/remove/cacheinfo) | [update-index.md](update-index.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |
