@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -388,6 +388,16 @@ enum Commands {
     Archive(command::archive::ArchiveArgs),
     #[command(about = "Compute Git-compatible object IDs")]
     HashObject(command::hash_object::HashObjectArgs),
+    #[command(
+        about = "Write the current index out as a tree object",
+        after_help = command::write_tree::WRITE_TREE_EXAMPLES
+    )]
+    WriteTree(command::write_tree::WriteTreeArgs),
+    #[command(
+        about = "Read a tree object into the index",
+        after_help = command::read_tree::READ_TREE_EXAMPLES
+    )]
+    ReadTree(command::read_tree::ReadTreeArgs),
     #[command(about = "Validate pack index files against pack archives")]
     VerifyPack(command::verify_pack::VerifyPackArgs),
 
@@ -1292,6 +1302,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::CheckAttr(cmd_args) => {
             command::check_attr::execute_safe(cmd_args, &output).await?
         }
+        Commands::WriteTree(cmd_args) => {
+            command::write_tree::execute_safe(cmd_args, &output).await?
+        }
+        Commands::ReadTree(cmd_args) => command::read_tree::execute_safe(cmd_args, &output).await?,
         Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?

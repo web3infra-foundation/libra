@@ -13,12 +13,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::{
         index::{Index, IndexEntry},
-        object::{
-            ObjectTrait,
-            commit::Commit,
-            tree::{Tree, TreeItem, TreeItemMode},
-            types::ObjectType,
-        },
+        object::{ObjectTrait, commit::Commit, tree::Tree, types::ObjectType},
     },
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -36,6 +31,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
+        tree_plumbing,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -1572,65 +1568,14 @@ fn whole_file_conflict(ours: &[u8], theirs: &[u8], short_src: &str) -> Vec<u8> {
     content.into_bytes()
 }
 
+/// Build (and persist) the nested tree for the current index, delegating to the
+/// shared [`tree_plumbing::write_tree_from_index`] so cherry-pick, merge, and
+/// `write-tree` share one tree-construction rule (and one bug-fix surface — the
+/// shared builder handles intermediate directories the old per-command builder
+/// dropped).
 fn create_tree_from_index(index: &Index) -> Result<ObjectHash, CherryPickSingleError> {
-    let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
-    for path_buf in index.tracked_files() {
-        let path_str = path_to_utf8(&path_buf)?;
-        if let Some(entry) = index.get(path_str, 0) {
-            let item = TreeItem {
-                mode: match entry.mode {
-                    0o100644 => TreeItemMode::Blob,
-                    0o100755 => TreeItemMode::BlobExecutable,
-                    0o120000 => TreeItemMode::Link,
-                    0o040000 => TreeItemMode::Tree,
-                    _ => {
-                        return Err(CherryPickSingleError::SaveFailed(format!(
-                            "unsupported file mode: {:#o}",
-                            entry.mode
-                        )));
-                    }
-                },
-                name: file_name_to_utf8(&path_buf)?,
-                id: entry.hash,
-            };
-            let parent_dir = path_buf
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .to_path_buf();
-            entries_map.entry(parent_dir).or_default().push(item);
-        }
-    }
-
-    build_tree_recursively(Path::new(""), &mut entries_map)
-}
-
-fn build_tree_recursively(
-    current_path: &Path,
-    entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
-) -> Result<ObjectHash, CherryPickSingleError> {
-    let mut current_items = entries_map.remove(current_path).unwrap_or_default();
-
-    let subdirs: Vec<_> = entries_map
-        .keys()
-        .filter(|p| p.parent() == Some(current_path))
-        .cloned()
-        .collect();
-
-    for subdir_path in subdirs {
-        let subdir_name = file_name_to_utf8(&subdir_path)?;
-        let subtree_hash = build_tree_recursively(&subdir_path, entries_map)?;
-        current_items.push(TreeItem {
-            mode: TreeItemMode::Tree,
-            name: subdir_name,
-            id: subtree_hash,
-        });
-    }
-
-    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
-    let tree = Tree::from_tree_items(current_items)
-        .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to create tree: {e}")))?;
-    save_object(&tree, &tree.id).map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;
-    Ok(tree.id)
+    tree_plumbing::write_tree_from_index(index)
+        .map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))
 }
 
 fn reset_workdir_tracked_only(
@@ -1691,18 +1636,6 @@ fn path_to_utf8(path: &Path) -> Result<&str, CherryPickSingleError> {
     path.to_str().ok_or_else(|| {
         CherryPickSingleError::LoadObject(format!("invalid path encoding: {}", path.display()))
     })
-}
-
-fn file_name_to_utf8(path: &Path) -> Result<String, CherryPickSingleError> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            CherryPickSingleError::LoadObject(format!(
-                "invalid file name encoding: {}",
-                path.display()
-            ))
-        })
 }
 
 async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {

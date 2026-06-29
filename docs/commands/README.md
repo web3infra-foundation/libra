@@ -117,6 +117,8 @@ Every Libra command accepts the following global flags:
 | `libra check-ignore` | | Report which pathnames are excluded by `.libraignore` rules | [check-ignore.md](check-ignore.md) |
 | `libra fsck` | | Verify the integrity of objects, refs, and index in a Libra repository | [fsck.md](fsck.md) |
 | `libra hash-object` | | Compute Git-compatible blob object IDs from files or standard input | [hash-object.md](hash-object.md) |
+| `libra write-tree` | | Write the current index out as a tree object | [write-tree.md](write-tree.md) |
+| `libra read-tree` | | Read a tree object into the index (index-only) | [read-tree.md](read-tree.md) |
 | `libra verify-pack` | | Validate pack index files against their pack archives | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | List local refs (branches, tags, HEAD) and their object IDs | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | Read or update the symbolic HEAD ref | [symbolic-ref.md](symbolic-ref.md) |

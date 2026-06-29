@@ -60,6 +60,7 @@ pub mod package;
 pub mod publish;
 pub mod pull;
 pub mod push;
+pub mod read_tree;
 pub mod rebase;
 pub mod reflog;
 pub mod remote;
@@ -98,6 +99,7 @@ pub mod stash;
 pub mod status;
 pub mod switch;
 pub mod web_assets;
+pub mod write_tree;
 
 use std::{io, io::Write, path::Path};
 

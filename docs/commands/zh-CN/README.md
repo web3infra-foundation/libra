@@ -117,6 +117,8 @@
 | `libra check-ignore` | | 报告哪些路径被 `.libraignore` 规则忽略 | [check-ignore.md](check-ignore.md) |
 | `libra fsck` | | 校验 Libra 仓库中对象、refs 和索引的完整性 | [fsck.md](fsck.md) |
 | `libra hash-object` | | 从文件或标准输入计算 Git 兼容 blob 对象 ID | [hash-object.md](hash-object.md) |
+| `libra write-tree` | | 把当前 index 写成一个 tree 对象 | [write-tree.md](write-tree.md) |
+| `libra read-tree` | | 把一个 tree 对象读入 index（仅 index） | [read-tree.md](read-tree.md) |
 | `libra verify-pack` | | 对照 pack 归档验证 pack index 文件 | [verify-pack.md](verify-pack.md) |
 | `libra show-ref` | | 列出本地 refs（分支、标签、HEAD）及其对象 ID | [show-ref.md](show-ref.md) |
 | `libra symbolic-ref` | | 读取或更新符号 HEAD 引用 | [symbolic-ref.md](symbolic-ref.md) |

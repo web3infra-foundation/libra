@@ -791,11 +791,11 @@ gantt
 - `docs/development/commands/read-tree.md`
 
 **验收标准**：
-- [ ] `write-tree` 从 `.libra/index` 生成 tree，保持 object format（sha1/sha256）和 file mode。
-- [ ] `read-tree` 能把单个 tree 读入 index，拒绝会静默覆盖工作树的模式；首版不支持 `--prefix`/`-m`/`-u`，文档写明。
-- [ ] AI history、merge/cherry-pick 侧复用同一 tree/index helper，不再复制树构造逻辑。
-- [ ] `internal/tree_plumbing.rs` 的公共 API 有文档注释和签名冻结测试（或 lib 测试覆盖其 contract），避免后续命令绕行。
-- [ ] `write-tree` 退出码：成功 exit 0 并输出 tree SHA；空 index exit 0 输出空 tree SHA；非仓库 exit 128。
+- [x] `write-tree` 从 `.libra/index` 生成（嵌套）tree，保持 object format（sha1/sha256）和 file mode。（v0.17.1763）
+- [x] `read-tree` 能把单个 tree 读入 index；首版**仅 index、不触工作树**（故不可能静默覆盖），不支持 `--prefix`/`-m`/`-u`，文档已写明。
+- [x] **核心去重已收口**：新建 `internal/tree_plumbing.rs` 为唯一 index↔tree 实现（`write_tree_from_index`/`write_tree_from_leaves`/`read_tree_into_index`），**`merge`（items-based → `write_tree_from_leaves`）与 `cherry-pick`（index-based → `write_tree_from_index`）已委托复用**，删除各自重复的 `build_tree_recursively` 等。共享实现还**修正了 cherry-pick/rebase 旧构造器丢失中间空目录（如 `a/b/c.txt`）的隐性 bug**。**有意延后（非本任务范围）**：`rebase.rs`（items-based，可后续低成本委托 `write_tree_from_leaves`）、`stash.rs`（基于文件系统遍历的 `build_tree_recursive`，算法不同）、`internal/ai/history.rs::write_tree`（`&[TreeItem]→单 tree` 的不同 API，按对象类型分组，非 index→嵌套 tree，有意独立）。这三者的去留作为后续清理项，理由见 `docs/development/commands/write-tree.md`「设计方案」。
+- [x] `internal/tree_plumbing.rs` 的公共 API 有文档注释和签名冻结测试（`public_api_signatures_are_frozen`）+ mode 映射/中间目录 lib 测试。
+- [x] `write-tree` 退出码：成功 exit 0 并输出 tree SHA；空 index exit 0 输出空 tree SHA（`Tree::from_tree_items([])` 拒绝空列表，改用 `Tree::from_bytes(&[], from_type_and_data(Tree,&[]))` 得规范空 tree）；非仓库 exit 128。
 
 **验证**：
 - [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test write_tree -- --nocapture`

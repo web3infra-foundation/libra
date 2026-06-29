@@ -334,6 +334,7 @@ mod pull_test;
 mod push_error_test;
 mod push_json_test;
 mod push_test;
+mod read_tree_test;
 mod rebase_test;
 mod reflog_test;
 mod remote_test;
@@ -367,3 +368,4 @@ mod verify_pack_test;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 mod worktree_fuse_test;
 mod worktree_test;
+mod write_tree_test;

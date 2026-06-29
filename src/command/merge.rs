@@ -16,7 +16,7 @@ use git_internal::{
         object::{
             blob::Blob,
             commit::Commit,
-            tree::{Tree, TreeItem, TreeItemMode},
+            tree::{Tree, TreeItemMode},
         },
     },
 };
@@ -35,6 +35,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
+        tree_plumbing,
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -1650,61 +1651,14 @@ fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, P
 pub(crate) fn create_tree_from_items_map(
     items: &HashMap<PathBuf, MergeTreeEntry>,
 ) -> Result<ObjectHash, String> {
-    let mut entries_map = tree_entries_map_from_items(items)?;
-    build_tree_recursively(Path::new(""), &mut entries_map)
-}
-
-fn tree_entries_map_from_items(
-    items: &HashMap<PathBuf, MergeTreeEntry>,
-) -> Result<HashMap<PathBuf, Vec<TreeItem>>, String> {
-    let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
-    for (path, entry) in items {
-        let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-        ensure_tree_parent_dirs(&mut entries_map, &parent_dir);
-        entries_map.entry(parent_dir).or_default().push(TreeItem {
-            mode: entry.mode,
-            name: tree_item_name(path)?,
-            id: entry.hash,
-        });
-    }
-    Ok(entries_map)
-}
-
-fn ensure_tree_parent_dirs(entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>, dir: &Path) {
-    let mut current = Some(dir);
-    while let Some(path) = current {
-        if path.as_os_str().is_empty() {
-            break;
-        }
-        entries_map.entry(path.to_path_buf()).or_default();
-        current = path.parent();
-    }
-}
-
-fn build_tree_recursively(
-    current_path: &Path,
-    entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
-) -> Result<ObjectHash, String> {
-    let mut current_items = entries_map.remove(current_path).unwrap_or_default();
-    let subdirs: Vec<_> = entries_map
-        .keys()
-        .filter(|path| path.parent() == Some(current_path))
-        .cloned()
-        .collect();
-
-    for subdir in subdirs {
-        let subtree_id = build_tree_recursively(&subdir, entries_map)?;
-        current_items.push(TreeItem {
-            mode: TreeItemMode::Tree,
-            name: tree_item_name(&subdir)?,
-            id: subtree_id,
-        });
-    }
-
-    crate::utils::tree::sort_tree_items_for_git(&mut current_items);
-    let tree = Tree::from_tree_items(current_items).map_err(|error| error.to_string())?;
-    save_object(&tree, &tree.id).map_err(|error| error.to_string())?;
-    Ok(tree.id)
+    // Delegate to the shared nested-tree builder so merge, cherry-pick, and
+    // `write-tree` share one tree-construction rule (and one bug-fix surface).
+    // Merge entries already carry a `TreeItemMode`, so they map straight onto
+    // the builder's leaf tuples.
+    let leaves = items
+        .iter()
+        .map(|(path, entry)| (path.clone(), entry.mode, entry.hash));
+    tree_plumbing::write_tree_from_leaves(leaves).map_err(|error| error.to_string())
 }
 
 fn reset_index_and_workdir_to_tree(tree_id: &ObjectHash) -> Result<(), PullMergeError> {
@@ -1797,15 +1751,6 @@ fn staged_conflict_paths(index: &Index) -> HashSet<String> {
         .flat_map(|stage| index.tracked_entries(stage))
         .map(|entry| entry.name.clone())
         .collect()
-}
-
-fn tree_item_name(path: &Path) -> Result<String, String> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| format!("path has no file name: {}", path.display()))?;
-    name.to_str()
-        .map(str::to_string)
-        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
 }
 
 fn path_to_index_key(path: &Path) -> Result<&str, PullMergeError> {
@@ -2066,27 +2011,5 @@ mod tests {
 
         assert!(result.conflicts.is_empty());
         assert_eq!(result.merged_items.get(&path), Some(&theirs));
-    }
-
-    #[test]
-    fn tree_entries_map_from_items_materializes_nested_parent_dirs() {
-        let mut items = HashMap::new();
-        items.insert(
-            PathBuf::from("dir/sub/file.txt"),
-            merge_entry(1, TreeItemMode::Blob),
-        );
-
-        let entries = tree_entries_map_from_items(&items).expect("build tree entries");
-
-        assert!(
-            entries.contains_key(Path::new("dir")),
-            "parent directory should be present so recursive tree building can attach it to root"
-        );
-        assert!(
-            entries.contains_key(Path::new("dir/sub")),
-            "leaf directory should contain the nested file entry"
-        );
-        assert_eq!(entries[Path::new("dir")].len(), 0);
-        assert_eq!(entries[Path::new("dir/sub")].len(), 1);
     }
 }
