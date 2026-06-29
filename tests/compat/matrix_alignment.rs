@@ -238,7 +238,7 @@ fn compatibility_governance_roadmap_marks_current_surfaces_without_batch_status(
     let governance = read_repo_file("docs/development/commands/_compatibility.md");
 
     for row in [
-        "| merge | partial | partial | fast-forward and single-head three-way merge supported; octopus/custom strategies/squash deferred |",
+        "| merge | partial | partial | fast-forward and single-head three-way merge supported; `-m`/`--ff-only`/`--no-ff`/`--squash`/`--no-commit`/`--no-edit`/`--verify-signatures` (vault-key PGP only) supported; octopus/custom strategies deferred |",
         "| pull | partial | partial | fetch + fast-forward/three-way merge supported; advanced strategy flags still partial |",
         "| push | partial | partial | branch/tag update, multi-refspec, delete, `--tags`, and `--mirror` supported; local file remote rejected intentionally |",
         "| checkout | partial | partial | visible branch compatibility surface plus explicit `checkout -- <path>` restoration alias; prefer `switch` / `restore` |",

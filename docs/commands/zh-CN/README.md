@@ -113,6 +113,7 @@
 | 命令 | 别名 | 说明 | 文档 |
 |------|------|------|------|
 | `libra cat-file` | | 按类型、大小或漂亮打印内容检查 Git 对象和 AI 对象 | [cat-file.md](cat-file.md) |
+| `libra check-ignore` | | 报告哪些路径被 `.libraignore` 规则忽略 | [check-ignore.md](check-ignore.md) |
 | `libra fsck` | | 校验 Libra 仓库中对象、refs 和索引的完整性 | [fsck.md](fsck.md) |
 | `libra hash-object` | | 从文件或标准输入计算 Git 兼容 blob 对象 ID | [hash-object.md](hash-object.md) |
 | `libra verify-pack` | | 对照 pack 归档验证 pack index 文件 | [verify-pack.md](verify-pack.md) |

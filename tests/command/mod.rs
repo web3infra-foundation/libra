@@ -278,6 +278,7 @@ mod bisect_test;
 mod blame_test;
 mod branch_test;
 mod cat_file_test;
+mod check_ignore_test;
 mod checkout_test;
 mod cherry_pick_test;
 mod clean_test;

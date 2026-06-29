@@ -1126,6 +1126,121 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     false
 }
 
+/// The deciding `.libraignore` pattern for a path, produced by
+/// [`check_gitignore_match`] for `check-ignore -v` output.
+pub struct IgnoreMatchInfo {
+    /// The `.libraignore` file that supplied the deciding pattern. `None` for
+    /// the built-in `.git` rule.
+    pub source: Option<PathBuf>,
+    /// 1-based line number of the pattern within `source`, recovered by scanning
+    /// the file (the matcher engine does not expose it). `None` when it cannot
+    /// be located or for the built-in rule.
+    pub line: Option<usize>,
+    /// The deciding pattern exactly as written in the source (e.g. `*.tmp` or
+    /// `!keep`). Empty for the built-in `.git` rule.
+    pub pattern: String,
+    /// `true` when the deciding pattern ignores the path; `false` for a
+    /// whitelist (`!`) override.
+    pub ignored: bool,
+}
+
+/// Like [`check_gitignore`] but returns the deciding pattern's source file,
+/// line, and text — the detail `check-ignore -v` reports. Returns `Some(info)`
+/// when a `.libraignore` pattern (or the built-in `.git` rule) decides the
+/// path's status (`info.ignored` distinguishes an ignore match from a whitelist
+/// override) and `None` when no pattern applies. The walk order matches
+/// [`check_gitignore`] exactly (nearest `.libraignore` first, last matching
+/// pattern within a file wins), so the two never disagree on the verdict.
+pub fn check_gitignore_match(work_dir: &PathBuf, target_file: &PathBuf) -> Option<IgnoreMatchInfo> {
+    assert!(target_file.starts_with(work_dir));
+
+    if path_has_git_dir_component(work_dir, target_file) {
+        return Some(IgnoreMatchInfo {
+            source: None,
+            line: None,
+            pattern: String::new(),
+            ignored: true,
+        });
+    }
+
+    let mut dir = target_file.clone();
+    dir.pop();
+
+    while dir.starts_with(work_dir) {
+        let gitignore_path = dir.join(".libraignore");
+        if !gitignore_path.exists() {
+            dir.pop();
+            continue;
+        }
+        let ignore = cached_libraignore(&gitignore_path);
+
+        if let Some(info) = glob_match_info(ignore.matched(target_file, target_file.is_dir())) {
+            return Some(info);
+        }
+
+        let mut parent_dir = if target_file.is_dir() {
+            target_file.clone()
+        } else {
+            target_file
+                .parent()
+                .expect("non-directory path always has a parent")
+                .to_path_buf()
+        };
+        while parent_dir.starts_with(work_dir) {
+            if let Some(info) = glob_match_info(ignore.matched(&parent_dir, true)) {
+                return Some(info);
+            }
+            parent_dir.pop();
+        }
+
+        dir.pop();
+    }
+
+    None
+}
+
+/// Convert an `ignore` crate match into [`IgnoreMatchInfo`], recovering the
+/// source/line/pattern of the deciding glob. `Match::None` yields `None`.
+fn glob_match_info(m: Match<&ignore::gitignore::Glob>) -> Option<IgnoreMatchInfo> {
+    let (glob, ignored) = match m {
+        Match::Ignore(glob) => (glob, true),
+        Match::Whitelist(glob) => (glob, false),
+        Match::None => return None,
+    };
+    let source = glob.from().map(Path::to_path_buf);
+    let pattern = glob.original().to_string();
+    let line = source
+        .as_deref()
+        .and_then(|path| find_pattern_line(path, &pattern));
+    Some(IgnoreMatchInfo {
+        source,
+        line,
+        pattern,
+        ignored,
+    })
+}
+
+/// Best-effort recovery of a pattern's 1-based line number in a `.libraignore`
+/// file: the first non-blank, non-comment line whose trimmed content equals
+/// `pattern`. The matcher engine does not expose line numbers, so `check-ignore
+/// -v` reconstructs them here. Returns `None` if the file cannot be read or the
+/// pattern is not found verbatim.
+fn find_pattern_line(source: &Path, pattern: &str) -> Option<usize> {
+    let contents = fs::read_to_string(source).ok()?;
+    // Return the LAST matching line: within one `.libraignore`, the last pattern
+    // that matches a path is the deciding one, so on duplicate identical
+    // patterns the later line is the rule the matcher actually applied.
+    contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed == pattern
+        })
+        .last()
+        .map(|(idx, _)| idx + 1)
+}
+
 fn cached_libraignore(gitignore_path: &Path) -> Arc<Gitignore> {
     let Ok(metadata) = fs::metadata(gitignore_path) else {
         return load_libraignore(gitignore_path);

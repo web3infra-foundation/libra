@@ -31,7 +31,7 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
   Repository Setup        init, clone, config
-  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, worktree
+  Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
@@ -371,6 +371,11 @@ enum Commands {
     Notes(command::notes::NotesArgs),
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
+    #[command(
+        about = "Report pathnames excluded by .libraignore rules",
+        after_help = command::check_ignore::CHECK_IGNORE_EXAMPLES
+    )]
+    CheckIgnore(command::check_ignore::CheckIgnoreArgs),
     #[command(
         about = "Create an archive of files from a named tree",
         after_help = command::archive::ARCHIVE_EXAMPLES
@@ -1276,6 +1281,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
         Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::CheckIgnore(cmd_args) => {
+            command::check_ignore::execute_safe(cmd_args, &output).await?
+        }
         Commands::Archive(cmd_args) => command::archive::execute_safe(cmd_args, &output).await?,
         Commands::HashObject(cmd_args) => {
             command::hash_object::execute_safe(cmd_args, &output).await?
