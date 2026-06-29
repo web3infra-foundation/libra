@@ -42,7 +42,7 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Ignore EOL whitespace | | `--ignore-space-at-eol` | Ignore whitespace changes at end of line only; leading and internal whitespace compare exactly. Same re-diff/drop behavior as `-w`. `-w`/`-b` win if combined. |
 | Ignore blank lines | | `--ignore-blank-lines` | Ignore changes whose lines are all blank (truly empty): a change consisting only of added/removed empty lines is not reported (an added/deleted file whose only content is blank lines is still listed with zero counts), while a blank line near a real edit is shown in full. Re-diffs affected files (so `--stat`/`--name-only`/`--numstat`/JSON reflect the result); honors `-U<n>`. Composes with a whitespace flag (`-w`/`-b`/`--ignore-space-at-eol`): a line that is blank after whitespace-normalization then counts as blank. |
 | Shortstat | | `--shortstat` | Show only the trailing summary line of `--stat` (files changed / insertions / deletions), omitting a clause when its count is zero. |
-| Summary | | `--summary` | Show a condensed summary of created and deleted files (no line for plain content edits). Libra's diff does not detect renames (shown as delete + create) or surface mode-only changes. |
+| Summary | | `--summary` | Show a condensed summary of created files, deleted files, and (with `-M`) renames (no line for plain content edits); mode-only changes are not surfaced. |
 | No patch | `-s` | `--no-patch` | Suppress the patch (diff body). Combine with `--exit-code` for a status-only check. |
 | Exit code | | `--exit-code` | Still print the diff, but exit with code 1 when there are differences (0 otherwise). Unlike `--quiet`, the diff is not suppressed. |
 | NUL output | `-z` | `--null` | NUL-terminate `--name-only`/`--name-status`/`--numstat` records (and split the `--name-status` status and path into separate NUL fields); other modes are unaffected. |
@@ -52,7 +52,8 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | No external diff | | `--no-ext-diff` | Disable the external diff driver for this run, forcing the built-in engine. |
 | External diff | | `--ext-diff` | Allow the configured external diff driver (`diff.external`) to generate each file's patch (it is used by default when configured; this flag is the explicit opposite of `--no-ext-diff`). |
 | No moved-line color | | `--no-color-moved` | Do not color moved lines differently. Accepted no-op: Libra's diff never detects or colors moved lines. (Git's `--color-moved` is not supported.) |
-| No renames | | `--no-renames` | Turn off rename detection. Accepted no-op: Libra's diff never detects renames (a rename shows as delete + create). (Git's `--renames`/`-M` is not supported.) |
+| Find renames | `-M[<n>]` | `--find-renames[=<n>]` | Detect renames: a deleted + added pair whose content is similar enough is reported as one rename (`similarity index N%` / `rename from`/`rename to`, and `R<score>` / `old => new` in the name-status/numstat/summary surfaces). Bare `-M` uses a 50% threshold; `-M<n>` / `-M<n>%` / `--find-renames=<n>` set it (a bare integer is read like Git as `0.<digits>`, so `-M5` is 50% and `-M100%` is exact-only). The similarity index matches Git for typical content (a different chunk hash means contrived hash-collision inputs can differ); when several files are renamed at once the chosen old/new pairings can differ from Git's. Off by default (Libra does not auto-enable via `diff.renames`); a pathspec cannot directly follow a bare `-M`/`--find-renames` — place it before the flag or after `--`. |
+| No renames | | `--no-renames` | Turn off rename detection (the default; countermands an earlier `-M`/`--find-renames`). |
 | Relative | | `--relative[=<path>]` | Restrict the diff to a directory and show paths relative to it: with a value, `<path>` is resolved from the current directory; bare `--relative` uses the current directory. Files outside the directory are excluded and the prefix is stripped from displayed paths (also in `--stat` and JSON). With an external `diff.external` driver, the file-set restriction still applies but the prefix is NOT stripped from the driver's verbatim output. |
 | No relative | | `--no-relative` | Show full repo-root-relative paths. This is Libra's default; accepted for Git parity and takes precedence over `--relative`. |
 | No indent heuristic | | `--no-indent-heuristic` | Disable the indent heuristic for hunk boundaries. Accepted no-op: Libra's diff does not apply Git's indent heuristic. (Git's `--indent-heuristic` is not supported.) |
@@ -166,7 +167,7 @@ Supported output modes:
 - `--numstat`
 - `--stat`
 - `--shortstat` (just the trailing summary line of `--stat`, with zero-count clauses omitted)
-- `--summary` (condensed create/delete summary; renames show as delete + create, mode-only changes are not surfaced)
+- `--summary` (condensed create/delete/rename summary; renames appear with `-M`, mode-only changes are not surfaced)
 - `-s` / `--no-patch` suppresses the patch body (for status-only checks)
 - `--exit-code` still prints the diff but exits `1` when there are differences
 - `-z` / `--null` NUL-terminates `--name-only`/`--name-status`/`--numstat` records (status and path become separate NUL fields under `--name-status`)
@@ -209,7 +210,22 @@ Output is automatically paged when connected to a terminal.
 }
 ```
 
-The `status` field is one of: `added`, `deleted`, `modified`.
+The `status` field is one of: `added`, `deleted`, `modified`, or `renamed`. A
+`renamed` entry (only produced under `-M`/`--find-renames`) additionally carries
+`rename_from` (the original path; `path` holds the new name) and `similarity`
+(the similarity index as a whole percent), e.g.:
+
+```json
+{
+  "path": "src/new.txt",
+  "status": "renamed",
+  "rename_from": "src/old.txt",
+  "similarity": 90,
+  "insertions": 1,
+  "deletions": 1,
+  "hunks": [ /* ... */ ]
+}
+```
 
 The `old_ref` and `new_ref` fields indicate what was compared (e.g., `"index"`, `"working tree"`, `"HEAD"`, or a commit reference).
 
@@ -271,7 +287,7 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | External diff tool | `diff.external` + `--ext-diff` / `--no-ext-diff` | `diff.external` + `--ext-diff` / `--no-ext-diff` (GIT_EXTERNAL_DIFF protocol; patch output only) | `--tool <name>` |
 | Quiet (exit code only) | `--quiet` | `--quiet` | N/A |
 | JSON output | `--json` | Not supported | N/A |
-| Rename detection | Not supported | `-M` / `--find-renames` | Automatic |
+| Rename detection | `-M[<n>]` / `--find-renames[=<n>]` (similarity matches Git for typical content; opt-in, not auto-enabled via `diff.renames`) | `-M` / `--find-renames` | Automatic |
 | Copy detection | Not supported | `-C` / `--find-copies` | N/A |
 | Three-dot diff | Not supported | `<A>...<B>` (merge base) | N/A |
 

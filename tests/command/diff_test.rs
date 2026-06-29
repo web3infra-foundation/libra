@@ -2186,3 +2186,233 @@ fn test_diff_external_driver_gating_and_failure() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `-M`/`--find-renames` folds a staged delete+add pair into a single rename
+/// entry: an inexact rename carries `similarity index N%` + the content diff,
+/// and the name-status / numstat / summary surfaces render `R<score>` and the
+/// `old => new` path (with Git's directory brace-compaction).
+#[test]
+fn test_diff_rename_detection_surfaces() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::create_dir_all(p.join("src")).unwrap();
+    fs::write(p.join("src/old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "src/old.txt"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    // Rename + a one-line edit, both staged.
+    fs::remove_file(p.join("src/old.txt")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "src/old.txt"], p),
+        "stage deletion",
+    );
+    fs::write(p.join("src/new.txt"), "a\nb\nZ\nd\ne\nf\ng\nh\ni\nj\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "src/new.txt"], p), "add new");
+
+    // Patch: rename headers + similarity + the content hunk.
+    let patch = run_libra_command(&["diff", "-M", "--cached"], p);
+    assert_cli_success(&patch, "diff -M");
+    let ps = String::from_utf8_lossy(&patch.stdout);
+    assert!(
+        ps.contains("diff --git a/src/old.txt b/src/new.txt")
+            && ps.contains("similarity index 90%")
+            && ps.contains("rename from src/old.txt")
+            && ps.contains("rename to src/new.txt")
+            && ps.contains("-c\n+Z"),
+        "rename patch with content diff: {ps}"
+    );
+
+    // name-status: R<score> old new (no brace compaction).
+    let ns = run_libra_command(&["diff", "-M", "--cached", "--name-status"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&ns.stdout).trim_end(),
+        "R090\tsrc/old.txt\tsrc/new.txt",
+    );
+
+    // numstat + summary use Git's directory brace-compaction.
+    let num = run_libra_command(&["diff", "-M", "--cached", "--numstat"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&num.stdout).trim_end(),
+        "1\t1\tsrc/{old.txt => new.txt}",
+    );
+    let summary = run_libra_command(&["diff", "-M", "--cached", "--summary"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&summary.stdout).trim_end(),
+        " rename src/{old.txt => new.txt} (90%)",
+    );
+
+    // JSON serializes a rename as status=renamed + rename_from + similarity.
+    let json = run_libra_command(&["--json", "diff", "-M", "--cached"], p);
+    let js = String::from_utf8_lossy(&json.stdout);
+    assert!(
+        js.contains("\"status\": \"renamed\"")
+            && js.contains("\"rename_from\": \"src/old.txt\"")
+            && js.contains("\"path\": \"src/new.txt\"")
+            && js.contains("\"similarity\": 90"),
+        "JSON exposes the rename metadata: {js}"
+    );
+}
+
+/// `-M100` only matches identical content (an edited file is not a rename), and
+/// `--no-renames` countermands `-M`, restoring the separate add + delete.
+#[test]
+fn test_diff_rename_threshold_and_no_renames() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::remove_file(p.join("old.txt")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "stage deletion");
+    fs::write(p.join("new.txt"), "a\nb\nZ\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "new.txt"], p), "add new");
+
+    // `-M100%` is exact-only: 87% < 100% → not a rename. (Note `-M100` without
+    // the `%` is 10%, matching Git's `0.<digits>` reading.)
+    let strict = run_libra_command(&["diff", "-M100%", "--cached"], p);
+    let ss = String::from_utf8_lossy(&strict.stdout);
+    assert!(
+        ss.contains("deleted file mode") && ss.contains("new file mode") && !ss.contains("rename"),
+        "-M100% leaves an edited file as add + delete: {ss}"
+    );
+
+    // `-M100` (no `%`) is a 10% threshold → the 87% edit IS a rename.
+    let lenient = run_libra_command(&["diff", "-M100", "--cached"], p);
+    assert!(
+        String::from_utf8_lossy(&lenient.stdout).contains("rename from old.txt"),
+        "-M100 is 10%, so an 87% edit is a rename"
+    );
+
+    // Invalid score is a usage error, not a silent default.
+    let bad = run_libra_command(&["diff", "-Mnope", "--cached"], p);
+    assert!(
+        !bad.status.success()
+            && String::from_utf8_lossy(&bad.stderr).contains("invalid argument to find-renames"),
+        "an invalid -M argument is rejected"
+    );
+
+    // `-M0` maps to the 50% default (like Git), so the 87% edit is a rename.
+    let zero = run_libra_command(&["diff", "-M0", "--cached"], p);
+    assert!(
+        String::from_utf8_lossy(&zero.stdout).contains("rename from old.txt"),
+        "-M0 uses the 50% default, not a 0% match-everything threshold"
+    );
+
+    // `--no-renames` after `-M` turns detection back off.
+    let off = run_libra_command(&["diff", "-M", "--no-renames", "--cached"], p);
+    assert!(
+        !String::from_utf8_lossy(&off.stdout).contains("rename"),
+        "--no-renames countermands -M"
+    );
+}
+
+/// `-M --relative=<dir>` strips the directory prefix from BOTH sides of a rename
+/// — the `a/`/`rename from`/`--- ` old-side headers and the `rename_from` field,
+/// not just the new path — so no header keeps the stripped prefix.
+#[test]
+fn test_diff_rename_relative_strips_both_sides() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::create_dir_all(p.join("sub")).unwrap();
+    fs::write(p.join("sub/old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "sub/old.txt"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::remove_file(p.join("sub/old.txt")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "sub/old.txt"], p),
+        "stage deletion",
+    );
+    fs::write(p.join("sub/new.txt"), "a\nb\nZ\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "sub/new.txt"], p), "add new");
+
+    let patch = run_libra_command(&["diff", "-M", "--relative=sub", "--cached"], p);
+    let ps = String::from_utf8_lossy(&patch.stdout);
+    assert!(
+        ps.contains("diff --git a/old.txt b/new.txt")
+            && ps.contains("rename from old.txt")
+            && ps.contains("--- a/old.txt")
+            && !ps.contains("sub/"),
+        "both rename sides are stripped in the patch headers: {ps}"
+    );
+    let ns = run_libra_command(
+        &["diff", "-M", "--relative=sub", "--cached", "--name-status"],
+        p,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ns.stdout).trim_end(),
+        "R087\told.txt\tnew.txt",
+    );
+}
+
+/// A rename that straddles the `--relative` boundary is NOT folded: the prefix
+/// restriction is applied before rename pairing (like Git), so the in-prefix side
+/// shows as a plain add or delete.
+#[test]
+fn test_diff_rename_relative_boundary_is_not_a_rename() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::create_dir_all(p.join("sub")).unwrap();
+    // old.txt (outside sub) renamed to sub/new.txt (inside sub).
+    fs::write(p.join("old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::remove_file(p.join("old.txt")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "stage deletion");
+    fs::write(p.join("sub/new.txt"), "a\nb\nZ\nd\ne\nf\ng\nh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "sub/new.txt"], p), "add new");
+
+    // Under --relative=sub only the in-prefix new side survives, as a plain add.
+    let ns = run_libra_command(
+        &["diff", "-M", "--relative=sub", "--cached", "--name-status"],
+        p,
+    );
+    assert_eq!(String::from_utf8_lossy(&ns.stdout).trim_end(), "A\tnew.txt");
+}
+
+/// A reordered-but-same-content rename scores 100% (the chunk multiset is equal),
+/// yet the blobs differ: `-M` reports it as a rename WITH a content body (like
+/// Git), while `-M100%` is exact-only and leaves it as add + delete.
+#[test]
+fn test_diff_rename_full_similarity_non_identical() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("old.txt"), "a\nb\nc\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "add old");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::remove_file(p.join("old.txt")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "old.txt"], p), "stage deletion");
+    fs::write(p.join("new.txt"), "c\nb\na\n").unwrap(); // reordered: same multiset
+    assert_cli_success(&run_libra_command(&["add", "new.txt"], p), "add new");
+
+    // `-M`: a 100%-similar but non-identical rename still shows its body.
+    let m = run_libra_command(&["diff", "-M", "--cached"], p);
+    let ms = String::from_utf8_lossy(&m.stdout);
+    assert!(
+        ms.contains("similarity index 100%")
+            && ms.contains("rename from old.txt")
+            && ms.contains("\n@@ "),
+        "a reordered 100% rename still carries a content body: {ms}"
+    );
+
+    // `-M100%` is exact-only: reordered content is not byte-identical → add+delete.
+    let exact = run_libra_command(&["diff", "-M100%", "--cached"], p);
+    let es = String::from_utf8_lossy(&exact.stdout);
+    assert!(
+        !es.contains("rename") && es.contains("new file mode") && es.contains("deleted file mode"),
+        "-M100% does not fold a non-identical pair: {es}"
+    );
+}

@@ -209,10 +209,30 @@ pub struct DiffArgs {
     #[clap(long = "no-color-moved")]
     pub no_color_moved: bool,
 
-    /// Turn off rename detection. Accepted for Git parity and is a no-op:
-    /// Libra's diff never detects renames (a rename shows as delete + create),
-    /// so this already matches the default. (Git's `--renames` is not exposed.)
-    #[clap(long = "no-renames")]
+    /// Detect renames: a deleted + added pair whose content is similar enough is
+    /// reported as a single rename (`similarity index N%` / `rename from`/`to`).
+    /// `-M`/`--find-renames` alone uses a 50% threshold; `-M<n>` / `-M<n>%` /
+    /// `--find-renames=<n>` set it (e.g. `-M90%`, `-M100%` for exact-only).
+    /// `--no-renames` countermands it.
+    // Optional value: bare `-M`/`--find-renames` is 50%; a glued/`=`-attached
+    // value sets the threshold. We deliberately do NOT set `require_equals`,
+    // because that would reject Git's standard glued short form `-M90`. The
+    // trade-off is that a pathspec must not directly follow a bare `-M` /
+    // `--find-renames` (it would be read as the score); place pathspecs before
+    // the flag, after `--`, or use a glued threshold (`-M50 <pathspec>`).
+    #[clap(
+        short = 'M',
+        long = "find-renames",
+        value_name = "n",
+        num_args = 0..=1,
+        default_missing_value = "50",
+        overrides_with = "no_renames"
+    )]
+    pub find_renames: Option<String>,
+
+    /// Turn off rename detection (the default, and countermands an earlier
+    /// `-M`/`--find-renames`).
+    #[clap(long = "no-renames", overrides_with = "find_renames")]
     pub no_renames: bool,
 
     /// Show paths relative to the repository root, not the current directory.
@@ -271,6 +291,13 @@ pub struct DiffFileStat {
     pub hunks: Vec<DiffHunk>,
     #[serde(skip_serializing)]
     raw_diff: String,
+    /// For a detected rename (`-M`), the original path; `path` holds the new
+    /// name. `None` for non-rename entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_from: Option<String>,
+    /// For a detected rename, the similarity index as a whole percent (0-100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -318,6 +345,9 @@ pub(crate) enum DiffError {
         "diff --algorithm={0} is not supported yet; only --algorithm=histogram is currently implemented"
     )]
     UnsupportedAlgorithm(String),
+
+    #[error("invalid argument to find-renames: '{0}'")]
+    InvalidRenameScore(String),
 }
 
 impl From<DiffError> for CliError {
@@ -347,6 +377,11 @@ impl From<DiffError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint(
                     "omit --algorithm or use --algorithm=histogram until alternate diff backends are available",
+                ),
+            DiffError::InvalidRenameScore(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "use -M, -M<n> (e.g. -M90%), or --find-renames=<n>; a pathspec after a bare -M must follow '--'",
                 ),
         }
     }
@@ -416,6 +451,16 @@ fn apply_relative_filter(args: &DiffArgs, result: &mut DiffOutput) {
 
     result.files.retain(|file| file.path.starts_with(&strip));
     for file in &mut result.files {
+        // A rename carries the old path on its `a/` side (`diff --git a/<old>`,
+        // `--- a/<old>`, `rename from <old>`) and in the `rename_from` field used
+        // by name-status/numstat/stat/summary. Strip that prefix first (a separate
+        // pass keyed on the old path), then the new-path pass handles the `b/` side.
+        if let Some(from) = file.rename_from.clone()
+            && let Some(rest) = from.strip_prefix(&strip)
+        {
+            file.raw_diff = strip_relative_prefix_in_diff(&file.raw_diff, &strip, &from, rest);
+            file.rename_from = Some(rest.to_string());
+        }
         let full = file.path.clone();
         let stripped = full[strip.len()..].to_string();
         file.raw_diff = strip_relative_prefix_in_diff(&file.raw_diff, &strip, &full, &stripped);
@@ -998,6 +1043,41 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         None
     };
     let rediffs = ws_normalize.is_some() || args.ignore_blank_lines;
+
+    // `--relative` restricts WHICH files are diffed; apply that restriction now —
+    // before rename detection — so a rename pair is only formed when BOTH sides
+    // lie inside the prefix, matching Git (which filters before diffcore-rename).
+    // A pair straddling the boundary therefore stays an add or a delete. The
+    // path-rewriting half runs later (`apply_relative_filter`, or skipped for
+    // verbatim external output).
+    if let Some(strip) = relative_prefix(args) {
+        files.retain(|file| file.path.starts_with(&strip));
+    }
+
+    // `-M`/`--find-renames`: fold matched delete+add pairs into single rename
+    // entries. Done here (after the whitespace/context selection, before the
+    // post-passes) so the rename's own content diff honors `-U<n>`/`-w`/blank
+    // rules and the post-passes then leave rename entries alone.
+    if let Some(threshold) = resolve_rename_threshold(args)? {
+        // `--check` scans added lines for whitespace errors and ignores the
+        // whitespace-ignore flags, so the rename body must stay unfiltered.
+        let (rn_ws, rn_blank) = if args.check {
+            (None, false)
+        } else {
+            (ws_normalize, args.ignore_blank_lines)
+        };
+        apply_rename_detection(
+            &mut files,
+            &first_map,
+            &second_map,
+            &ext_worktree_entries,
+            threshold,
+            regen_context,
+            rn_ws,
+            rn_blank,
+        );
+    }
+
     // `--check` (whitespace-error scan) ignores the whitespace-ignore flags and
     // operates on git_internal's original diff — matching Git, where
     // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
@@ -1023,6 +1103,11 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         };
         if rediffs {
             files.retain_mut(|file| {
+                // Rename entries already carry their own rendered content diff;
+                // leave them untouched by the whitespace/context re-diff.
+                if file.status == "renamed" {
+                    return true;
+                }
                 // Binary / no-hunk diffs have no body to re-diff: keep as-is.
                 if !file.raw_diff.contains("\n@@ ") {
                     return true;
@@ -1076,6 +1161,12 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
             });
         } else {
             for file in files.iter_mut() {
+                // Rename entries already rendered their content diff at the
+                // requested context in `build_rename_entry`; do not re-diff them
+                // (their old side is at `rename_from`, not `file.path`).
+                if file.status == "renamed" {
+                    continue;
+                }
                 let path = PathBuf::from(&file.path);
                 let old_text = blob_text(&first_map, &path);
                 let new_text = blob_text(&second_map, &path);
@@ -1094,12 +1185,9 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
     // by the internal post-passes (skipped above) or the later word-diff pass
     // (skipped in `execute_safe` via `external_diff_applied`).
     let external_diff_applied = if let Some(command) = &external_command {
-        // `--relative` still restricts WHICH files are diffed (the path-rewriting
-        // half is skipped for verbatim driver output); apply it before invoking
-        // the driver so it never runs for, or reports, files outside the prefix.
-        if let Some(strip) = relative_prefix(args) {
-            files.retain(|file| file.path.starts_with(&strip));
-        }
+        // The `--relative` file-set restriction was already applied above (before
+        // rename detection); the path-rewriting half stays skipped for verbatim
+        // driver output, so the driver only sees files inside the prefix.
         apply_external_diff(
             &mut files,
             command,
@@ -1500,6 +1588,349 @@ fn worktree_file_mode(path: &Path) -> String {
     }
 }
 
+/// Resolve `-M`/`--find-renames[=<n>]` to a similarity score threshold on Git's
+/// 0..60000 scale, or `None` when rename detection is off (or `--no-renames`).
+fn resolve_rename_threshold(args: &DiffArgs) -> Result<Option<u32>, DiffError> {
+    if args.no_renames {
+        return Ok(None);
+    }
+    let Some(raw) = args.find_renames.as_ref() else {
+        return Ok(None);
+    };
+    let score = parse_rename_score(raw)?;
+    // Git's `diffcore_rename` treats a zero minimum score (`-M0`, `-M0%`, empty
+    // value, or a value that truncates to 0) as the 50% default before pairing,
+    // so it never folds unrelated pairs into `R000` renames.
+    Ok(Some(if score == 0 { 30000 } else { score }))
+}
+
+/// Parse a `-M`/`--find-renames` argument into a similarity threshold on Git's
+/// 0..60000 scale, matching Git's `parse_rename_score`: `<n>%` is a literal
+/// percent; `<n>` carrying a decimal point is a literal fraction (`0.9` = 90%);
+/// a bare integer is read as the fractional digits after an implied `0.` (so
+/// `-M5` = 50%, `-M90` = 90%, `-M100` = 10%). Invalid input is a usage error.
+fn parse_rename_score(raw: &str) -> Result<u32, DiffError> {
+    let invalid = || DiffError::InvalidRenameScore(raw.to_string());
+    // Parse a decimal string into (num, denom) so value == num/denom, using
+    // integer arithmetic (no float rounding — matches Git's integer scaling and
+    // its truncation at boundaries). At most one '.', digits only.
+    let parse_decimal = |s: &str| -> Option<(u128, u128)> {
+        let mut num: u128 = 0;
+        let mut denom: u128 = 1;
+        let mut seen_dot = false;
+        let mut any_digit = false;
+        // Cap BOTH num and denom: a huge integer part grows `num` (denom stays 1),
+        // while a long all-zero fractional part grows `denom` (num stays 0). Once
+        // either hits the cap, further digits are dropped — Git likewise stops
+        // scaling past a cap, and the threshold needs nothing finer. This keeps
+        // `num * 10` well within u128 so no malformed argument can overflow.
+        const CAP: u128 = 1_000_000_000_000;
+        for b in s.bytes() {
+            match b {
+                b'.' if !seen_dot => seen_dot = true,
+                b'0'..=b'9' => {
+                    any_digit = true;
+                    if num < CAP && denom < CAP {
+                        num = num * 10 + (b - b'0') as u128;
+                        if seen_dot {
+                            denom *= 10;
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        any_digit.then_some((num, denom))
+    };
+    // `<n>%` is a literal percent (divide the fraction by 100); `<n>` carrying a
+    // decimal point is a literal fraction; a bare integer is read after an
+    // implied `0.` (so `-M5` = 0.5 = 50%, `-M100` = 0.100 = 10%).
+    let (num, denom) = if let Some(body) = raw.strip_suffix('%') {
+        let (n, d) = parse_decimal(body).ok_or_else(invalid)?;
+        (n, d * 100)
+    } else if raw.contains('.') {
+        parse_decimal(raw).ok_or_else(invalid)?
+    } else {
+        parse_decimal(&format!("0.{raw}")).ok_or_else(invalid)?
+    };
+    const MAX: u128 = 60000;
+    // Git: a fraction >= 1 clamps to MAX_SCORE; otherwise floor(MAX * num/denom).
+    let score = if num >= denom { MAX } else { MAX * num / denom };
+    Ok(score as u32)
+}
+
+/// Chunk `data` the way Git's rename spanhash does — a chunk ends at a newline or
+/// after 64 bytes; a `\r` in a `\r\n` is ignored for text — and accumulate the
+/// byte count per chunk-hash. We hash each chunk with FNV-1a rather than Git's
+/// weaker `HASHBASE` rolling hash: for real content the similarity is identical
+/// (equal chunks always match; FNV collisions are astronomically rare), but a
+/// contrived input engineered to collide under Git's hash can score differently.
+fn spanhash_counts(data: &[u8]) -> HashMap<u64, u64> {
+    let is_text = !data.contains(&0);
+    let mut counts: HashMap<u64, u64> = HashMap::new();
+    let mut chunk: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        let c = data[i];
+        if is_text && c == b'\r' && i + 1 < data.len() && data[i + 1] == b'\n' {
+            i += 1;
+            continue;
+        }
+        chunk.push(c);
+        i += 1;
+        if chunk.len() >= 64 || c == b'\n' {
+            *counts.entry(fnv1a(&chunk)).or_default() += chunk.len() as u64;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        *counts.entry(fnv1a(&chunk)).or_default() += chunk.len() as u64;
+    }
+    counts
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Git's similarity score (0..60000): common chunk bytes * 60000 / max file size.
+/// Two empty files are identical (full score). The displayed percent is
+/// `score / 600`.
+fn similarity_score(old: &[u8], new: &[u8]) -> u32 {
+    let max_size = old.len().max(new.len()) as u64;
+    if max_size == 0 {
+        return 60000;
+    }
+    let old_counts = spanhash_counts(old);
+    let new_counts = spanhash_counts(new);
+    let mut common: u64 = 0;
+    for (hash, &old_bytes) in &old_counts {
+        if let Some(&new_bytes) = new_counts.get(hash) {
+            common += old_bytes.min(new_bytes);
+        }
+    }
+    ((common * 60000) / max_size) as u32
+}
+
+/// Detect renames among the deleted + added files and fold each matched pair into
+/// a single rename entry (`-M`). Exact (same blob id) pairs are matched first,
+/// then the best inexact pairs whose similarity meets the threshold. Each side is
+/// used at most once.
+#[allow(clippy::too_many_arguments)]
+fn apply_rename_detection(
+    files: &mut Vec<DiffFileStat>,
+    first_map: &HashMap<PathBuf, ObjectHash>,
+    second_map: &HashMap<PathBuf, ObjectHash>,
+    worktree_entries: &HashMap<PathBuf, ObjectHash>,
+    threshold: u32,
+    context: usize,
+    ws_normalize: Option<fn(&str) -> String>,
+    ignore_blank: bool,
+) {
+    let load = |path: &str, map: &HashMap<PathBuf, ObjectHash>| -> Option<Vec<u8>> {
+        let pb = PathBuf::from(path);
+        let hash = map.get(&pb)?;
+        if worktree_entries.get(&pb) == Some(hash) {
+            read_worktree_blob_content(&pb).ok()
+        } else {
+            load_repo_blob_content(hash).ok()
+        }
+    };
+
+    // Indices of the deleted (old-only) and added (new-only) entries.
+    let deleted: Vec<usize> = (0..files.len())
+        .filter(|&i| files[i].status == "deleted")
+        .collect();
+    let added: Vec<usize> = (0..files.len())
+        .filter(|&i| files[i].status == "added")
+        .collect();
+    if deleted.is_empty() || added.is_empty() {
+        return;
+    }
+
+    let mut used_del = vec![false; files.len()];
+    let mut used_add = vec![false; files.len()];
+    // (old_idx, new_idx, score) for the chosen pairs.
+    let mut pairs: Vec<(usize, usize, u32)> = Vec::new();
+
+    // Pass 1: exact renames (identical blob id).
+    for &di in &deleted {
+        let Some(dh) = first_map.get(&PathBuf::from(&files[di].path)) else {
+            continue;
+        };
+        for &ai in &added {
+            if used_add[ai] {
+                continue;
+            }
+            if second_map.get(&PathBuf::from(&files[ai].path)) == Some(dh) {
+                pairs.push((di, ai, 60000));
+                used_del[di] = true;
+                used_add[ai] = true;
+                break;
+            }
+        }
+    }
+
+    // Pass 2: inexact renames — score every remaining pair, then assign greedily
+    // by descending score (each side once), keeping only pairs >= threshold.
+    // Like Git, a matching basename breaks ties so an ambiguous equal-score set
+    // prefers same-name pairings. `-M100%` (threshold == MAX_SCORE) is exact-only:
+    // Git skips inexact detection entirely, so a 100%-similar but non-identical
+    // pair (e.g. reordered lines) must NOT be folded.
+    const MAX_SCORE: u32 = 60000;
+    let basename = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    if threshold < MAX_SCORE {
+        // (score, same_basename, di, ai)
+        let mut candidates: Vec<(u32, bool, usize, usize)> = Vec::new();
+        for &di in &deleted {
+            if used_del[di] {
+                continue;
+            }
+            let Some(old) = load(&files[di].path, first_map) else {
+                continue;
+            };
+            for &ai in &added {
+                if used_add[ai] {
+                    continue;
+                }
+                let Some(new) = load(&files[ai].path, second_map) else {
+                    continue;
+                };
+                let score = similarity_score(&old, &new);
+                if score >= threshold {
+                    let same_base = basename(&files[di].path) == basename(&files[ai].path);
+                    candidates.push((score, same_base, di, ai));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(b.1.cmp(&a.1))
+                .then(a.2.cmp(&b.2))
+                .then(a.3.cmp(&b.3))
+        });
+        for (score, _, di, ai) in candidates {
+            if !used_del[di] && !used_add[ai] {
+                used_del[di] = true;
+                used_add[ai] = true;
+                pairs.push((di, ai, score));
+            }
+        }
+    }
+
+    if pairs.is_empty() {
+        return;
+    }
+
+    // Build the rename entries, then drop the consumed del/add entries.
+    let mut renames: Vec<(usize, DiffFileStat)> = Vec::new();
+    for (di, ai, score) in &pairs {
+        let old_path = files[*di].path.clone();
+        let new_path = files[*ai].path.clone();
+        let percent = score / 600;
+        let entry = build_rename_entry(
+            &old_path,
+            &new_path,
+            percent,
+            first_map.get(&PathBuf::from(&old_path)),
+            second_map.get(&PathBuf::from(&new_path)),
+            &load(&old_path, first_map).unwrap_or_default(),
+            &load(&new_path, second_map).unwrap_or_default(),
+            context,
+            ws_normalize,
+            ignore_blank,
+        );
+        // Insert at the added entry's position so output order stays stable.
+        renames.push((*ai, entry));
+    }
+    let drop: std::collections::HashSet<usize> =
+        pairs.iter().flat_map(|(d, a, _)| [*d, *a]).collect();
+    let mut rebuilt: Vec<DiffFileStat> = Vec::with_capacity(files.len());
+    for (idx, file) in files.drain(..).enumerate() {
+        if let Some(pos) = renames.iter().position(|(ai, _)| *ai == idx) {
+            rebuilt.push(renames.remove(pos).1);
+        } else if !drop.contains(&idx) {
+            rebuilt.push(file);
+        }
+    }
+    *files = rebuilt;
+}
+
+/// Render one rename entry (patch + metadata). A byte-identical rename emits only
+/// the rename headers; any rename whose blobs differ — even at 100% similarity
+/// (e.g. reordered lines) — also carries the content diff (`index`/`---`/`+++`/
+/// hunks) between the old and new blobs.
+#[allow(clippy::too_many_arguments)]
+fn build_rename_entry(
+    old_path: &str,
+    new_path: &str,
+    percent: u32,
+    old_hash: Option<&ObjectHash>,
+    new_hash: Option<&ObjectHash>,
+    old_content: &[u8],
+    new_content: &[u8],
+    context: usize,
+    ws_normalize: Option<fn(&str) -> String>,
+    ignore_blank: bool,
+) -> DiffFileStat {
+    let mut raw = format!(
+        "diff --git a/{old_path} b/{new_path}\nsimilarity index {percent}%\nrename from {old_path}\nrename to {new_path}\n"
+    );
+    let (mut insertions, mut deletions) = (0usize, 0usize);
+    // Emit the content diff whenever the blobs actually differ — even at 100%
+    // similarity (e.g. reordered lines), matching Git, which shows the body for a
+    // non-identical rename. Only a byte-identical rename has no body.
+    if old_content != new_content {
+        let old_text = String::from_utf8_lossy(old_content);
+        let new_text = String::from_utf8_lossy(new_content);
+        // Honor the active whitespace / blank-line / context rules so a rename's
+        // content diff matches `libra diff` for the same flags.
+        let hunks = if ignore_blank {
+            match ws_normalize {
+                Some(normalize) => compute_unified_hunks_ignore_blank_normalized(
+                    &old_text, &new_text, context, normalize,
+                ),
+                None => compute_unified_hunks_ignore_blank(&old_text, &new_text, context),
+            }
+        } else if let Some(normalize) = ws_normalize {
+            compute_unified_hunks_normalized(&old_text, &new_text, context, normalize)
+        } else {
+            compute_unified_hunks(&old_text, &new_text, context)
+        };
+        // A rename that differs only in ignored whitespace/blank lines has an
+        // empty body: emit just the rename headers (no `index`/`---`/`+++`).
+        if !hunks.trim().is_empty() {
+            let old_abbrev = old_hash
+                .map(|h| h.to_string()[..7].to_string())
+                .unwrap_or_else(|| "0000000".to_string());
+            let new_abbrev = new_hash
+                .map(|h| h.to_string()[..7].to_string())
+                .unwrap_or_else(|| "0000000".to_string());
+            raw.push_str(&format!("index {old_abbrev}..{new_abbrev} 100644\n"));
+            raw.push_str(&format!("--- a/{old_path}\n+++ b/{new_path}\n"));
+            raw.push_str(&hunks);
+            let (ins, del) = count_body_changes(&hunks);
+            insertions = ins;
+            deletions = del;
+        }
+    }
+    DiffFileStat {
+        path: new_path.to_string(),
+        status: "renamed".to_string(),
+        insertions,
+        deletions,
+        hunks: parse_diff_hunks(&raw),
+        raw_diff: raw,
+        rename_from: Some(old_path.to_string()),
+        similarity: Some(percent),
+    }
+}
+
 /// Replace each file's patch body with the output of the configured external
 /// diff driver (`diff.external`), following Git's `GIT_EXTERNAL_DIFF` protocol:
 /// the command is invoked as `cmd path old-file old-hex old-mode new-file
@@ -1577,12 +2008,19 @@ fn apply_external_diff(
     let total = files.len();
     for (index, file) in files.iter_mut().enumerate() {
         let path = PathBuf::from(&file.path);
+        // For a detected rename the old side lives at `rename_from`, not at the
+        // new path, so the driver sees the renamed source rather than `/dev/null`.
+        let old_path = file
+            .rename_from
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.clone());
         let (old_mode, new_mode) = external_diff_modes(&file.raw_diff);
 
         let (old_file, old_hex, old_mode_arg, _old_tmp) = materialize(
-            first_map.get(&path),
-            side_is_worktree(&path, first_map.get(&path)),
-            &path,
+            first_map.get(&old_path),
+            side_is_worktree(&old_path, first_map.get(&old_path)),
+            &old_path,
             &old_mode,
         )?;
         let (new_file, new_hex, new_mode_arg, _new_tmp) = materialize(
@@ -1744,21 +2182,49 @@ fn render_diff_output(
         let field_sep = if args.null { '\0' } else { '\t' };
         join_diff_records(
             result.files.iter().map(|file| {
-                format!(
-                    "{}{}{}",
-                    diff_status_letter(&file.status),
-                    field_sep,
-                    file.path
-                )
+                if file.status == "renamed" {
+                    // `R<score>` then old + new paths (Git pads the score to 3 digits).
+                    format!(
+                        "R{:03}{sep}{}{sep}{}",
+                        file.similarity.unwrap_or(0),
+                        file.rename_from.as_deref().unwrap_or(""),
+                        file.path,
+                        sep = field_sep,
+                    )
+                } else {
+                    format!(
+                        "{}{}{}",
+                        diff_status_letter(&file.status),
+                        field_sep,
+                        file.path
+                    )
+                }
             }),
             args.null,
         )
     } else if args.numstat {
         join_diff_records(
-            result
-                .files
-                .iter()
-                .map(|file| format!("{}\t{}\t{}", file.insertions, file.deletions, file.path)),
+            result.files.iter().map(|file| {
+                if file.status == "renamed" {
+                    let from = file.rename_from.as_deref().unwrap_or("");
+                    if args.null {
+                        // `<ins>\t<del>\t\0<old>\0<new>` (empty path column, then NUL-separated).
+                        format!(
+                            "{}\t{}\t\0{}\0{}",
+                            file.insertions, file.deletions, from, file.path
+                        )
+                    } else {
+                        format!(
+                            "{}\t{}\t{}",
+                            file.insertions,
+                            file.deletions,
+                            rename_display(from, &file.path)
+                        )
+                    }
+                } else {
+                    format!("{}\t{}\t{}", file.insertions, file.deletions, file.path)
+                }
+            }),
             args.null,
         )
     } else if args.stat {
@@ -1854,11 +2320,9 @@ fn diff_exit_result(args: &DiffArgs, result: &DiffOutput) -> CliResult<()> {
     }
 }
 
-/// Render `--summary`: one line per created or deleted file (plain content
-/// modifications produce no line), matching `git diff --summary`. Libra's diff
-/// pipeline emits only `new file mode` / `deleted file mode` headers — it does
-/// not perform rename detection (a rename shows as delete + create) nor surface
-/// mode-only changes — so only those two summary kinds are produced.
+/// Render `--summary`: one line per created file, deleted file, or detected
+/// rename (`-M`); plain content modifications produce no line, matching
+/// `git diff --summary`. Mode-only changes are not surfaced.
 fn format_diff_summary(result: &DiffOutput) -> String {
     result
         .files
@@ -1869,6 +2333,13 @@ fn format_diff_summary(result: &DiffOutput) -> String {
 }
 
 fn summary_line(file: &DiffFileStat) -> Option<String> {
+    if file.status == "renamed" {
+        return Some(format!(
+            " rename {} ({}%)",
+            rename_display(file.rename_from.as_deref().unwrap_or(""), &file.path),
+            file.similarity.unwrap_or(0),
+        ));
+    }
     let find = |prefix: &str| {
         file.raw_diff
             .lines()
@@ -1889,6 +2360,43 @@ fn diff_status_letter(status: &str) -> &'static str {
         "added" => "A",
         "deleted" => "D",
         _ => "M",
+    }
+}
+
+/// Render a rename path pair the way Git's `pprint_rename` does for `--stat` /
+/// `--numstat` / `--summary`: factor out the common leading directory and the
+/// common trailing component (both cut at `/` boundaries) into
+/// `prefix{old => new}suffix`, or `old => new` when nothing is shared.
+fn rename_display(old: &str, new: &str) -> String {
+    let oa = old.as_bytes();
+    let nb = new.as_bytes();
+    let mut pfx = 0;
+    let mut i = 0;
+    while i < oa.len() && i < nb.len() && oa[i] == nb[i] {
+        if oa[i] == b'/' {
+            pfx = i + 1;
+        }
+        i += 1;
+    }
+    let mut sfx = 0;
+    let (mut oi, mut ni) = (oa.len(), nb.len());
+    while oi > pfx && ni > pfx && oa[oi - 1] == nb[ni - 1] {
+        oi -= 1;
+        ni -= 1;
+        if oa[oi] == b'/' {
+            sfx = oa.len() - oi;
+        }
+    }
+    if pfx == 0 && sfx == 0 {
+        format!("{old} => {new}")
+    } else {
+        format!(
+            "{}{{{} => {}}}{}",
+            &old[..pfx],
+            &old[pfx..oa.len() - sfx],
+            &new[pfx..nb.len() - sfx],
+            &old[oa.len() - sfx..],
+        )
     }
 }
 
@@ -2566,6 +3074,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         text: false,
         no_ext_diff: false,
         no_color_moved: false,
+        find_renames: None,
         no_renames: false,
         no_relative: false,
         relative: None,
@@ -2633,7 +3142,18 @@ fn format_diff_stat_output(result: &DiffOutput) -> String {
                 "+".repeat(file.insertions.min(40)),
                 "-".repeat(file.deletions.min(40))
             );
-            format!(" {} | {} {}", file.path, total, bar)
+            let name = if file.status == "renamed" {
+                rename_display(file.rename_from.as_deref().unwrap_or(""), &file.path)
+            } else {
+                file.path.clone()
+            };
+            // Git omits the trailing space when the change graph is empty
+            // (e.g. a pure rename with 0 line changes shows `name | 0`).
+            if bar.is_empty() {
+                format!(" {} | {}", name, total)
+            } else {
+                format!(" {} | {} {}", name, total, bar)
+            }
         })
         .collect::<Vec<_>>();
     lines.push(format!(
@@ -2663,6 +3183,8 @@ fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
         deletions,
         hunks: parse_diff_hunks(&item.data),
         raw_diff: item.data.clone(),
+        rename_from: None,
+        similarity: None,
     }
 }
 
@@ -2801,6 +3323,40 @@ mod test {
 
     use super::*;
     use crate::utils::test;
+
+    #[test]
+    fn parse_rename_score_matches_git_semantics() {
+        // Bare integer = digits after an implied `0.` (Git's reading).
+        assert_eq!(parse_rename_score("5").unwrap(), 30000); // 0.5 = 50%
+        assert_eq!(parse_rename_score("50").unwrap(), 30000); // 0.50 = 50%
+        assert_eq!(parse_rename_score("90").unwrap(), 54000); // 0.90 = 90%
+        assert_eq!(parse_rename_score("87").unwrap(), 52200); // 0.87 = 87%
+        assert_eq!(parse_rename_score("100").unwrap(), 6000); // 0.100 = 10%
+        assert_eq!(parse_rename_score("9").unwrap(), 54000); // 0.9 = 90%
+        // Explicit percent.
+        assert_eq!(parse_rename_score("50%").unwrap(), 30000);
+        assert_eq!(parse_rename_score("100%").unwrap(), 60000); // exact-only
+        assert_eq!(parse_rename_score("5%").unwrap(), 3000);
+        // Explicit decimal fraction.
+        assert_eq!(parse_rename_score("0.9").unwrap(), 54000);
+        assert_eq!(parse_rename_score("0.5").unwrap(), 30000);
+        // Integer truncation (no float rounding), e.g. 33.333% -> 19999.
+        assert_eq!(parse_rename_score("33.333%").unwrap(), 19999);
+        // Zero parses to 0 here (the 50% fallback is applied in
+        // `resolve_rename_threshold`, matching Git's `diffcore_rename`).
+        assert_eq!(parse_rename_score("0").unwrap(), 0);
+        assert_eq!(parse_rename_score("0%").unwrap(), 0);
+        // An empty value parses to 0 (→ the 50% fallback in resolve, matching
+        // Git's empty `--find-renames=`).
+        assert_eq!(parse_rename_score("").unwrap(), 0);
+        // Malformed (non-numeric) values are a usage error, never a silent default.
+        assert!(parse_rename_score("abc").is_err());
+        assert!(parse_rename_score("9x").is_err());
+        // Pathological lengths must not overflow (cap on both num and denom).
+        let _ = parse_rename_score(&"9".repeat(64)).unwrap();
+        let _ = parse_rename_score(&format!("0.{}", "0".repeat(64))).unwrap();
+        let _ = parse_rename_score(&format!("{}%", "9".repeat(64))).unwrap();
+    }
 
     struct ColorOverrideReset;
 
