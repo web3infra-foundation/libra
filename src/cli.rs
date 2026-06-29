@@ -500,6 +500,11 @@ pub enum Stash {
             help = "Keep staged changes in the index and working tree"
         )]
         keep_index: bool,
+        #[arg(
+            value_name = "pathspec",
+            help = "Stash only the changes to the given paths, leaving the rest of the working tree intact"
+        )]
+        pathspec: Vec<String>,
     },
     #[command(about = "Remove a single stashed state from the stash list")]
     Pop {

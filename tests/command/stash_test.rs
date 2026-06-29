@@ -1226,3 +1226,348 @@ fn stash_no_include_untracked_countermands_u() {
         "untracked.txt not stashed (--no-include-untracked countermands -u)"
     );
 }
+
+/// `stash push <pathspec>` stashes ONLY the matched path: the path is reset to
+/// HEAD while every other change stays in the working tree, and `pop` restores
+/// the stashed change while preserving a further edit made to the untouched
+/// path (exercising the working-tree-as-ours apply).
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_stashes_only_matched() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    fs::write(p.join("b.txt"), "B0\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "a.txt", "b.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+    fs::write(p.join("b.txt"), "B1\n").unwrap();
+
+    let out = run_libra_command(&["stash", "push", "a.txt"], p);
+    assert!(
+        out.status.success(),
+        "stash push a.txt: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("a.txt")).unwrap(),
+        "A0\n",
+        "matched path reset to HEAD"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("b.txt")).unwrap(),
+        "B1\n",
+        "unmatched path keeps its change"
+    );
+
+    // Edit the unmatched path further before popping.
+    fs::write(p.join("b.txt"), "B2\n").unwrap();
+
+    let out = run_libra_command(&["stash", "pop"], p);
+    assert!(
+        out.status.success(),
+        "stash pop: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("a.txt")).unwrap(),
+        "A1\n",
+        "matched path restored on pop"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("b.txt")).unwrap(),
+        "B2\n",
+        "later edit to the unmatched path is preserved"
+    );
+}
+
+/// A directory pathspec selects every changed file beneath it; files outside the
+/// directory are left dirty.
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_directory() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::create_dir_all(p.join("sub")).unwrap();
+    fs::write(p.join("sub/x.txt"), "X0\n").unwrap();
+    fs::write(p.join("top.txt"), "T0\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "sub/x.txt", "top.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    fs::write(p.join("sub/x.txt"), "X1\n").unwrap();
+    fs::write(p.join("top.txt"), "T1\n").unwrap();
+
+    let out = run_libra_command(&["stash", "push", "sub"], p);
+    assert!(
+        out.status.success(),
+        "stash push sub: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("sub/x.txt")).unwrap(),
+        "X0\n",
+        "file under the directory pathspec is reset"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("top.txt")).unwrap(),
+        "T1\n",
+        "file outside the directory keeps its change"
+    );
+
+    assert!(run_libra_command(&["stash", "pop"], p).status.success());
+    assert_eq!(fs::read_to_string(p.join("sub/x.txt")).unwrap(), "X1\n");
+}
+
+/// A pathspec that matches no tracked path is a usage error (exit 128,
+/// `LBR-...` invalid-target), not an internal-invariant panic.
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_no_match_errors() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    assert!(run_libra_command(&["add", "a.txt"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+
+    let out = run_libra_command(&["stash", "push", "nonexistent.txt"], p);
+    assert_eq!(out.status.code(), Some(129), "no-match pathspec exits 129");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("did not match"),
+        "expected a pathspec-no-match message: {stderr}"
+    );
+    // The working tree is untouched after the rejected push.
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "A1\n");
+}
+
+/// Regression for the working-tree-as-ours apply: a FULL `stash push` followed
+/// by an unrelated edit then `pop` must preserve that unrelated edit rather than
+/// silently reverting it to HEAD.
+#[tokio::test]
+#[serial]
+async fn test_stash_pop_preserves_unrelated_uncommitted_change() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    fs::write(p.join("b.txt"), "B0\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "a.txt", "b.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    // Stash only a.txt's change (full stash, since b is unchanged here).
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+    assert!(run_libra_command(&["stash", "push"], p).status.success());
+
+    // Now make an unrelated change to b.txt, then pop.
+    fs::write(p.join("b.txt"), "B-new\n").unwrap();
+    assert!(run_libra_command(&["stash", "pop"], p).status.success());
+
+    assert_eq!(
+        fs::read_to_string(p.join("a.txt")).unwrap(),
+        "A1\n",
+        "stashed change restored"
+    );
+    assert_eq!(
+        fs::read_to_string(p.join("b.txt")).unwrap(),
+        "B-new\n",
+        "unrelated uncommitted change preserved across pop"
+    );
+}
+
+/// Regression for the deletion-resurrection bug: after stashing a change and
+/// then DELETING an unrelated tracked file, `pop` must keep the deletion rather
+/// than silently resurrecting the file from the stash snapshot.
+#[tokio::test]
+#[serial]
+async fn test_stash_pop_preserves_unrelated_deletion() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    fs::write(p.join("b.txt"), "B0\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "a.txt", "b.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    // Stash a change to a.txt (full stash; b is unchanged).
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+    assert!(run_libra_command(&["stash", "push"], p).status.success());
+
+    // Delete the unrelated file, then pop.
+    fs::remove_file(p.join("b.txt")).unwrap();
+    assert!(run_libra_command(&["stash", "pop"], p).status.success());
+
+    assert_eq!(
+        fs::read_to_string(p.join("a.txt")).unwrap(),
+        "A1\n",
+        "stashed change restored"
+    );
+    assert!(
+        !p.join("b.txt").exists(),
+        "the unrelated deletion must NOT be resurrected by pop"
+    );
+}
+
+/// A staged-only change (index differs from HEAD while the working tree matches
+/// HEAD) is still stashed by a pathspec push — the no-op check must consider the
+/// index overlay, not only the working tree.
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_stashes_staged_only_change() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    assert!(run_libra_command(&["add", "a.txt"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    // Stage A1, then restore the WORKING TREE to A0: index=A1, worktree=A0=HEAD.
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+    assert!(run_libra_command(&["add", "a.txt"], p).status.success());
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+
+    let out = run_libra_command(&["stash", "push", "a.txt"], p);
+    assert!(
+        out.status.success(),
+        "staged-only change should be stashed, not a no-op: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("No local changes"),
+        "must not report a no-op for a staged-only change"
+    );
+    // The path is reset to HEAD after the push...
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "A0\n");
+    // ...and `pop` restores the staged-only change to the working tree, rather
+    // than dropping it (Libra has no `--index`, so it is restored losslessly).
+    assert!(run_libra_command(&["stash", "pop"], p).status.success());
+    assert_eq!(
+        fs::read_to_string(p.join("a.txt")).unwrap(),
+        "A1\n",
+        "staged-only change is restored on pop, not lost"
+    );
+}
+
+/// `stash push -- .` (the root pathspec) selects every tracked change.
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_dot_matches_all() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    fs::write(p.join("b.txt"), "B0\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "a.txt", "b.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+    fs::write(p.join("b.txt"), "B1\n").unwrap();
+
+    let out = run_libra_command(&["stash", "push", "."], p);
+    assert!(
+        out.status.success(),
+        "stash push . : {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "A0\n");
+    assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "B0\n");
+    assert!(run_libra_command(&["stash", "pop"], p).status.success());
+    assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "A1\n");
+    assert_eq!(fs::read_to_string(p.join("b.txt")).unwrap(), "B1\n");
+}
+
+/// `-u`/`-a`/`-k` combined with a pathspec are rejected (exit 129) rather than
+/// silently ignored.
+#[tokio::test]
+#[serial]
+async fn test_stash_push_pathspec_rejects_options() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let p = temp.path();
+    let _guard = ChangeDirGuard::new(p);
+
+    fs::write(p.join("a.txt"), "A0\n").unwrap();
+    assert!(run_libra_command(&["add", "a.txt"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+    fs::write(p.join("a.txt"), "A1\n").unwrap();
+
+    for opt in ["-u", "-a", "-k"] {
+        let out = run_libra_command(&["stash", "push", opt, "a.txt"], p);
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "stash push {opt} -- pathspec must be rejected with exit 129"
+        );
+        // The working tree is left untouched by the rejected push.
+        assert_eq!(fs::read_to_string(p.join("a.txt")).unwrap(), "A1\n");
+    }
+}

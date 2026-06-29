@@ -631,9 +631,15 @@ struct ThreeWayMergeResult {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct MergeTreeEntry {
-    hash: ObjectHash,
-    mode: TreeItemMode,
+pub(crate) struct MergeTreeEntry {
+    pub(crate) hash: ObjectHash,
+    pub(crate) mode: TreeItemMode,
+}
+
+impl MergeTreeEntry {
+    pub(crate) fn new(hash: ObjectHash, mode: TreeItemMode) -> Self {
+        Self { hash, mode }
+    }
 }
 
 struct ThreeWayMergeOptions<'a> {
@@ -1641,7 +1647,7 @@ fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, P
     Ok(items)
 }
 
-fn create_tree_from_items_map(
+pub(crate) fn create_tree_from_items_map(
     items: &HashMap<PathBuf, MergeTreeEntry>,
 ) -> Result<ObjectHash, String> {
     let mut entries_map = tree_entries_map_from_items(items)?;

@@ -1490,6 +1490,7 @@ async fn test_status_show_stash_with_existing_stash() {
         no_include_untracked: false,
         all: false,
         keep_index: false,
+        pathspec: Vec::new(),
     })
     .await;
 

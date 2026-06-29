@@ -5,7 +5,7 @@ Stash the changes in a dirty working directory away.
 ## Synopsis
 
 ```
-libra stash push [-m <message>] [-u | -a] [-k | --keep-index]
+libra stash push [-m <message>] [-u | -a] [-k | --keep-index] [-- <pathspec>...]
 libra stash pop [<stash>]
 libra stash list
 libra stash apply [<stash>]
@@ -17,7 +17,7 @@ libra stash clear [--force]
 
 ## Description
 
-`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. By default, `stash push` records tracked index/worktree changes and leaves untracked files alone. Use `-u` / `--include-untracked` to include visible untracked files, or `-a` / `--all` to include ignored files too. The modifications can be restored later with `libra stash pop` or `libra stash apply`. If `stash push` is run on a clean working tree and no requested untracked files exist, it exits successfully as a no-op and reports that there are no local changes to save.
+`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. By default, `stash push` records tracked index/worktree changes and leaves untracked files alone. Use `-u` / `--include-untracked` to include visible untracked files, or `-a` / `--all` to include ignored files too. Pass `-- <pathspec>...` (file or directory paths; `.` selects the whole tree) to stash only the changes to those paths, leaving every other change in the working tree. A pathspec cannot be combined with `-u`/`-a`/`-k`. The modifications can be restored later with `libra stash pop` or `libra stash apply`, which replay the stash onto the CURRENT working tree (not HEAD) — so any unrelated uncommitted change you made in the meantime, including the paths a pathspec push left behind, is preserved. If `stash push` is run on a clean working tree and no requested untracked files exist, it exits successfully as a no-op and reports that there are no local changes to save.
 
 Stash entries are stored as specially-structured commit objects under `.libra/refs/stash`, with a flat-file list tracking the stash stack. Each stash captures both the index state and worktree state at the time of creation.
 
@@ -52,6 +52,10 @@ libra stash push -a
 
 # Stash only unstaged deltas while keeping staged content ready to commit
 libra stash push --keep-index
+
+# Stash only the changes to specific paths (here a file and a directory),
+# leaving every other change in the working tree
+libra stash push -- src/main.rs docs/
 ```
 
 #### `pop`
@@ -398,7 +402,7 @@ Libra preserves Git's `stash@{N}` reference syntax for familiarity. Users migrat
 | Include untracked | `-u` / `--include-untracked` | `-u` / `--include-untracked` | N/A |
 | No include untracked | `--no-include-untracked` (countermands `-u`) | `--no-include-untracked` | N/A |
 | Include all (ignored too) | `-a` / `--all` | `-a` / `--all` | N/A |
-| Pathspec (partial stash) | Not supported | `-- <pathspec>...` | N/A |
+| Pathspec (partial stash) | `stash push -- <pathspec>...` (file/dir paths, `.` = whole tree; not combinable with `-u`/`-a`/`-k` → `LBR-CLI-002`; no match → `LBR-CLI-003`) | `stash push [--] <pathspec>...` | N/A |
 | Pop | `stash pop [ref]` | `stash pop [--index] [<stash>]` | N/A |
 | Apply | `stash apply [ref]` | `stash apply [--index] [<stash>]` | N/A |
 | Drop | `stash drop [ref]` | `stash drop [<stash>]` | N/A |
