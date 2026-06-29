@@ -11,7 +11,7 @@
 {"name":"shell_which_workspace","surface":"shell","command":"which cargo","expected":"allow","rule_name":"shell.read_only_allowlist","blast_radius":"workspace"}
 {"name":"shell_uname_workspace","surface":"shell","command":"uname -a","expected":"allow","rule_name":"shell.read_only_allowlist","blast_radius":"workspace"}
 {"name":"shell_libra_status","surface":"shell","command":"libra status --json","expected":"allow","rule_name":"shell.libra_read_only","blast_radius":"repository"}
-{"name":"shell_libra_diff","surface":"shell","command":"libra diff --stat","expected":"allow","rule_name":"shell.libra_read_only","blast_radius":"repository"}
+{"name":"shell_libra_diff","surface":"shell","command":"libra diff --stat","expected":"needs_human","rule_name":"libra_vcs.diff_default_filters","blast_radius":"repository"}
 {"name":"shell_libra_log","surface":"shell","command":"libra log --oneline","expected":"allow","rule_name":"shell.libra_read_only","blast_radius":"repository"}
 {"name":"shell_empty","surface":"shell","command":"","expected":"deny","rule_name":"shell.empty","blast_radius":"unknown"}
 {"name":"shell_git_status_direct","surface":"shell","command":"git status","expected":"deny","rule_name":"shell.direct_git_forbidden","blast_radius":"repository"}
@@ -49,7 +49,7 @@
 {"name":"shell_unicode_confusable","surface":"shell","command":"ｒｍ -rf target","expected":"needs_human","rule_name":"shell.non_ascii_command","blast_radius":"unknown"}
 {"name":"vcs_status","surface":"libra_vcs","command":"status","args":["--json"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}
 {"name":"vcs_status_untracked_all","surface":"libra_vcs","command":"status","args":["--untracked-files=all"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}
-{"name":"vcs_diff","surface":"libra_vcs","command":"diff","args":["--stat"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}
+{"name":"vcs_diff","surface":"libra_vcs","command":"diff","args":["--stat"],"expected":"needs_human","rule_name":"libra_vcs.diff_default_filters","blast_radius":"repository"}
 {"name":"vcs_log","surface":"libra_vcs","command":"log","args":["--oneline"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}
 {"name":"vcs_show","surface":"libra_vcs","command":"show","args":["HEAD"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}
 {"name":"vcs_show_ref","surface":"libra_vcs","command":"show-ref","args":["--heads"],"expected":"allow","rule_name":"libra_vcs.read_only_allowlist","blast_radius":"repository"}

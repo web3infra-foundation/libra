@@ -1764,7 +1764,7 @@ mod tests {
         command.write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
 
-        assert!(help.contains("OBJECT is ignored for all --ai* modes"));
+        assert!(help.contains("OBJECT is ignored for all --ai* and --batch* modes"));
         assert!(help.contains("persisted session objects such as ai_session"));
         assert!(help.contains("TYPE:ID"));
         assert!(help.contains("--ai-type <ID>"));

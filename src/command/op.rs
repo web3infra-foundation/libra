@@ -651,7 +651,7 @@ mod tests {
             "keep".to_string(),
             "ephemeral".to_string(),
         ];
-        let pruned = prune_candidates(current.into_iter(), &keep);
+        let pruned = prune_candidates(current, &keep);
         // Only the ordinary, view-absent branch is a prune candidate; every
         // locked branch and every `libra/`-namespaced internal ref is protected.
         assert_eq!(pruned, vec!["ephemeral".to_string()]);
@@ -664,7 +664,7 @@ mod tests {
     fn prune_candidates_respects_keep_and_locks_with_empty_keep() {
         let empty: HashSet<String> = HashSet::new();
         let current = ["main".to_string(), "feature".to_string()];
-        let pruned = prune_candidates(current.into_iter(), &empty);
+        let pruned = prune_candidates(current, &empty);
         assert_eq!(
             pruned,
             vec!["feature".to_string()],

@@ -278,7 +278,7 @@ fn variants_surface_reasoning_for_known_thinking_models() {
 #[test]
 fn provider_capability_update_guide_documents_reasoning_variant_workflow() {
     let guide_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/agent/provider-capability-update-guide.md");
+        .join("docs/development/code-agent-runtime.md");
     let guide = std::fs::read_to_string(&guide_path).unwrap_or_else(|err| {
         panic!(
             "provider capability update guide must exist at {}: {err}",
