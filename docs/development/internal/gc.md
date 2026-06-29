@@ -2,6 +2,8 @@
 
 > Status: **declined / historical**. This command was not published to the public CLI.
 > The maintenance entry point `libra maintenance run --task gc` provides the same safe garbage-collection pass.
+>
+> **源码已删除（v0.17.1759）**：孤立、从未编译进二进制的 `src/command/gc.rs`（及其同样未接入的 `tests/command/gc_test.rs`）已删除，以消除 bit-rot 风险。本文件仅作为历史设计记录保留；当前唯一被编译、会运行的 GC 实现是 `src/command/maintenance.rs::run_gc`（经 `libra maintenance run --task gc` 调用）。下文对 `src/command/gc.rs`、`GcArgs` 等符号的引用均为历史快照，不再对应工作区文件。
 
 This document preserves the original design notes for the unpublished `gc` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
 
@@ -46,7 +48,7 @@ flowchart TD
 
 ## 当前状态
 
-- 公开状态：未公开；模块状态：`src/command/gc.rs` 源文件存在，但 `src/` 树中没有任何 `mod gc` 声明（`src/command/mod.rs` 未声明该模块），因此该文件尚未被编译进二进制。
+- 公开状态：未公开；模块状态：`src/command/gc.rs` 源文件**已于 v0.17.1759 删除**（删除前从未在 `src/command/mod.rs` 声明 `mod gc`，从未编译进二进制）。GC 行为由 `src/command/maintenance.rs::run_gc` 提供。
 - 用户文档：`docs/commands/gc.md`，当前仅作为 unpublished historical design 页面保留，不声明可执行 CLI 合约；已发布维护入口是 `libra maintenance run --dry-run --task gc`。
 - Synopsis：`libra gc [--dry-run] [--prune=<date> | --no-prune] [--aggressive] [--auto] [--force]`。
 - 公开参数/子命令以用户文档和 CLI help 为准；当前未抽取到独立 Options/Subcommands 小节。

@@ -1,6 +1,8 @@
 # `libra prune` 内部设计资料
 
 > Status: **declined / historical**. This command was not published to the public CLI.
+>
+> **源码已删除（v0.17.1759）**：孤立、从未编译进二进制的 `src/command/prune.rs`（及其同样未接入的 `tests/command/prune_test.rs`）已删除，以消除 bit-rot 风险。本文件仅作为历史设计记录保留；不可达对象的清理由 `src/command/maintenance.rs::run_gc`（经 `libra maintenance run --task gc`）覆盖。下文对 `src/command/prune.rs`、`PruneArgs`、`PruneOutput` 等符号的引用均为历史快照，不再对应工作区文件。
 
 This document preserves the original design notes for the unpublished `prune` implementation. It is not a user-visible command contract and is not tracked in `COMPATIBILITY.md`.
 

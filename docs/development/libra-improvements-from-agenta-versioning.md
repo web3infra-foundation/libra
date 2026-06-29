@@ -1,5 +1,7 @@
 # Agenta 版本管理方案剖析与对 Libra 的改进建议
 
+> ⚠️ **校正须知（v0.17.1759）**：本文件多处把 `src/command/gc.rs`（及 `collect_roots_from_database`、`agent_checkpoint_roots`、`gc.rs:1260-1297`/`gc.rs:1709` 等符号/行号）当作 GC 的现行实现来分析。**事实更正**：那份 `src/command/gc.rs` 是**从未在任何 `mod.rs`/`cli.rs` 声明、从未编译进二进制的孤立死代码**，已于 v0.17.1759 删除。唯一被编译、会运行的 GC 实现是 `src/command/maintenance.rs::run_gc`，其 roots 模型不同——它用 `collect_reachable_objects(&storage)` + `list_loose_objects()` 做可达性扫描，**不读 database roots、不含 `agent_checkpoint_roots`、也不含 operation_view roots**。因此本文 §A1（“op restore 静默腐烂”）的分析与改动范围是针对那份死代码得出的，**落地前必须先对照 `maintenance.rs::run_gc` 的实际 roots 来源重新核验**，下文所有 `gc.rs` 引用按历史快照处理。
+
 > 读者：Libra（AI-agent-native、Git 兼容、refs 存于 SQLite 的版本控制系统）维护者
 > 方法：先剖析 Agenta 的版本管理本质，再逐条对照 Libra 源码验证，只保留可落地的建议。所有 Libra 侧结论均已对照源码核验。
 
@@ -20,7 +22,7 @@
 - Agenta 版本内核：`/Volumes/Data/agenta-ai/agenta/api/oss/src/core/git/types.py:1-381`、`dtos.py:24-146`、`dbs/postgres/git/dao.py:881-1001,1110-1168,1564-1668,1802-1844`。
 - Agenta environment 指针：`api/oss/src/core/environments/dtos.py:118-150`、`service.py:120-182,184-258`。
 - Agenta 仓库工作流反例：`AGENTS.md:31-66`、`.pre-commit-config.yaml:28-37`、`.husky/pre-push`、`.github/workflows/01-create-release-branch.yml:57-189`。
-- Libra 对照点：`src/command/gc.rs:1260-1296,1709-1748`、`src/internal/operation.rs:501-683`、`src/internal/operation_wrapper.rs:317-535`（`with_operation_log` 实际跨至 535，原 v1 写作 317-430）、`src/utils/util.rs:739-990`、`src/command/commit.rs:562-611,1899-1915`、`src/command/push.rs:1478-1525`、`src/command/reset.rs:770-790`、`src/command/merge.rs:657-687`、`src/internal/ai/orchestrator/workspace.rs:1032-1115`。
+- Libra 对照点：`src/command/maintenance.rs::run_gc`（GC reachability/expire 实现；孤立的 `src/command/gc.rs` 已于 v0.17.1759 删除）、`src/internal/operation.rs:501-683`、`src/internal/operation_wrapper.rs:317-535`（`with_operation_log` 实际跨至 535，原 v1 写作 317-430）、`src/utils/util.rs:739-990`、`src/command/commit.rs:562-611,1899-1915`、`src/command/push.rs:1478-1525`、`src/command/reset.rs:770-790`、`src/command/merge.rs:657-687`、`src/internal/ai/orchestrator/workspace.rs:1032-1115`。
 
 **执行原则**：
 - 每个建议必须是“新增保护 / 新增 opt-in 能力 / 新增结构化输出”，不能破坏现有 Git 兼容行为。
@@ -511,12 +513,11 @@ Agenta 有两套完全不同的版本管理，必须分开看。
 
 **目标**：`libra op log` 列出的每个成功 operation，其 view 里引用的 commit 在 `libra gc --prune=now` 后仍可恢复；如果历史对象已经缺失，`op restore` 必须在改 HEAD/refs 前失败。
 
-**改动范围**：
-- `src/command/gc.rs`
+**改动范围**（注：原列出的 `src/command/gc.rs` / `tests/command/gc_test.rs` 已于 v0.17.1759 删除；下表已改指向现行 GC 实现 `src/command/maintenance.rs::run_gc` 及其测试，落地前按本文件顶部校正须知重新核验 roots 模型）：
+- `src/command/maintenance.rs`（`run_gc` — 现行唯一 GC 实现）
 - `src/command/op.rs`
-- `tests/command/gc_test.rs`
+- `tests/command/maintenance_test.rs`
 - `tests/command/op_test.rs`
-- `docs/commands/gc.md`
 - `docs/commands/op.md`
 
 **实现步骤**：

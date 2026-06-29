@@ -86,8 +86,8 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 ## 本次本地核对结论
 
 - 计划的依赖顺序总体合理，但阶段 0 需要按当前事实拆分：`gc` / `prune` 已在 `docs/development/commands/README.md` 被降级为内部历史资料，不应再作为默认公开路线推进；`remote update -p` 源码已实现；`fetch --prune` 仍是真实缺口。
-- `src/command/gc.rs`、`src/command/prune.rs`、`tests/command/gc_test.rs`、`tests/command/prune_test.rs` 在工作区存在，但 `src/command/mod.rs`、`src/cli.rs` 与 `tests/command/mod.rs` 都没有声明对应 `mod`。Rust 不做自动模块发现，因此这四个文件**当前根本没有被编译进 crate**，是孤立死代码（dead code），而不是「已接入但未公开」的命令。当前治理结论是内部化，后续只能保留去重/事实核对任务，除非重新完成公开决策。
-- `maintenance.rs::run_gc`（`src/command/maintenance.rs:299`）是**唯一被编译、唯一会运行**的 GC 实现；约 5.3k 行的 `gc.rs` 体量大得多但未编译。因此真正的风险不是「两套实现运行时行为分叉」（`gc.rs` 永不运行），而是源码树里存在一份大体量、会随 Git/对象格式演进 bit-rot、与 `run_gc` 事实分叉、并逃过 CI 的死实现。收口目标是**二选一**并记入决策日志：① 直接删除孤立实现（`run_gc` 行为不变，无需兼容开关）；或 ② 抽取 `internal/repository_gc.rs` 单一领域实现、让 `run_gc` 委托它并删除重复（`run_gc` 行为可能变化，此时才需要兼容开关与 golden 对比）。
+- ✅ **已收口（v0.17.1759）**：`src/command/gc.rs`、`src/command/prune.rs`、`tests/command/gc_test.rs`、`tests/command/prune_test.rs` 曾在工作区存在，但 `src/command/mod.rs`、`src/cli.rs` 与 `tests/command/mod.rs` 都没有声明对应 `mod`。Rust 不做自动模块发现，因此这四个文件**从未被编译进 crate**，是孤立死代码（dead code），而不是「已接入但未公开」的命令。GGT-01 已按下文方式 ① 将其删除，治理结论维持内部化。
+- `maintenance.rs::run_gc`（`src/command/maintenance.rs`）是**唯一被编译、唯一会运行**的 GC 实现；删除前约 5.3k 行的孤立 `gc.rs` 体量大得多但永不编译。当时真正的风险不是「两套实现运行时行为分叉」（`gc.rs` 永不运行），而是源码树里存在一份大体量、会随 Git/对象格式演进 bit-rot、与 `run_gc` 事实分叉、并逃过 CI 的死实现。收口目标曾是**二选一**并记入决策日志：① 直接删除孤立实现（`run_gc` 行为不变，无需兼容开关）；或 ② 抽取 `internal/repository_gc.rs` 单一领域实现、让 `run_gc` 委托它并删除重复（`run_gc` 行为可能变化，此时才需要兼容开关与 golden 对比）。**GGT-01 采纳方式 ①**（见决策日志 2026-06-30 行）。
 - `fetch --prune` 仍未公开：`FetchArgs` 只有 `--no-prune` 兼容 no-op，没有 `-p`/`--prune`。`remote update -p` 已在 `RemoteCmds::Update` 中公开并复用 `run_prune_remote`（两段式：先 fetch 全部 resolved 远端、全部成功后再 prune），命令 README 与 `COMPATIBILITY.md` 已同步为已公开，文档同步债已结清。
 - `rebase -i` / `--edit-todo` 按 D16 继续拒绝，已从本计划主线移除；当前 `rebase.md` 与命令 README 已记录 `--autosquash`、`--reapply-cherry-picks` 已支持，但 `_compatibility.md` 的概览行仍有旧说法，阶段 0 只做文档同步债收口，不重复规划实现。
 - Grit 的命令测试不能作为 shell harness 直接接入 Libra。Grit 当前做法是把上游 Git `git/t/` 测试纳入自身 `tests/`，通过 `scripts/run-tests.sh` 和测试 harness 把 `grit-git` 暴露成 `git`；Libra 的要求不是照搬这些文件，而是阅读并归纳每个测试的场景、前置状态、操作步骤、断言和边界，然后用 `tests/command/*`、`tests/helpers/`、`tests/harness/` 或 `tools/integration-runner` 的既有 Libra 写法重写。
@@ -127,7 +127,7 @@ gitlink（`0o160000`）在 tree/index 中仍可识别；`ls-tree` / `show` / `fs
 
 | 能力 | 建议阶段 | Libra 源码现状 | Grit 参考 |
 |------|----------|----------------|-----------|
-| GC / prune 领域实现收口 | **0** | `src/command/gc.rs`、`prune.rs`、测试文件在工作区存在，但未在任何 `mod.rs`/`cli.rs` 声明，属**未编译孤立死代码**；`docs/development/commands/README.md` 当前将 `gc` / `prune` 降级为内部历史资料；`maintenance.rs::run_gc`（唯一被编译的实现）为简化版 | `grit-git/src/commands/gc.rs`、`prune.rs`（仅作行为参考，不默认公开） |
+| GC / prune 领域实现收口 | **0 ✅** | **已收口（v0.17.1759，方式①）**：删除未编译孤立死代码 `src/command/gc.rs`/`prune.rs` 及死测试 `gc_test.rs`/`prune_test.rs`；唯一被编译的 GC 实现 `maintenance.rs::run_gc` 行为不变。`docs/development/commands/README.md` 与 `docs/development/internal/{gc,prune}.md` 维持内部历史资料定位 | `grit-git/src/commands/gc.rs`、`prune.rs`（仅作行为参考，不默认公开） |
 | `fetch --prune` | **0** | `remote.rs::run_prune_remote` 与 `remote update -p` 已有；`FetchArgs` 仅有 `--no-prune` no-op，无 `-p`/`--prune` | `grit fetch -p` |
 | `remote update -p` 文档同步 | **✅ 已同步** | `RemoteCmds::Update` 已有 `-p`/`--prune`，`remote.md`、命令 README 与 `COMPATIBILITY.md` 均已记录为已公开 | `git remote update -p` |
 | `check-ignore` / `check-attr` | **1** | `utils/ignore.rs`、`utils/lfs.rs`；无 CLI | `check_ignore.rs`、`check_attr.rs` |
@@ -560,11 +560,11 @@ gantt
 - `COMPATIBILITY.md`
 
 **验收标准**：
-- [ ] `gc` / `prune` 的状态被明确为“继续内部化”，且 README、`_compatibility.md`、本文件、`docs/commands/gc.md`、`docs/commands/prune.md` 不再互相覆盖；若未来改为公开，必须另开决策并更新本计划。
+- [x] `gc` / `prune` 的状态被明确为“继续内部化”，且 README、`_compatibility.md`、本文件、`docs/commands/gc.md`、`docs/commands/prune.md` 不再互相覆盖；若未来改为公开，必须另开决策并更新本计划。（`docs/commands/{gc,prune}.md` 标注 `unpublished`，`docs/development/internal/{gc,prune}.md` 标注 `declined / historical`，`_compatibility.md` 与本文件一致。）
 - [x] `remote update -p` / `--prune` 的源码事实、`remote.md`、命令 README、`COMPATIBILITY.md` 和 compat guard 一致；不再写成未公开。
-- [ ] `fetch --prune` / `-p` 被单独标记为未实现缺口，且 `--no-prune` 的 no-op 语义不被误读为支持 prune。
-- [ ] `rebase --autosquash` / `--reapply-cherry-picks` 的源码事实、用户文档、开发文档和兼容矩阵一致。
-- [ ] Grit 外部基线记录 tag/commit、命令清单生成方式和比对日期。
+- [x] `fetch --prune` / `-p` 被单独标记为未实现缺口，且 `--no-prune` 的 no-op 语义不被误读为支持 prune。（`COMPATIBILITY.md` fetch 行写明 `--prune`/`-p` not exposed (deferred)；`docs/commands/fetch.md` 同步说明 `--no-prune` 仅为 no-op。）
+- [x] `rebase --autosquash` / `--reapply-cherry-picks` 的源码事实、用户文档、开发文档和兼容矩阵一致。（两 flag 均在 `rebase.rs` 实现；`rebase.md`、`docs/commands/rebase.md`、README 与本次新增的 `_compatibility.md` 概览行均已记录。）
+- [x] Grit 外部基线记录 tag/commit、命令清单生成方式和比对日期。（见“最后核对”段：Grit `v0.5.0-12-gdfb079967`，`KNOWN_COMMANDS`=152，2026-06-24。）
 
 **验证**：
 - [ ] `rg -n "直接覆盖|--autosquash|--reapply-cherry-picks|gc|prune" docs/development/commands docs/commands COMPATIBILITY.md`
@@ -641,7 +641,7 @@ gantt
 
 **范围**：按当前 README 结论保留顶层 `gc` / `prune` 未公开状态，处理文档降级、死测试定位和 GC 领域实现收口；不处理 fetch prune，不注册顶层命令。若产品决定重新公开，必须先更新 `GGT-00` 决策，再把本任务替换为新的公开接线任务。
 
-**前提事实**：`src/command/gc.rs`、`prune.rs`（及其测试）当前**未在任何 `mod.rs`/`cli.rs` 声明，是未编译的孤立死代码**；唯一会运行的 GC 实现是 `maintenance.rs::run_gc`。因此本任务不是「合并两套运行中的实现」，而是**决定孤立代码的去留**并收口为单一领域实现。
+**前提事实**（GGT-01 实施前）：`src/command/gc.rs`、`prune.rs`（及其测试）**未在任何 `mod.rs`/`cli.rs` 声明，是未编译的孤立死代码**；唯一会运行的 GC 实现是 `maintenance.rs::run_gc`。因此本任务不是「合并两套运行中的实现」，而是**决定孤立代码的去留**并收口为单一领域实现。**已于 v0.17.1759 按方式 ① 删除该孤立代码。**
 
 **可能改动文件**：
 - `src/command/gc.rs`
@@ -660,11 +660,11 @@ gantt
 - `tools/integration-runner/**`
 
 **验收标准**：
-- [ ] 用户文档不再暗示顶层 `libra gc` / `libra prune` 可用；`maintenance run --task gc` 是唯一公开入口，且 `_compatibility.md` 说明原因和未来重启公开条件。
-- [ ] 明确选择并记录收口方式：① **删除**孤立 `gc.rs`/`prune.rs`（`run_gc` 行为不变）；或 ② 抽取 `internal/repository_gc.rs` 单一领域实现、`run_gc` 委托它、删除重复源码。完成后源码树只剩一份会编译的 GC reachability/prune 规则，不留孤立死实现。
-- [ ] `gc_test.rs` / `prune_test.rs` 不再作为未接入的死 CLI 测试漂移；要么改为内部实现测试，要么删除并以 maintenance/内部测试覆盖同等行为。
-- [ ] destructive prune/gc 路径保留 dry-run、reachability、packed-object 保护和对象目录越界保护测试。
-- [ ] **仅当**收口方式为 ②（即 `run_gc` 行为会变）时，保留旧 `run_gc` 的兼容开关（编译期 feature `legacy-maintenance-gc` 或运行时 `--compat=legacy`）直至新实现通过所有 golden 输出对比；方式 ① 因不改 `run_gc` 行为无需兼容开关，但需在决策日志说明删除的孤立实现及其原有覆盖差异。
+- [x] 用户文档不再暗示顶层 `libra gc` / `libra prune` 可用；`maintenance run --task gc` 是唯一公开入口，且 `_compatibility.md` 说明原因和未来重启公开条件。
+- [x] 明确选择并记录收口方式：采纳 **① 删除**孤立 `gc.rs`/`prune.rs`（`run_gc` 行为不变）。源码树只剩 `maintenance.rs::run_gc` 这一份会编译的 GC reachability/prune 规则，不留孤立死实现。（见决策日志 2026-06-30 行。）
+- [x] `gc_test.rs` / `prune_test.rs` 不再作为未接入的死 CLI 测试漂移；已随孤立源码一并删除，maintenance GC 行为由 `maintenance.rs::run_gc` 既有覆盖保留。
+- [x] destructive prune/gc 路径保留 dry-run、reachability、packed-object 保护和对象目录越界保护测试。（由 `maintenance run --task gc` 路径的既有测试覆盖；删除的孤立实现不参与编译，无新增/丢失运行时覆盖。）
+- [x] 收口方式为 ①（不改 `run_gc` 行为），按计划无需兼容开关；删除的孤立实现及其原有覆盖差异已在决策日志说明。
 
 **验证**：
 - [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test maintenance_gc -- --nocapture`（或当前 maintenance GC 测试过滤器）
@@ -1076,6 +1076,7 @@ patch 输入
 |------|------|----------|----------|-----------|
 | 2026-06-24 | 初版生成 | Grit v0.5.0 基线核对 + Libra v0.17.1613 源码审计 | 全部 8 阶段 | 当前文件 |
 | 2026-06-24 | 增加方案评估结论速览、关键假设、性能内存基线、决策日志 | 多维度评审 | 全局结构 | 当前文件 |
+| 2026-06-30 | **GGT-00 + GGT-01 收口（阶段 0 事实基线）**：① GGT-01 采纳收口方式 **①**，删除未编译孤立死代码 `src/command/gc.rs`(5287 行)、`src/command/prune.rs`(847 行) 及其同样未接入的 `tests/command/gc_test.rs`、`tests/command/prune_test.rs`；`run_gc`(`maintenance.rs`) 行为不变，无需兼容开关。删除的孤立实现原本覆盖的 reachability/expire/dry-run 规则与运行中的 `run_gc` 已分叉且永不执行，删除消除 bit-rot 风险，不改变任何用户可见行为。② GGT-00 文档同步：补 `_compatibility.md` rebase 概览行的 `--reapply-cherry-picks`，使其与 `rebase.rs`/`rebase.md`/README 一致；核对确认 `gc`/`prune` 内部化、`fetch --prune` 未实现缺口标记、`remote update -p` 已公开、Grit 基线 tag 记录均已一致。 | 阶段 0 GGT-00/GGT-01 实施 | GGT-01 删除孤立 GC 源码/测试；GGT-00 doc sync | 当前文件 / v0.17.1759 |
 | 2026-06-24 | 事实复核与多维改进：① 更正 `gc.rs`/`prune.rs` 为**未编译孤立死代码**（非运行时分叉的两套实现），重写 GGT-01 收口口径；② 点名 Grit **GPLv2(`grit-git`/`/git`/`/tests`) vs MIT(`grit-lib`)**、Libra MIT 的 copyleft 污染风险，新增净室质量门与 PR 检查项；③ 标注 `perf_smoke`/`git_interop`/`credential_security`/`protocol_*` 为**待建** test target 及对应 CI job，补 `[[test]]` 注册与 `docs/error-codes.md` 同步要求；④ 性能基线要求 release 构建并补 `repack` 行；⑤ 修正 `diff.rs` 行号漂移并加行号约定脚注；⑥ 对齐阶段 7 依赖图（硬依赖仅阶段 0）。基线已对照 Grit `v0.5.0-12-gdfb079967`(`gitbutlerapp/grit`) 工作区核对：`KNOWN_COMMANDS`=152、`grit-lib`/`grit-git` 文件、`data/tests/<group>/<stem>.toml`、双许可证均已实地确认。 | 评估表 / 核对结论 / 质量门 / 测试矩阵 / 性能基线 / GGT-01 / 依赖图 / 决策日志 | 当前文件 |
 
 ---
