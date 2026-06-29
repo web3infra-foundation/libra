@@ -863,6 +863,9 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -956,6 +959,9 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1020,6 +1026,9 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1220,6 +1229,9 @@ async fn test_worktree_add_does_not_reset_index() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1239,6 +1251,9 @@ async fn test_worktree_add_does_not_reset_index() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1285,6 +1300,9 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     exec_async(vec!["commit", "-m", "initial"])
@@ -1303,6 +1321,9 @@ async fn test_worktree_add_populates_from_head_not_staged_index() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 

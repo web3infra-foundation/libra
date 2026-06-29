@@ -76,6 +76,9 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -261,6 +264,9 @@ async fn test_execute_commit() {
 
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         };
         add::execute(args).await;
     }
@@ -355,6 +361,9 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -431,6 +440,9 @@ async fn test_commit_with_all_flag_records_deletions() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -532,6 +544,9 @@ async fn test_commit_sha256() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -622,6 +637,9 @@ async fn test_commit_with_custom_author() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -881,6 +899,9 @@ async fn test_commit_with_actual_changes() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     };
     add::execute(add_args).await;
 
@@ -965,6 +986,9 @@ async fn test_commit_signoff_persists_trailer() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1131,6 +1155,9 @@ async fn test_commit_without_identity_fails_by_default() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1221,6 +1248,9 @@ async fn test_commit_cleanup_strips_comments() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1409,6 +1439,9 @@ async fn test_commit_trailer_appended() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1444,6 +1477,9 @@ async fn test_commit_dry_run_does_not_create_commit() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -1480,6 +1516,9 @@ async fn test_commit_reuse_message() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1503,6 +1542,9 @@ async fn test_commit_reuse_message() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1540,6 +1582,9 @@ async fn test_commit_fixup_sets_subject() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1561,6 +1606,9 @@ async fn test_commit_fixup_sets_subject() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -1700,5 +1748,82 @@ fn commit_no_status_flag_is_accepted_noop() {
         output.status.success(),
         "commit --no-status succeeds: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Regression: `--amend --no-edit` on a *signed* parent must reuse the parent's
+/// real log message, NOT leak the parent's embedded `gpgsig` signature block.
+///
+/// Libra stores the PGP signature *inside* the commit object's message field
+/// (see `format_commit_msg`), so the amend path has to strip it with
+/// `parse_commit_msg` before reusing the parent's message. Before the fix, the
+/// amended commit's subject/message became "gpgsig -----BEGIN PGP SIGNATURE-----…"
+/// instead of the parent's real subject.
+#[test]
+fn test_commit_amend_no_edit_signed_parent_does_not_leak_gpgsig() {
+    let repo = tempdir().unwrap();
+    let p = repo.path();
+
+    // `init --vault false` leaves no signing key; `generate-gpg-key` then both
+    // creates the key and turns on `vault.signing`, so the next commit is
+    // GPG-signed and its stored body embeds a `gpgsig` block.
+    assert_cli_success(
+        &run_libra_command(&["init", "--vault", "false"], p),
+        "init --vault false",
+    );
+    configure_identity_via_cli(p);
+    assert_cli_success(
+        &run_libra_command(&["config", "generate-gpg-key"], p),
+        "generate-gpg-key",
+    );
+
+    // Signed base commit whose real subject is "original-subject".
+    std::fs::write(p.join("f.txt"), "a\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add base file");
+    let base = run_libra_command(
+        &["--json", "commit", "-m", "original-subject", "--no-verify"],
+        p,
+    );
+    assert_cli_success(&base, "create signed base commit");
+    assert_eq!(
+        parse_json_stdout(&base)["data"]["signed"].as_bool(),
+        Some(true),
+        "base commit must be signed for this regression to be meaningful"
+    );
+
+    // Amend with --no-edit: the amended commit must carry the parent's real
+    // message, not its signature header.
+    std::fs::write(p.join("f.txt"), "ab\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add amended file");
+    assert_cli_success(
+        &run_libra_command(&["commit", "--amend", "--no-edit", "--no-verify"], p),
+        "amend --no-edit",
+    );
+
+    // The amended subject must equal the parent's real subject — not a leaked
+    // "gpgsig -----BEGIN PGP SIGNATURE-----" header line.
+    let subject_out = run_libra_command(&["log", "-1", "--format=%s"], p);
+    assert_cli_success(&subject_out, "log amended subject");
+    let subject = String::from_utf8_lossy(&subject_out.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        subject, "original-subject",
+        "amended subject must be the parent's real message, not a leaked gpgsig header"
+    );
+
+    // Belt-and-suspenders: Libra's `log` strips a *legitimate* `gpgsig` header
+    // from the displayed message, so any signature-block text appearing in the
+    // amended commit's log means the parent's signature leaked into the body.
+    let log_out = run_libra_command(&["log", "-1"], p);
+    assert_cli_success(&log_out, "log amended commit");
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        !log.contains("gpgsig"),
+        "amended message leaked a gpgsig header:\n{log}"
+    );
+    assert!(
+        !log.contains("BEGIN PGP SIGNATURE"),
+        "amended message leaked a PGP signature block:\n{log}"
     );
 }

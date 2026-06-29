@@ -120,6 +120,40 @@ libra add --pathspec-from-file paths.bin --pathspec-file-nul
 Treat the `--pathspec-from-file` input as NUL-separated rather than newline-separated.
 Requires `--pathspec-from-file`; using it alone is a usage error.
 
+### `--chmod=(+|-)x`
+
+Force the executable bit recorded in the index for the matched paths: `+x` records
+mode `100755`, `-x` records `100644`. The blob content is unchanged; only regular
+files are affected (symlinks and gitlinks are skipped). A path whose recorded mode
+actually changes is reported as modified, even when its content did not change. An
+invalid value (anything other than `+x` / `-x`) is a usage error.
+
+```bash
+libra add --chmod=+x scripts/build.sh
+libra add --chmod=-x notes.txt
+```
+
+### `--renormalize`
+
+Re-stage tracked files from scratch, rewriting their blobs even when the content is
+unchanged. Implies `-u`: only tracked files are processed (never untracked ones), and
+a tracked file removed from the working tree has its deletion staged.
+
+```bash
+libra add --renormalize
+libra add --renormalize src/
+```
+
+### `--ignore-missing`
+
+Under `--dry-run`, silently skip pathspecs that do not exist instead of failing (a
+warning is printed to stderr). Mirrors Git: `--ignore-missing` requires `--dry-run`,
+and a pathspec that exists but matches nothing is still an error.
+
+```bash
+libra add --dry-run --ignore-missing maybe-missing.txt other.txt
+```
+
 ## Common Commands
 
 ```bash
@@ -130,6 +164,8 @@ libra add -n file.txt
 libra add --refresh
 libra add --ignore-errors src/
 libra add --pathspec-from-file paths.txt
+libra add --chmod=+x scripts/build.sh
+libra add --renormalize
 ```
 
 ## Human Output

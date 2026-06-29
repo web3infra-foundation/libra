@@ -219,6 +219,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &OutputConfig::default(),
     )
@@ -314,6 +317,9 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &OutputConfig::default(),
     )
@@ -353,6 +359,9 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &OutputConfig::default(),
     )
@@ -416,6 +425,9 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &OutputConfig::default(),
     )
@@ -502,6 +514,9 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &OutputConfig::default(),
     )

@@ -1288,6 +1288,19 @@ fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
     }
 }
 
+/// Classify a raw index entry mode into the tree-item mode it would commit as,
+/// mirroring `tree::create_tree_from_index`. Lets staged-change detection notice
+/// a mode-only change (e.g. the executable bit set by `add --chmod=+x`).
+fn index_mode_to_tree_item_mode(mode: u32) -> TreeItemMode {
+    match mode & 0o170000 {
+        0o120000 => TreeItemMode::Link,
+        0o040000 => TreeItemMode::Tree,
+        0o160000 => TreeItemMode::Commit,
+        _ if mode & 0o111 != 0 => TreeItemMode::BlobExecutable,
+        _ => TreeItemMode::Blob,
+    }
+}
+
 fn format_mode(mode: u32) -> String {
     format!("{:06o}", mode)
 }
@@ -2016,23 +2029,31 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
     };
     let commit = Commit::load(&head_commit);
     let tree = Tree::load(&commit.tree_id);
-    let tree_files = tree.get_plain_items();
+    let tree_files = tree.get_plain_items_with_mode();
 
-    for (item_path, item_hash) in tree_files.iter() {
+    for (item_path, item_hash, item_mode) in tree_files.iter() {
         let item_str = item_path
             .to_str()
             .ok_or_else(|| StatusError::InvalidPathEncoding {
                 path: item_path.clone(),
             })?;
         if index.tracked(item_str, 0) {
-            if !index.verify_hash(item_str, 0, item_hash) {
+            // A staged change is either a content change (blob hash differs) OR a
+            // mode change (e.g. `add --chmod=+x`): the index records 100755 while
+            // the HEAD tree still has 100644, with the same blob.
+            let content_changed = !index.verify_hash(item_str, 0, item_hash);
+            let mode_changed = index
+                .get(item_str, 0)
+                .is_some_and(|entry| index_mode_to_tree_item_mode(entry.mode) != *item_mode);
+            if content_changed || mode_changed {
                 changes.modified.push(item_path.clone());
             }
         } else {
             changes.deleted.push(item_path.clone());
         }
     }
-    let tree_files_set: HashSet<PathBuf> = tree_files.into_iter().map(|(path, _)| path).collect();
+    let tree_files_set: HashSet<PathBuf> =
+        tree_files.into_iter().map(|(path, _, _)| path).collect();
     changes.new = tracked_files
         .into_iter()
         .filter(|path| !tree_files_set.contains(path))

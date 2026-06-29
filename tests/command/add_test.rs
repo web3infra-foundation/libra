@@ -43,6 +43,9 @@ async fn test_add_single_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -82,6 +85,9 @@ async fn test_add_dispatches_vcs_automation_history() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -126,6 +132,9 @@ async fn test_add_dry_run_does_not_dispatch_vcs_automation_history() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         },
         &libra::utils::output::OutputConfig::default(),
     )
@@ -171,6 +180,9 @@ async fn test_add_multiple_files() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -226,6 +238,9 @@ async fn test_add_all_flag() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -285,6 +300,9 @@ async fn test_add_update_flag() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -315,6 +333,9 @@ async fn test_add_update_flag() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -383,6 +404,9 @@ async fn test_add_with_ignore_patterns() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -466,6 +490,9 @@ async fn test_add_force_tracks_ignored_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -489,6 +516,9 @@ async fn test_add_force_tracks_ignored_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -522,6 +552,9 @@ async fn test_add_force_tracks_ignored_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -569,6 +602,9 @@ async fn test_add_force_dot_includes_ignored_directory() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -600,6 +636,9 @@ async fn test_add_force_dot_includes_ignored_directory() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -641,6 +680,9 @@ async fn test_add_dry_run() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -677,6 +719,9 @@ async fn test_add_without_path_should_error() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -712,6 +757,9 @@ async fn test_add_nonexistent_file_should_error() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -751,6 +799,9 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             ignore_errors: false,
             pathspec_from_file: None,
             pathspec_file_nul: false,
+            chmod: None,
+            renormalize: false,
+            ignore_missing: false,
         })
         .await;
 
@@ -795,6 +846,9 @@ async fn test_add_empty_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -834,6 +888,9 @@ async fn test_add_sub_directory_file() {
         ignore_errors: false,
         pathspec_from_file: None,
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -874,6 +931,9 @@ async fn test_add_pathspec_from_file_newline_stages_listed_paths() {
         ignore_errors: false,
         pathspec_from_file: Some(String::from("paths.txt")),
         pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -914,6 +974,9 @@ async fn test_add_pathspec_from_file_nul_stages_listed_paths() {
         ignore_errors: false,
         pathspec_from_file: Some(String::from("paths.bin")),
         pathspec_file_nul: true,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
     })
     .await;
 
@@ -966,4 +1029,270 @@ fn test_add_dry_run_short_n_and_d_alias() {
         !String::from_utf8_lossy(&status2.stdout).contains("A  new.txt"),
         "add -d also does not stage the file"
     );
+}
+
+/// `--chmod=+x` sets the executable bit (index mode 100755) on the matched
+/// file and `--chmod=-x` clears it (100644), without changing the blob.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_sets_and_clears_exec_bit() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("f.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "f.txt"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    let mode = |p: &std::path::Path| -> String {
+        let out = run_libra_command(&["ls-files", "-s", "f.txt"], p);
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    assert!(
+        run_libra_command(&["add", "--chmod=+x", "f.txt"], p)
+            .status
+            .success()
+    );
+    assert_eq!(mode(p), "100755", "--chmod=+x sets the executable bit");
+    assert!(
+        run_libra_command(&["add", "--chmod=-x", "f.txt"], p)
+            .status
+            .success()
+    );
+    assert_eq!(mode(p), "100644", "--chmod=-x clears the executable bit");
+}
+
+/// An invalid `--chmod` value is a usage error (exit 129), not a panic.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_invalid_value_errors() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("f.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "f.txt"], p).status.success());
+
+    let out = run_libra_command(&["add", "--chmod=bogus", "f.txt"], p);
+    assert_eq!(out.status.code(), Some(129), "invalid --chmod exits 129");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid --chmod value"));
+}
+
+/// `--renormalize` re-stages tracked files and never stages an untracked file
+/// (it implies `-u`).
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_only_tracked() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("tracked.txt"), "x\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "tracked.txt"], p)
+            .status
+            .success()
+    );
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+    fs::write(p.join("untracked.txt"), "u\n").unwrap();
+
+    assert!(
+        run_libra_command(&["add", "--renormalize"], p)
+            .status
+            .success()
+    );
+    let status = run_libra_command(&["status", "--short"], p);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        s.lines()
+            .any(|l| l.contains("untracked.txt") && l.trim_start().starts_with("??")),
+        "untracked file must remain untracked under --renormalize: {s}"
+    );
+}
+
+/// `--renormalize` stages the deletion of a tracked file removed from the
+/// working tree.
+#[tokio::test]
+#[serial]
+async fn test_add_renormalize_stages_tracked_deletion() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("gone.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "gone.txt"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+    fs::remove_file(p.join("gone.txt")).unwrap();
+
+    assert!(
+        run_libra_command(&["add", "--renormalize"], p)
+            .status
+            .success()
+    );
+    let status = run_libra_command(&["status", "--short"], p);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        s.lines()
+            .any(|l| l.contains("gone.txt") && l.starts_with("D")),
+        "deletion of a tracked file must be staged under --renormalize: {s}"
+    );
+}
+
+/// `--dry-run --ignore-missing` skips a pathspec that does not exist instead of
+/// failing; `--ignore-missing` without `--dry-run` is rejected (Git requires it).
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_dry_run_skips() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("real.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "real.txt"], p).status.success());
+
+    let skip = run_libra_command(&["add", "--dry-run", "--ignore-missing", "nope.txt"], p);
+    assert!(
+        skip.status.success(),
+        "missing pathspec must be skipped under --dry-run --ignore-missing"
+    );
+    assert!(String::from_utf8_lossy(&skip.stderr).contains("--ignore-missing"));
+
+    // Without --dry-run the flag is rejected up front.
+    let bad = run_libra_command(&["add", "--ignore-missing", "nope.txt"], p);
+    assert_eq!(
+        bad.status.code(),
+        Some(129),
+        "--ignore-missing requires --dry-run"
+    );
+}
+
+/// Regression: a chmod-only change (same blob, new mode) is detected by
+/// `status` as staged and can be committed — the committed tree carries 100755.
+#[tokio::test]
+#[serial]
+async fn test_add_chmod_only_change_is_committable() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("s.sh"), "echo hi\n").unwrap();
+    assert!(run_libra_command(&["add", "s.sh"], p).status.success());
+    assert!(
+        run_libra_command(&["commit", "-m", "base", "--no-verify"], p)
+            .status
+            .success()
+    );
+
+    assert!(
+        run_libra_command(&["add", "--chmod=+x", "s.sh"], p)
+            .status
+            .success()
+    );
+    // status must surface the mode-only change as staged...
+    let status = run_libra_command(&["status", "--short"], p);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        s.lines().any(|l| l.contains("s.sh") && l.starts_with('M')),
+        "chmod-only change must show as staged-modified: {s}"
+    );
+    // ...and commit must accept it (not "nothing to commit").
+    let commit = run_libra_command(&["commit", "-m", "chmod", "--no-verify"], p);
+    assert!(
+        commit.status.success(),
+        "chmod-only change must be committable: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let mode = run_libra_command(&["ls-files", "-s", "s.sh"], p);
+    assert!(
+        String::from_utf8_lossy(&mode.stdout).starts_with("100755"),
+        "committed entry carries the executable bit: {}",
+        String::from_utf8_lossy(&mode.stdout)
+    );
+}
+
+/// `--json --dry-run --ignore-missing` exposes the skipped pathspec as a
+/// machine-readable `missing` list (not just a stderr warning).
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_json_exposes_skipped() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("real.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "real.txt"], p).status.success());
+
+    let out = run_libra_command(
+        &["add", "--json", "--dry-run", "--ignore-missing", "nope.txt"],
+        p,
+    );
+    assert!(out.status.success());
+    let json = parse_json_stdout(&out);
+    let missing = &json["data"]["missing"];
+    assert_eq!(
+        missing.as_array().map(|a| a.len()),
+        Some(1),
+        "missing list has the skipped pathspec: {json}"
+    );
+    assert_eq!(missing[0], "nope.txt");
+}
+
+/// `--exit-code-on-warning` must honor an `--ignore-missing` skip: a skipped
+/// pathspec is a warning, so the process exits non-zero under that contract.
+#[tokio::test]
+#[serial]
+async fn test_add_ignore_missing_triggers_warning_exit() {
+    let dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(dir.path()).await;
+    let p = dir.path();
+    let _guard = test::ChangeDirGuard::new(p);
+
+    fs::write(p.join("real.txt"), "x\n").unwrap();
+    assert!(run_libra_command(&["add", "real.txt"], p).status.success());
+
+    // A skip under --ignore-missing is a warning -> non-zero exit.
+    let warned = run_libra_command(
+        &[
+            "--exit-code-on-warning",
+            "add",
+            "--dry-run",
+            "--ignore-missing",
+            "nope.txt",
+        ],
+        p,
+    );
+    assert!(
+        !warned.status.success(),
+        "a skipped pathspec must trip --exit-code-on-warning"
+    );
+    // No skip -> clean exit under the same contract.
+    let clean = run_libra_command(
+        &["--exit-code-on-warning", "add", "--dry-run", "real.txt"],
+        p,
+    );
+    assert!(clean.status.success(), "no warning -> success exit");
 }

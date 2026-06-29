@@ -87,6 +87,36 @@ libra add -v src/
 libra add --ignore-errors src/
 ```
 
+### `--chmod=(+|-)x`
+
+强制设置命中路径在索引中记录的可执行位：`+x` 记为 mode `100755`，`-x` 记为 `100644`。
+blob 内容不变；只影响普通文件（符号链接与 gitlink 跳过）。仅 mode 变化的路径也会被报告为
+modified。非法取值（非 `+x` / `-x`）按用法错误处理。
+
+```bash
+libra add --chmod=+x scripts/build.sh
+libra add --chmod=-x notes.txt
+```
+
+### `--renormalize`
+
+从头重新暂存已跟踪文件，即使内容未变也重写其 blob。隐含 `-u`：只处理已跟踪文件（绝不处理
+未跟踪文件）；从工作区删除的已跟踪文件会被暂存为删除。
+
+```bash
+libra add --renormalize
+libra add --renormalize src/
+```
+
+### `--ignore-missing`
+
+在 `--dry-run` 下，对不存在的 pathspec 静默跳过而非报错（会向 stderr 打印警告）。与 Git 一致：
+`--ignore-missing` 需要配合 `--dry-run`，且存在但未匹配任何文件的 pathspec 仍会报错。
+
+```bash
+libra add --dry-run --ignore-missing maybe-missing.txt other.txt
+```
+
 ## 常用命令
 
 ```bash
@@ -96,6 +126,8 @@ libra add .
 libra add -n file.txt
 libra add --refresh
 libra add --ignore-errors src/
+libra add --chmod=+x scripts/build.sh
+libra add --renormalize
 ```
 
 ## 人类可读输出

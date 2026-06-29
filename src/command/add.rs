@@ -112,6 +112,23 @@ pub struct AddArgs {
     /// Use NUL as the pathspec separator when reading from --pathspec-from-file.
     #[clap(long = "pathspec-file-nul", requires = "pathspec_from_file")]
     pub pathspec_file_nul: bool,
+
+    /// Override the executable bit recorded in the index for the matched paths:
+    /// `+x` makes them executable (mode `100755`), `-x` clears it (`100644`).
+    /// Mirrors Git's `add --chmod=(+|-)x`.
+    #[clap(long = "chmod", value_name = "(+|-)x")]
+    pub chmod: Option<String>,
+
+    /// Re-stage tracked files from scratch, rewriting their blobs even when the
+    /// content is unchanged (Git's `--renormalize`). Implies `-u`: only tracked
+    /// files are processed, never untracked ones.
+    #[clap(long)]
+    pub renormalize: bool,
+
+    /// Under `--dry-run`, silently skip pathspecs that match no file instead of
+    /// failing. Mirrors Git's `add --ignore-missing`, which requires `--dry-run`.
+    #[clap(long = "ignore-missing", requires = "dry_run")]
+    pub ignore_missing: bool,
 }
 
 /// Domain error for `libra add`.
@@ -240,6 +257,11 @@ pub struct AddOutput {
     pub ignored: Vec<String>,
     /// Paths that failed under --ignore-errors
     pub failed: Vec<AddFailure>,
+    /// Pathspecs skipped under `--ignore-missing` (dry-run only). Surfaced as
+    /// stderr warnings in text mode and as a machine-readable list in the JSON
+    /// payload so agent callers can see what was skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
     /// Whether this was a dry-run (no actual changes made)
     pub dry_run: bool,
 }
@@ -255,6 +277,7 @@ impl AddOutput {
             refreshed: Vec::new(),
             ignored: Vec::new(),
             failed: Vec::new(),
+            missing: Vec::new(),
             dry_run,
         }
     }
@@ -304,6 +327,10 @@ enum StagedAction {
 struct ValidatedPathspecs {
     files: Vec<PathBuf>,
     ignored: Vec<String>,
+    /// Pathspecs skipped under `--ignore-missing` because they do not exist in
+    /// the working tree (dry-run only). Reported as stderr warnings, never in
+    /// the JSON payload.
+    missing: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -382,8 +409,8 @@ pub async fn execute_safe(mut args: AddArgs, output: &OutputConfig) -> CliResult
     // --- Render output ---
     render_add_output(&result, output, verbose, dry_run)?;
 
-    // --- Warning tracking for ignored / partial failures ---
-    if !result.ignored.is_empty() || !result.failed.is_empty() {
+    // --- Warning tracking for ignored / partial failures / skipped pathspecs ---
+    if !result.ignored.is_empty() || !result.failed.is_empty() || !result.missing.is_empty() {
         output::record_warning();
     }
     if result.wrote_index() {
@@ -441,9 +468,17 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         }
     })?;
 
-    // Resolve pathspecs
+    // `--chmod=(+|-)x` -> the index mode to force on the matched regular files.
+    // Validated up front so an invalid value fails before any staging work.
+    let chmod_mode = match args.chmod.as_deref() {
+        Some(value) => Some(parse_chmod(value)?),
+        None => None,
+    };
+
+    // Resolve pathspecs. `--renormalize` implies `-u` (tracked-only), so it also
+    // permits an empty pathspec (operate on the whole tracked set).
     let requested_paths: Vec<PathBuf> = if args.pathspec.is_empty() {
-        if !args.all && !args.update && !args.refresh {
+        if !args.all && !args.update && !args.refresh && !args.renormalize {
             return Err(CliError::command_usage("nothing specified, nothing added")
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("maybe you wanted to say 'libra add .'?"));
@@ -477,6 +512,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         &visible_changes,
         &ignored_changes,
         &index,
+        args.ignore_missing,
     )?;
 
     let mut add_output = AddOutput::empty(args.dry_run);
@@ -488,6 +524,8 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         sorted_ignored.dedup();
         add_output.ignored = sorted_ignored;
     }
+    // Pathspecs skipped by `--ignore-missing` are surfaced as stderr warnings.
+    add_output.missing = validated.missing.clone();
 
     // --- Refresh mode ---
     if args.refresh {
@@ -517,21 +555,43 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     }
 
     // --- Normal add mode ---
-    let mut files = visible_changes.modified;
-    files.extend(visible_changes.deleted);
-    if !args.update {
-        files.extend(visible_changes.new);
-    }
-    files = filter_candidates(&files, &validated.files, &workdir, &current_dir);
+    // `--renormalize` operates on the tracked set (implies `-u`) and force-rewrites
+    // each matched blob; the regular path collects working-tree changes.
+    let mut files = if args.renormalize {
+        filter_candidates(
+            &index.tracked_files(),
+            &validated.files,
+            &workdir,
+            &current_dir,
+        )
+    } else {
+        let mut f = visible_changes.modified;
+        f.extend(visible_changes.deleted);
+        if !args.update {
+            f.extend(visible_changes.new);
+        }
+        filter_candidates(&f, &validated.files, &workdir, &current_dir)
+    };
     filter_out_current_executable(&mut files);
     files.sort();
     files.dedup();
 
     if args.dry_run {
-        // Classify files for dry-run preview
+        // Classify files for dry-run preview.
         for file in &files {
-            let status = check_file_status(file, &index, &workdir)?;
             let path_str = file.display().to_string();
+            if args.renormalize {
+                // Mirror `renormalize_entry` exactly (via `symlink_metadata`, which
+                // does not follow links): gone -> staged deletion, directory or
+                // symlink -> skipped, regular file -> force-rewritten (modified).
+                match std::fs::symlink_metadata(workdir.join(file)) {
+                    Err(_) => add_output.removed.push(path_str),
+                    Ok(meta) if meta.is_dir() || meta.file_type().is_symlink() => {}
+                    Ok(_) => add_output.modified.push(path_str),
+                }
+                continue;
+            }
+            let status = check_file_status(file, &index, &workdir)?;
             match status {
                 FileStatus::New => add_output.added.push(path_str),
                 FileStatus::Modified => add_output.modified.push(path_str),
@@ -539,12 +599,28 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
                 FileStatus::Unchanged | FileStatus::NotFound => {}
             }
         }
+        if let Some(target_mode) = chmod_mode {
+            apply_chmod(
+                &mut index,
+                target_mode,
+                &validated.files,
+                &workdir,
+                &current_dir,
+                true,
+                &mut add_output,
+            )?;
+        }
         return check_ignored_only_error(add_output);
     }
 
-    // Stage each file
+    // Stage each file (`--renormalize` force-rewrites instead of diffing).
     for file in &files {
-        match stage_a_file(file, &mut index, &workdir, &storage_path).await {
+        let staged = if args.renormalize {
+            renormalize_entry(file, &mut index, &workdir)
+        } else {
+            stage_a_file(file, &mut index, &workdir, &storage_path).await
+        };
+        match staged {
             Ok(action) => {
                 let path_str = file.display().to_string();
                 match action {
@@ -566,6 +642,20 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         }
     }
 
+    // `--chmod=(+|-)x`: force the executable bit on the matched regular files'
+    // index entries, even ones with no content change (Git's `--chmod`).
+    if let Some(target_mode) = chmod_mode {
+        apply_chmod(
+            &mut index,
+            target_mode,
+            &validated.files,
+            &workdir,
+            &current_dir,
+            false,
+            &mut add_output,
+        )?;
+    }
+
     index
         .save(&index_path)
         .map_err(|source| AddError::IndexSave {
@@ -574,6 +664,125 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         })?;
 
     check_ignored_only_error(add_output)
+}
+
+/// Parse a `--chmod=(+|-)x` value into the index mode to record: `+x` ->
+/// `100755` (executable), `-x` -> `100644`.
+fn parse_chmod(value: &str) -> CliResult<u32> {
+    match value {
+        "+x" => Ok(0o100755),
+        "-x" => Ok(0o100644),
+        other => Err(CliError::command_usage(format!(
+            "invalid --chmod value '{other}' (expected +x or -x)"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidArguments)
+        .with_hint("use --chmod=+x to set the executable bit or --chmod=-x to clear it")),
+    }
+}
+
+/// Force the executable bit on every matched, tracked **regular** file. Symlinks
+/// and gitlinks are skipped (they have no executable bit). A path whose mode
+/// already matches is left untouched; a real change is reported as `modified`.
+/// In `dry_run` the index is not mutated, only the report.
+fn apply_chmod(
+    index: &mut Index,
+    target_mode: u32,
+    validated_files: &[PathBuf],
+    workdir: &Path,
+    current_dir: &Path,
+    dry_run: bool,
+    out: &mut AddOutput,
+) -> Result<(), AddError> {
+    let matched = filter_candidates(
+        &index.tracked_files(),
+        validated_files,
+        workdir,
+        current_dir,
+    );
+    for file in &matched {
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| AddError::InvalidPathEncoding { path: file.clone() })?;
+        // Read the current mode + blob id without holding the index borrow
+        // (`IndexEntry` is not `Clone`).
+        let Some((current_mode, hash)) = index.get(file_str, 0).map(|e| (e.mode, e.hash)) else {
+            continue;
+        };
+        // Only regular blobs carry an executable bit; a path already at the
+        // target mode needs no change.
+        if current_mode & 0o170000 != 0o100000 || current_mode == target_mode {
+            continue;
+        }
+        let file_abs = workdir.join(file);
+        if !file_abs.is_file() {
+            // The tracked path is gone (or is a directory): nothing to chmod.
+            continue;
+        }
+        if !dry_run {
+            // Rebuild the entry from the working-tree stat, keeping the existing
+            // blob (no content change) and forcing the requested mode.
+            let mut updated = IndexEntry::new_from_file(file, hash, workdir).map_err(|source| {
+                AddError::CreateIndexEntry {
+                    path: file.to_path_buf(),
+                    source,
+                }
+            })?;
+            updated.mode = target_mode;
+            index.update(updated);
+        }
+        let path_str = file.display().to_string();
+        if !out.added.contains(&path_str) && !out.modified.contains(&path_str) {
+            out.modified.push(path_str);
+        }
+    }
+    Ok(())
+}
+
+/// Force-rewrite an already-tracked entry for `--renormalize`.
+///
+/// Re-reads the working-tree file, writes a fresh blob, and updates the index
+/// entry — even when the content is unchanged (the point of `--renormalize`).
+/// A tracked file that is gone from the working tree has its deletion staged; a
+/// directory is a no-op.
+fn renormalize_entry(
+    file: &Path,
+    index: &mut Index,
+    workdir: &Path,
+) -> Result<StagedAction, AddError> {
+    let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
+        path: file.to_path_buf(),
+    })?;
+    let file_abs = workdir.join(file);
+    // `symlink_metadata` does not follow symlinks, so a dangling symlink is still
+    // detected as present (and not mistaken for a deleted file).
+    let meta = match std::fs::symlink_metadata(&file_abs) {
+        Ok(meta) => meta,
+        Err(_) => {
+            // Tracked but truly gone from the working tree: stage the deletion.
+            index.remove(file_str, 0);
+            return Ok(StagedAction::Removed);
+        }
+    };
+    if meta.is_dir() {
+        return Ok(StagedAction::Unchanged);
+    }
+    if meta.file_type().is_symlink() {
+        // A symlink's content is its link target — there is nothing to
+        // renormalize, and re-reading it through `gen_blob_from_file` (which
+        // follows the link) would corrupt the entry. Leave it untouched.
+        return Ok(StagedAction::Unchanged);
+    }
+    let blob = gen_blob_from_file(&file_abs);
+    blob.save();
+    index.update(
+        IndexEntry::new_from_file(file, blob.id, workdir).map_err(|source| {
+            AddError::CreateIndexEntry {
+                path: file.to_path_buf(),
+                source,
+            }
+        })?,
+    );
+    Ok(StagedAction::Modified)
 }
 
 /// Convert "all paths ignored, nothing staged" into a hard error.
@@ -771,6 +980,11 @@ fn render_warnings_stderr(result: &AddOutput) {
             eprintln!("  {}: {}", failure.path, failure.message);
         }
     }
+    for pathspec in &result.missing {
+        eprintln!(
+            "warning: pathspec '{pathspec}' did not match any files and was skipped (--ignore-missing)"
+        );
+    }
 }
 
 /// Convert a `writeln!` failure into the standardized I/O [`CliError`] so the
@@ -800,6 +1014,7 @@ fn write_err(e: io::Error) -> CliError {
 /// - Returns [`AddError::PathspecNotMatched`] for the first pathspec that
 ///   matches no candidate at all — `--ignore-errors` does not affect this
 ///   pre-flight stage.
+#[allow(clippy::too_many_arguments)]
 fn validate_pathspecs(
     raw_pathspecs: &[String],
     requested_paths: &[PathBuf],
@@ -808,11 +1023,13 @@ fn validate_pathspecs(
     visible_changes: &Changes,
     ignored_changes: &Changes,
     index: &Index,
+    ignore_missing: bool,
 ) -> Result<ValidatedPathspecs, AddError> {
     if raw_pathspecs.is_empty() {
         return Ok(ValidatedPathspecs {
             files: requested_paths.to_vec(),
             ignored: Vec::new(),
+            missing: Vec::new(),
         });
     }
 
@@ -822,6 +1039,7 @@ fn validate_pathspecs(
 
     let mut ignored = Vec::new();
     let mut files = Vec::new();
+    let mut missing = Vec::new();
     for (raw, requested_path) in raw_pathspecs.iter().zip(requested_paths.iter()) {
         let requested_abs = resolve_pathspec(requested_path, current_dir);
         if !util::is_sub_path(&requested_abs, workdir) {
@@ -844,12 +1062,24 @@ fn validate_pathspecs(
             continue;
         }
 
+        // `--ignore-missing` (dry-run only) skips a pathspec that does not exist
+        // on disk instead of failing; a path that EXISTS but still matches
+        // nothing is a real error even under `--ignore-missing` (matching Git).
+        if ignore_missing && !requested_abs.exists() {
+            missing.push(raw.clone());
+            continue;
+        }
+
         return Err(AddError::PathspecNotMatched {
             pathspec: raw.clone(),
         });
     }
 
-    Ok(ValidatedPathspecs { files, ignored })
+    Ok(ValidatedPathspecs {
+        files,
+        ignored,
+        missing,
+    })
 }
 
 /// Flatten the three change buckets (`new`, `modified`, `deleted`) into a
