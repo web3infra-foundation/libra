@@ -24,10 +24,11 @@ use git_internal::{
 };
 use serde::Serialize;
 use similar::{Algorithm, ChangeTag, TextDiff};
+use tempfile::NamedTempFile;
 
 use crate::{
     command::{get_target_commit, load_object},
-    internal::head::Head,
+    internal::{config::ConfigKv, head::Head},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::{self, IgnorePolicy},
@@ -196,9 +197,8 @@ pub struct DiffArgs {
     #[clap(short = 'a', long = "text")]
     pub text: bool,
 
-    /// Disallow external diff drivers. Accepted for Git parity and is a no-op:
-    /// Libra has no external diff driver support and always uses its built-in
-    /// diff engine, so external drivers are never invoked to begin with.
+    /// Disable the external diff driver (`diff.external`) for this run, forcing
+    /// the built-in diff engine even when one is configured.
     #[clap(long = "no-ext-diff")]
     pub no_ext_diff: bool,
 
@@ -244,6 +244,13 @@ pub struct DiffArgs {
     /// always diffs the raw content. (Git's `--textconv` is not exposed.)
     #[clap(long = "no-textconv")]
     pub no_textconv: bool,
+
+    /// Allow an external diff driver (`diff.external`) to generate the patch.
+    /// Accepted for Git parity: when `diff.external` is configured, each file's
+    /// patch is produced by that command (GIT_EXTERNAL_DIFF protocol) unless
+    /// `--no-ext-diff` is given. Has no effect when `diff.external` is unset.
+    #[clap(long = "ext-diff", overrides_with = "no_ext_diff")]
+    pub ext_diff: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +281,10 @@ pub struct DiffOutput {
     pub total_insertions: usize,
     pub total_deletions: usize,
     pub files_changed: usize,
+    /// Set when an external diff driver (`diff.external`) produced the patch
+    /// bodies; the caller then skips the internal word-diff/relative transforms.
+    #[serde(skip)]
+    pub external_diff_applied: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -355,9 +366,13 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
     normalize_diff_range(&mut args).await;
     validate_diff_algorithm(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
-    let mut result = run_diff(&args).await.map_err(CliError::from)?;
-    apply_relative_filter(&args, &mut result);
-    apply_word_diff(&args, &mut result, output, io::stdout().is_terminal())?;
+    let mut result = run_diff(&args, output).await.map_err(CliError::from)?;
+    // External-driver output is verbatim: skip the internal relative-path rewrite
+    // and word-diff transforms (they would mangle the driver's own format).
+    if !result.external_diff_applied {
+        apply_relative_filter(&args, &mut result);
+        apply_word_diff(&args, &mut result, output, io::stdout().is_terminal())?;
+    }
     render_diff_output(&args, &result, output)
 }
 
@@ -367,28 +382,37 @@ fn word_diff_active(args: &DiffArgs) -> bool {
     matches!(args.word_diff.as_deref(), Some(mode) if mode != "none")
 }
 
+/// The `--relative[=<path>]` directory prefix (with a trailing `/`) that the diff
+/// is restricted to, or `None` when `--no-relative`, no `--relative`, or a cwd at
+/// the repo root means "no restriction".
+fn relative_prefix(args: &DiffArgs) -> Option<String> {
+    if args.no_relative {
+        return None;
+    }
+    let raw_prefix = match &args.relative {
+        None => return None,
+        Some(Some(path)) => util::to_workdir_path(path),
+        Some(None) => util::to_workdir_path("."),
+    };
+    let prefix = raw_prefix.to_string_lossy().replace('\\', "/");
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() || prefix == "." {
+        return None;
+    }
+    Some(format!("{prefix}/"))
+}
+
 /// Apply `--relative[=<path>]`: keep only files under the directory prefix and strip
 /// that prefix from every displayed path (the file path, the patch's
 /// `diff --git`/`---`/`+++`/`rename|copy from|to` lines, and — via `path` — `--stat`,
 /// JSON, and create/delete mode summaries). `--no-relative` and a cwd at the repo
-/// root are no-ops.
+/// root are no-ops. The file-set restriction is also applied (without path
+/// rewriting) inside `run_diff` before an external driver runs, so this rewrite
+/// pass is skipped for external output.
 fn apply_relative_filter(args: &DiffArgs, result: &mut DiffOutput) {
-    if args.no_relative {
+    let Some(strip) = relative_prefix(args) else {
         return;
-    }
-    let raw_prefix = match &args.relative {
-        None => return,
-        Some(Some(path)) => util::to_workdir_path(path),
-        Some(None) => util::to_workdir_path("."),
     };
-    // Normalize to a repo-root-relative directory with no surrounding slashes; a cwd
-    // at the repo root (`.`/empty) means "no restriction".
-    let prefix = raw_prefix.to_string_lossy().replace('\\', "/");
-    let prefix = prefix.trim_matches('/');
-    if prefix.is_empty() || prefix == "." {
-        return;
-    }
-    let strip = format!("{prefix}/");
 
     result.files.retain(|file| file.path.starts_with(&strip));
     for file in &mut result.files {
@@ -600,10 +624,14 @@ fn normalize_word_changes(changes: Vec<(ChangeTag, &str)>) -> Vec<(ChangeTag, &s
                 }
             }
             Some(first) => {
+                // INVARIANT: reaching the `Some(first)` arm means `position` with
+                // this same predicate already found a non-delimiter-whitespace
+                // token in `run`, so `rposition` (identical predicate, scanning
+                // from the back) must find at least that token — `first <= last`.
                 let last = run
                     .iter()
                     .rposition(|(_, t)| !is_delimiter_whitespace(t))
-                    .unwrap();
+                    .expect("INVARIANT: run contains a non-whitespace token (first_word matched)");
                 if keep_boundary {
                     out.extend(run[..first].iter().map(|&(_, t)| (ChangeTag::Equal, t)));
                 }
@@ -840,7 +868,7 @@ fn emit_worktree_scan_progress(args: &DiffArgs, output: &OutputConfig) {
     }
 }
 
-async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
+async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, DiffError> {
     util::require_repo().map_err(|_| DiffError::NotInRepo)?;
     tracing::debug!("diff args: {:?}", args);
     let index = Index::load(path::index()).map_err(|e| DiffError::IndexLoad(e.to_string()))?;
@@ -850,6 +878,10 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let worktree_entries = new_side.worktree_entries.clone();
+    // Separate copy for the external-diff pass (the one above is moved into the
+    // diff closure below). Lets the GIT_EXTERNAL_DIFF protocol report a zero hash
+    // for a new side that is the live working tree.
+    let ext_worktree_entries = new_side.worktree_entries.clone();
     // `Rc` so the `-U<n>` post-pass can read the blob content the diff closure
     // cached (keyed by hash) without re-loading it from the object store/disk.
     let worktree_cache: Rc<RefCell<HashMap<ObjectHash, Vec<u8>>>> =
@@ -922,6 +954,23 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
 
     let mut files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
 
+    // Resolve the external diff driver (`diff.external`) when it should drive this
+    // run: a patch-body output mode (not `--stat`/name/numstat/summary/`-s`/
+    // `--check`), human/file output (not `--json`/`--quiet`), and not disabled by
+    // `--no-ext-diff`. When active it REPLACES the patch entirely (applied after
+    // the internal post-passes below, which are then skipped), matching Git.
+    let external_command: Option<String> =
+        if !args.no_ext_diff && !output.is_json() && !output.quiet && patch_body_is_shown(args) {
+            ConfigKv::get("diff.external")
+                .await
+                .ok()
+                .flatten()
+                .map(|entry| entry.value)
+                .filter(|cmd| !cmd.trim().is_empty())
+        } else {
+            None
+        };
+
     // Post-pass regeneration (both reuse the blob text the diff closure cached —
     // keyed by hash — with no re-load; the default path leaves git_internal's
     // output untouched):
@@ -954,7 +1003,10 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
     // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
     // whitespace errors. It replaces the patch output, so the post-pass (which
     // only rewrites the patch/stat/counts) is skipped entirely when `--check`.
-    if !args.check && (rediffs || (args.unified.is_some() && regen_context != 3)) {
+    if external_command.is_none()
+        && !args.check
+        && (rediffs || (args.unified.is_some() && regen_context != 3))
+    {
         let blob_text = |map: &HashMap<PathBuf, ObjectHash>, path: &Path| -> String {
             let Some(hash) = map.get(path) else {
                 return String::new();
@@ -1038,6 +1090,28 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
         }
     }
 
+    // Apply the external diff driver LAST so its verbatim output is never touched
+    // by the internal post-passes (skipped above) or the later word-diff pass
+    // (skipped in `execute_safe` via `external_diff_applied`).
+    let external_diff_applied = if let Some(command) = &external_command {
+        // `--relative` still restricts WHICH files are diffed (the path-rewriting
+        // half is skipped for verbatim driver output); apply it before invoking
+        // the driver so it never runs for, or reports, files outside the prefix.
+        if let Some(strip) = relative_prefix(args) {
+            files.retain(|file| file.path.starts_with(&strip));
+        }
+        apply_external_diff(
+            &mut files,
+            command,
+            &first_map,
+            &second_map,
+            &ext_worktree_entries,
+        )?;
+        true
+    } else {
+        false
+    };
+
     let total_insertions = files.iter().map(|file| file.insertions).sum();
     let total_deletions = files.iter().map(|file| file.deletions).sum();
     let files_changed = files.len();
@@ -1049,6 +1123,7 @@ async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
         total_insertions,
         total_deletions,
         files_changed,
+        external_diff_applied,
     })
 }
 
@@ -1339,6 +1414,7 @@ pub(crate) async fn diff_stat_between_commits(
         total_insertions,
         total_deletions,
         files_changed,
+        external_diff_applied: false,
     };
     Ok(format_diff_stat_output(&output))
 }
@@ -1358,6 +1434,205 @@ fn read_worktree_blob_content(path_buf: &PathBuf) -> Result<Vec<u8>, DiffError> 
         path: absolute.display().to_string(),
         detail: e.to_string(),
     })
+}
+
+/// Whether the textual patch body is shown for this invocation. The
+/// `--stat`/`--numstat`/`--shortstat`/`--name-only`/`--name-status`/`--summary`/
+/// `-s`/`--check` modes render from the internal diff and bypass external
+/// drivers (matching Git, which never runs `diff.external` for those modes).
+fn patch_body_is_shown(args: &DiffArgs) -> bool {
+    !(args.stat
+        || args.numstat
+        || args.shortstat
+        || args.name_only
+        || args.name_status
+        || args.summary
+        || args.no_patch
+        || args.check)
+}
+
+/// Extract the `old`/`new` file modes for the external-diff protocol from a
+/// file's internal patch headers, defaulting to `100644` for a regular file.
+fn external_diff_modes(raw_diff: &str) -> (String, String) {
+    let mut old_mode = "100644".to_string();
+    let mut new_mode = "100644".to_string();
+    for line in raw_diff.lines() {
+        if let Some(rest) = line.strip_prefix("index ") {
+            // `index <old>..<new> <mode>` carries the (shared) mode for a content
+            // change with an unchanged mode — including a non-100644 file such as
+            // an executable. Mode-change headers below override it.
+            if let Some(mode) = rest.split_whitespace().nth(1) {
+                old_mode = mode.to_string();
+                new_mode = mode.to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("old mode ") {
+            old_mode = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("new mode ") {
+            new_mode = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("new file mode ") {
+            new_mode = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("deleted file mode ") {
+            old_mode = rest.trim().to_string();
+        }
+    }
+    (old_mode, new_mode)
+}
+
+/// The Git index mode for a working-tree path: `120000` for a symlink, `100755`
+/// when the executable bit is set, else `100644`. Used for the external-diff
+/// protocol's working-tree side. Falls back to `100644` if the path is unreadable.
+fn worktree_file_mode(path: &Path) -> String {
+    let absolute = util::workdir_to_absolute(path);
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(meta) if meta.file_type().is_symlink() => "120000".to_string(),
+        Ok(meta) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if meta.permissions().mode() & 0o111 != 0 {
+                    return "100755".to_string();
+                }
+            }
+            let _ = &meta;
+            "100644".to_string()
+        }
+        Err(_) => "100644".to_string(),
+    }
+}
+
+/// Replace each file's patch body with the output of the configured external
+/// diff driver (`diff.external`), following Git's `GIT_EXTERNAL_DIFF` protocol:
+/// the command is invoked as `cmd path old-file old-hex old-mode new-file
+/// new-hex new-mode` and its stdout becomes that file's diff. A missing side
+/// uses `/dev/null` with `.` for its hex and mode; a new side that is the live
+/// working tree reports an all-zero hash (uncommitted), matching Git. The
+/// command is run through the shell so a `diff.external` value carrying its own
+/// arguments works.
+fn apply_external_diff(
+    files: &mut [DiffFileStat],
+    command: &str,
+    first_map: &HashMap<PathBuf, ObjectHash>,
+    second_map: &HashMap<PathBuf, ObjectHash>,
+    worktree_entries: &HashMap<PathBuf, ObjectHash>,
+) -> Result<(), DiffError> {
+    use std::io::Write as _;
+
+    // Materialize one side to a temp file (or `/dev/null` when absent), returning
+    // (file-arg, hex-arg, mode-arg, keep-alive temp). The temp must outlive the
+    // command run, so the caller holds the returned handle.
+    let materialize = |hash: Option<&ObjectHash>,
+                       is_worktree: bool,
+                       wt_path: &Path,
+                       mode: &str|
+     -> Result<(String, String, String, Option<NamedTempFile>), DiffError> {
+        let Some(hash) = hash else {
+            return Ok((
+                "/dev/null".to_string(),
+                ".".to_string(),
+                ".".to_string(),
+                None,
+            ));
+        };
+        let content = if is_worktree {
+            read_worktree_blob_content(&wt_path.to_path_buf())?
+        } else {
+            load_repo_blob_content(hash)?
+        };
+        let mut tmp = NamedTempFile::new().map_err(|e| DiffError::FileRead {
+            path: wt_path.display().to_string(),
+            detail: format!("failed to create external-diff temp file: {e}"),
+        })?;
+        tmp.write_all(&content).map_err(|e| DiffError::FileRead {
+            path: wt_path.display().to_string(),
+            detail: format!("failed to write external-diff temp file: {e}"),
+        })?;
+        let arg = tmp.path().to_string_lossy().into_owned();
+        // For a live working-tree side, read the real mode from disk (accurate for
+        // executables/symlinks). For a tree/index side, use the mode carried in
+        // the internal patch headers. (Libra's internal diff currently renders a
+        // regular-file mode of 100644 even for an executable tree entry, so a
+        // tree-side mode can under-report the executable bit — a pre-existing diff
+        // limitation, not specific to the external driver.)
+        let mode = if is_worktree {
+            worktree_file_mode(wt_path)
+        } else {
+            mode.to_string()
+        };
+        // An uncommitted working-tree side has no object id yet: Git reports an
+        // all-zero hash (of the active hash kind's hex width).
+        let hex = if is_worktree {
+            "0".repeat(hash.to_string().len())
+        } else {
+            hash.to_string()
+        };
+        Ok((arg, hex, mode, Some(tmp)))
+    };
+
+    // A side reads from the working tree iff its blob id matches the worktree
+    // entry — which can be EITHER side once `-R` swaps them.
+    let side_is_worktree = |path: &Path, hash: Option<&ObjectHash>| -> bool {
+        hash.is_some_and(|h| worktree_entries.get(path) == Some(h))
+    };
+
+    let total = files.len();
+    for (index, file) in files.iter_mut().enumerate() {
+        let path = PathBuf::from(&file.path);
+        let (old_mode, new_mode) = external_diff_modes(&file.raw_diff);
+
+        let (old_file, old_hex, old_mode_arg, _old_tmp) = materialize(
+            first_map.get(&path),
+            side_is_worktree(&path, first_map.get(&path)),
+            &path,
+            &old_mode,
+        )?;
+        let (new_file, new_hex, new_mode_arg, _new_tmp) = materialize(
+            second_map.get(&path),
+            side_is_worktree(&path, second_map.get(&path)),
+            &path,
+            &new_mode,
+        )?;
+
+        let result = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{command} \"$@\""))
+            .arg(command)
+            .arg(&file.path)
+            .arg(&old_file)
+            .arg(&old_hex)
+            .arg(&old_mode_arg)
+            .arg(&new_file)
+            .arg(&new_hex)
+            .arg(&new_mode_arg)
+            // Git exports the per-path counters so drivers can show progress.
+            .env("GIT_DIFF_PATH_COUNTER", (index + 1).to_string())
+            .env("GIT_DIFF_PATH_TOTAL", total.to_string())
+            .output()
+            .map_err(|e| DiffError::FileRead {
+                path: file.path.clone(),
+                detail: format!("failed to run external diff driver '{command}': {e}"),
+            })?;
+        // A non-zero exit is fatal in Git; surface it with the driver's stderr.
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(DiffError::FileRead {
+                path: file.path.clone(),
+                detail: format!(
+                    "external diff driver '{command}' failed ({}){}",
+                    result.status,
+                    if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", stderr.trim())
+                    }
+                ),
+            });
+        }
+        // Git emits the external command's stdout verbatim as that file's diff.
+        file.raw_diff = String::from_utf8_lossy(&result.stdout).into_owned();
+        // The internal hunks no longer describe the (external) output.
+        file.hunks = Vec::new();
+    }
+    Ok(())
 }
 
 fn record_diff_content_error(slot: &Rc<RefCell<Option<DiffError>>>, error: DiffError) {
@@ -1496,6 +1771,14 @@ fn render_diff_output(
         // `-s` / `--no-patch`: suppress the patch body (used for status-only
         // checks, typically with `--exit-code`).
         String::new()
+    } else if result.external_diff_applied {
+        // External driver output is emitted verbatim — exact concatenation, no
+        // trailing-newline normalization, no coloring.
+        result
+            .files
+            .iter()
+            .map(|file| file.raw_diff.as_str())
+            .collect()
     } else {
         format_unified_diff(result)
     };
@@ -1531,15 +1814,16 @@ fn render_diff_output(
         || args.shortstat
         || args.summary
         || word_diff_active(args)
+        || result.external_diff_applied
     {
         rendered
     } else {
         maybe_colorize_diff(&rendered, io::stdout().is_terminal())
     };
-    // `-z` records already carry their own NUL terminators, so do not append a
-    // trailing newline in that case.
+    // `-z` records carry their own NUL terminators, and external-driver output is
+    // emitted byte-for-byte, so neither gets an appended trailing newline.
     let z_records = args.null && (args.name_only || args.name_status || args.numstat);
-    if z_records {
+    if z_records || result.external_diff_applied {
         pager.write_str(&rendered)?;
     } else {
         pager.write_str(&format!("{rendered}\n"))?;
@@ -2287,8 +2571,9 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         relative: None,
         no_indent_heuristic: false,
         no_textconv: false,
+        ext_diff: false,
     };
-    let result = run_diff(&args).await?;
+    let result = run_diff(&args, &OutputConfig::default()).await?;
     Ok(format_unified_diff(&result))
 }
 

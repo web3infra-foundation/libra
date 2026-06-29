@@ -49,10 +49,11 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Whitespace check | | `--check` | Instead of the diff, warn about whitespace errors on added lines (trailing whitespace and space-before-tab in the indent), printing `<path>:<line>: <message>` and exiting 2 when any are found. Git's blank-at-eof check is not performed; takes precedence over other output modes. |
 | Reverse | `-R` | `--reverse` | Swap the two sides so additions become deletions and vice-versa (the patch that would undo the change). |
 | Text | `-a` | `--text` | Treat all files as text. Accepted no-op: Libra's diff never detects binary files, so it always shows the content diff (it never prints "Binary files differ"). Distinct from `--binary` (binary-patch format), which is not supported. |
-| No external diff | | `--no-ext-diff` | Disallow external diff drivers. Accepted no-op: Libra has no external diff drivers and always uses its built-in engine. (The external diff tool itself — `--ext-diff` / `diff.external` — is not supported.) |
+| No external diff | | `--no-ext-diff` | Disable the external diff driver for this run, forcing the built-in engine. |
+| External diff | | `--ext-diff` | Allow the configured external diff driver (`diff.external`) to generate each file's patch (it is used by default when configured; this flag is the explicit opposite of `--no-ext-diff`). |
 | No moved-line color | | `--no-color-moved` | Do not color moved lines differently. Accepted no-op: Libra's diff never detects or colors moved lines. (Git's `--color-moved` is not supported.) |
 | No renames | | `--no-renames` | Turn off rename detection. Accepted no-op: Libra's diff never detects renames (a rename shows as delete + create). (Git's `--renames`/`-M` is not supported.) |
-| Relative | | `--relative[=<path>]` | Restrict the diff to a directory and show paths relative to it: with a value, `<path>` is resolved from the current directory; bare `--relative` uses the current directory. Files outside the directory are excluded and the prefix is stripped from displayed paths (also in `--stat` and JSON). |
+| Relative | | `--relative[=<path>]` | Restrict the diff to a directory and show paths relative to it: with a value, `<path>` is resolved from the current directory; bare `--relative` uses the current directory. Files outside the directory are excluded and the prefix is stripped from displayed paths (also in `--stat` and JSON). With an external `diff.external` driver, the file-set restriction still applies but the prefix is NOT stripped from the driver's verbatim output. |
 | No relative | | `--no-relative` | Show full repo-root-relative paths. This is Libra's default; accepted for Git parity and takes precedence over `--relative`. |
 | No indent heuristic | | `--no-indent-heuristic` | Disable the indent heuristic for hunk boundaries. Accepted no-op: Libra's diff does not apply Git's indent heuristic. (Git's `--indent-heuristic` is not supported.) |
 | No textconv | | `--no-textconv` | Do not run a textconv filter to make binary files diffable. Accepted no-op: Libra's diff has no textconv filters and always diffs raw content. (Git's `--textconv` is not supported.) |
@@ -266,8 +267,8 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | Ignore EOL whitespace | `--ignore-space-at-eol` | `--ignore-space-at-eol` | N/A |
 | Ignore blank lines | `--ignore-blank-lines` | `--ignore-blank-lines` | N/A |
 | Color | Auto (terminal detection) | `--color` / `--no-color` | `--color` / `--no-color` |
-| Disallow external diff | `--no-ext-diff` (no-op; always built-in) | `--no-ext-diff` | N/A |
-| External diff tool | Not supported | `--ext-diff` / `diff.external` | `--tool <name>` |
+| Disallow external diff | `--no-ext-diff` (disables the configured `diff.external` driver, forcing the built-in engine) | `--no-ext-diff` | N/A |
+| External diff tool | `diff.external` + `--ext-diff` / `--no-ext-diff` | `diff.external` + `--ext-diff` / `--no-ext-diff` (GIT_EXTERNAL_DIFF protocol; patch output only) | `--tool <name>` |
 | Quiet (exit code only) | `--quiet` | `--quiet` | N/A |
 | JSON output | `--json` | Not supported | N/A |
 | Rename detection | Not supported | `-M` / `--find-renames` | Automatic |

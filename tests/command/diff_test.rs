@@ -2071,3 +2071,118 @@ fn test_diff_word_diff_modes() {
         String::from_utf8_lossy(&check.stderr)
     );
 }
+
+/// `diff.external` routes each file's patch through the configured driver
+/// (GIT_EXTERNAL_DIFF protocol: worktree new side reports an all-zero hash);
+/// `--no-ext-diff` falls back to the internal patch and `--stat` bypasses it.
+#[cfg(unix)]
+#[test]
+fn test_diff_external_driver_replaces_patch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f.txt"), "l1\nl2\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f.txt");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    fs::write(p.join("f.txt"), "l1\nCHANGED\n").unwrap();
+
+    let driver = p.join("driver.sh");
+    fs::write(&driver, "#!/bin/sh\necho \"EXTDIFF $1 newhex=$6\"\n").unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.external", driver.to_str().unwrap()],
+            p,
+        ),
+        "set diff.external",
+    );
+
+    // Patch output is produced by the external driver.
+    let out = run_libra_command(&["diff", "f.txt"], p);
+    assert_cli_success(&out, "external diff");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("EXTDIFF f.txt newhex=000000"),
+        "external driver output replaces the patch (worktree new-hex is zeros): {s}"
+    );
+    assert!(!s.contains("diff --git"), "internal patch suppressed: {s}");
+
+    // `--no-ext-diff` restores the internal patch.
+    let internal = run_libra_command(&["diff", "--no-ext-diff", "f.txt"], p);
+    assert!(
+        String::from_utf8_lossy(&internal.stdout).contains("diff --git a/f.txt"),
+        "--no-ext-diff uses the internal diff"
+    );
+
+    // `--stat` bypasses the external driver entirely.
+    let stat = run_libra_command(&["diff", "--stat", "f.txt"], p);
+    let st = String::from_utf8_lossy(&stat.stdout);
+    assert!(
+        st.contains("f.txt") && !st.contains("EXTDIFF"),
+        "--stat bypasses the external driver: {st}"
+    );
+}
+
+/// `--json` and `--quiet` bypass the external diff driver (structured/suppressed
+/// output uses the internal engine), and a driver that exits non-zero is a fatal
+/// error rather than a silent empty diff.
+#[cfg(unix)]
+#[test]
+fn test_diff_external_driver_gating_and_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f.txt"), "l1\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("f.txt"), "l2\n").unwrap();
+
+    let driver = p.join("d.sh");
+    fs::write(&driver, "#!/bin/sh\necho EXTDIFF\n").unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.external", driver.to_str().unwrap()],
+            p,
+        ),
+        "set diff.external",
+    );
+
+    // --json keeps the internal structured diff (does not run the driver).
+    let json = run_libra_command(&["--json", "diff", "f.txt"], p);
+    let s = String::from_utf8_lossy(&json.stdout);
+    assert!(
+        !s.contains("EXTDIFF"),
+        "JSON mode must not run the external driver: {s}"
+    );
+
+    // A failing driver is fatal.
+    let failing = p.join("fail.sh");
+    fs::write(&failing, "#!/bin/sh\necho boom >&2\nexit 3\n").unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_cli_success(
+        &run_libra_command(
+            &["config", "set", "diff.external", failing.to_str().unwrap()],
+            p,
+        ),
+        "set failing driver",
+    );
+    let out = run_libra_command(&["diff", "f.txt"], p);
+    assert!(
+        !out.status.success(),
+        "a failing external driver must be fatal"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("external diff driver"),
+        "the driver failure is surfaced: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
