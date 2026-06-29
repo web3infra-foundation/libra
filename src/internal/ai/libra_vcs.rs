@@ -80,7 +80,34 @@ pub fn classify_run_libra_vcs_safety(command: &str, args: &[String]) -> SafetyDe
 
     match command {
         "status" => classify_status_safety(args),
-        "diff" => classify_read_command_safety(args, diff_arg_safety),
+        // `libra diff` runs BOTH textconv filters and the external diff driver
+        // (`diff.external`) BY DEFAULT, and each is an arbitrary configured shell
+        // command. Classify the args first (so a writing/executing arg like
+        // `--output`/`--ext-diff` still Denies, and an unknown arg still needs
+        // review); then, even when the args are individually read-only, require
+        // BOTH `--no-textconv` AND `--no-ext-diff` — without them the diff could
+        // run a configured shell command, so it needs human review.
+        "diff" => {
+            let decision = classify_read_command_safety(args, diff_arg_safety);
+            // Only a flag BEFORE the `--` separator counts; after `--` it is a
+            // pathspec and does not disable anything.
+            let disabled_before_sep = |flag: &str| {
+                args.iter()
+                    .take_while(|arg| arg.as_str() != "--")
+                    .any(|arg| arg == flag)
+            };
+            let filters_disabled =
+                disabled_before_sep("--no-textconv") && disabled_before_sep("--no-ext-diff");
+            if decision.rule_name == "libra_vcs.read_only_allowlist" && !filters_disabled {
+                SafetyDecision::needs_human(
+                    "libra_vcs.diff_default_filters",
+                    "Libra VCS diff runs textconv and external diff drivers by default, which can execute configured shell commands; pass --no-textconv --no-ext-diff for a read-only diff",
+                    BlastRadius::Repository,
+                )
+            } else {
+                decision
+            }
+        }
         "log" => classify_read_command_safety(args, log_arg_safety),
         "show" => classify_read_command_safety(args, show_arg_safety),
         "show-ref" => classify_read_command_safety(args, show_ref_arg_safety),

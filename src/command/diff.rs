@@ -278,10 +278,20 @@ pub struct DiffArgs {
     #[clap(long = "no-indent-heuristic")]
     pub no_indent_heuristic: bool,
 
-    /// Do not run a textconv filter to make binary files diffable. Accepted for
-    /// Git parity and is a no-op: Libra's diff has no textconv filters and
-    /// always diffs the raw content. (Git's `--textconv` is not exposed.)
-    #[clap(long = "no-textconv")]
+    /// Run textconv filters to make content human-diffable: a file whose
+    /// `diff=<driver>` attribute (in `.libra_attributes`) names a driver with a
+    /// `diff.<driver>.textconv` command has each side converted by that command
+    /// before diffing. Like Git, textconv is ON by default for `diff`; this flag
+    /// is the explicit opposite of `--no-textconv`. The resulting patch is for
+    /// reading, not applying.
+    #[clap(long = "textconv", overrides_with = "no_textconv")]
+    pub textconv: bool,
+
+    /// Do not run textconv filters; diff the raw content (countermands an earlier
+    /// `--textconv`). Textconv is otherwise on by default when a file's
+    /// `diff=<driver>` attribute names a driver with a `diff.<driver>.textconv`
+    /// command configured.
+    #[clap(long = "no-textconv", overrides_with = "textconv")]
     pub no_textconv: bool,
 
     /// Allow an external diff driver (`diff.external`) to generate the patch.
@@ -370,6 +380,9 @@ pub(crate) enum DiffError {
 
     #[error("invalid argument to color-moved: '{0}'")]
     InvalidColorMoved(String),
+
+    #[error("textconv filter '{command}' failed: {detail}")]
+    TextconvFailed { command: String, detail: String },
 }
 
 impl From<DiffError> for CliError {
@@ -408,6 +421,11 @@ impl From<DiffError> for CliError {
             DiffError::InvalidColorMoved(_) => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("expected no, default, plain, blocks, zebra, or dimmed-zebra"),
+            DiffError::TextconvFailed { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint(
+                    "check the diff.<driver>.textconv command, or pass --no-textconv to diff raw content",
+                ),
         }
     }
 }
@@ -1103,6 +1121,63 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         );
     }
 
+    // Textconv (`--textconv`, on by default unless `--no-textconv`): re-diff the
+    // output of each file's `diff.<driver>.textconv` command instead of the raw
+    // bytes. Skipped under `--check` (it scans raw added lines) and when an
+    // external driver is active (that takes precedence). The post-pass below then
+    // leaves textconv'd files alone.
+    let textconv_paths: std::collections::HashSet<String> =
+        if !args.no_textconv && !args.check && external_command.is_none() {
+            let drivers = extract_diff_drivers(&path::attributes());
+            if drivers.is_empty() {
+                std::collections::HashSet::new()
+            } else {
+                let mut command_cache: HashMap<String, Option<String>> = HashMap::new();
+                // Per file: the (old-side, new-side) textconv command. A rename's
+                // old side is at `rename_from` and may resolve a different driver
+                // than the new side (Git resolves textconv per blob/path), so each
+                // side is looked up independently.
+                let mut path_commands: HashMap<String, (Option<String>, Option<String>)> =
+                    HashMap::new();
+                for file in &files {
+                    let new_path = PathBuf::from(&file.path);
+                    let old_path = file
+                        .rename_from
+                        .as_deref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| new_path.clone());
+                    let new_driver = diff_driver_for_path(&drivers, &new_path);
+                    let new_command =
+                        resolve_textconv_command(new_driver.as_deref(), &mut command_cache).await;
+                    let old_command = if old_path == new_path {
+                        new_command.clone()
+                    } else {
+                        let old_driver = diff_driver_for_path(&drivers, &old_path);
+                        resolve_textconv_command(old_driver.as_deref(), &mut command_cache).await
+                    };
+                    if old_command.is_some() || new_command.is_some() {
+                        path_commands.insert(file.path.clone(), (old_command, new_command));
+                    }
+                }
+                if path_commands.is_empty() {
+                    std::collections::HashSet::new()
+                } else {
+                    apply_textconv(
+                        &mut files,
+                        &path_commands,
+                        &first_map,
+                        &second_map,
+                        &ext_worktree_entries,
+                        regen_context,
+                        ws_normalize,
+                        args.ignore_blank_lines,
+                    )?
+                }
+            }
+        } else {
+            std::collections::HashSet::new()
+        };
+
     // `--check` (whitespace-error scan) ignores the whitespace-ignore flags and
     // operates on git_internal's original diff — matching Git, where
     // `diff --check -w`/`-b`/`--ignore-space-at-eol` still reports trailing-
@@ -1128,9 +1203,10 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         };
         if rediffs {
             files.retain_mut(|file| {
-                // Rename entries already carry their own rendered content diff;
-                // leave them untouched by the whitespace/context re-diff.
-                if file.status == "renamed" {
+                // Rename and textconv entries already carry their final rendered
+                // body (textconv re-diffs the converted content at this context),
+                // so leave them untouched by the whitespace/context re-diff.
+                if file.status == "renamed" || textconv_paths.contains(&file.path) {
                     return true;
                 }
                 // Binary / no-hunk diffs have no body to re-diff: keep as-is.
@@ -1188,8 +1264,9 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
             for file in files.iter_mut() {
                 // Rename entries already rendered their content diff at the
                 // requested context in `build_rename_entry`; do not re-diff them
-                // (their old side is at `rename_from`, not `file.path`).
-                if file.status == "renamed" {
+                // (their old side is at `rename_from`, not `file.path`). Textconv'd
+                // files were likewise already re-diffed at this context.
+                if file.status == "renamed" || textconv_paths.contains(&file.path) {
                     continue;
                 }
                 let path = PathBuf::from(&file.path);
@@ -1972,6 +2049,281 @@ fn build_rename_entry(
         rename_from: Some(old_path.to_string()),
         similarity: Some(percent),
     }
+}
+
+/// Parse `.libra_attributes` for `diff` attributes, returning `(pattern, value)`
+/// pairs in file order. `value` is `Some(driver)` for `diff=<driver>` and `None`
+/// for `-diff` / `!diff` / a bare `diff` (which unset or reset the driver, so a
+/// later such entry clears an earlier `diff=<driver>` under last-match-wins).
+fn extract_diff_drivers(attr_path: &Path) -> Vec<(String, Option<String>)> {
+    let Ok(content) = std::fs::read_to_string(attr_path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tokens = line.split_whitespace();
+        let Some(pattern) = tokens.next() else {
+            continue;
+        };
+        for token in tokens {
+            if let Some(driver) = token.strip_prefix("diff=") {
+                if !driver.is_empty() {
+                    out.push((pattern.to_string(), Some(driver.to_string())));
+                }
+            } else if token == "diff" || token == "-diff" || token == "!diff" {
+                // Set/unset/unspecified: no named driver → clears any earlier one.
+                out.push((pattern.to_string(), None));
+            }
+        }
+    }
+    out
+}
+
+/// The diff driver assigned to `path` by `.libra_attributes` — the LAST matching
+/// `diff` attribute wins (Git's attribute semantics); a matching unset/reset
+/// (`-diff`/`!diff`/bare `diff`) clears any earlier `diff=<driver>`, so this
+/// returns `None` for it.
+fn diff_driver_for_path(drivers: &[(String, Option<String>)], path: &Path) -> Option<String> {
+    let workdir = util::working_dir();
+    let mut result = None;
+    for (pattern, value) in drivers {
+        let mut builder = ::ignore::gitignore::GitignoreBuilder::new(&workdir);
+        if builder.add_line(None, pattern).is_err() {
+            continue;
+        }
+        if let Ok(gi) = builder.build()
+            && matches!(gi.matched(path, false), ::ignore::Match::Ignore(_))
+        {
+            result = value.clone();
+        }
+    }
+    result
+}
+
+/// Run a `diff.<driver>.textconv` command on `content`: Git writes the blob to a
+/// temp file and passes its path as the sole argument; the command's stdout is
+/// the converted text. A temp-file, spawn, or non-zero-exit failure is a fatal
+/// error (matching Git, which dies with "unable to read files to diff" rather
+/// than silently diffing raw bytes).
+fn run_textconv(command: &str, content: &[u8]) -> Result<Vec<u8>, DiffError> {
+    use std::io::Write as _;
+    let fail = |detail: String| DiffError::TextconvFailed {
+        command: command.to_string(),
+        detail,
+    };
+    let mut tmp =
+        NamedTempFile::new().map_err(|e| fail(format!("could not create temp file: {e}")))?;
+    tmp.write_all(content)
+        .map_err(|e| fail(format!("could not write temp file: {e}")))?;
+    let path = tmp.path().to_string_lossy().into_owned();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{command} \"$@\""))
+        .arg(command)
+        .arg(&path)
+        .output()
+        .map_err(|e| fail(format!("could not run command: {e}")))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(fail(format!(
+            "command exited with {}{}",
+            output.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        )))
+    }
+}
+
+/// Resolve a diff driver name to its `diff.<driver>.textconv` command (cached by
+/// driver). `None` driver or unset/empty command → `None`.
+async fn resolve_textconv_command(
+    driver: Option<&str>,
+    cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    let driver = driver?;
+    if let Some(cached) = cache.get(driver) {
+        return cached.clone();
+    }
+    let resolved = ConfigKv::get(&format!("diff.{driver}.textconv"))
+        .await
+        .ok()
+        .flatten()
+        .map(|entry| entry.value)
+        .filter(|cmd| !cmd.trim().is_empty());
+    cache.insert(driver.to_string(), resolved.clone());
+    resolved
+}
+
+/// Apply textconv filters (`--textconv`, on by default): for each file with a
+/// per-side `(old_command, new_command)` entry, re-diff the command's output for
+/// the old and new sides instead of the raw bytes, keeping the file's existing
+/// patch header (including a rename's `similarity`/`rename from`/`to`, whose old
+/// side lives at `rename_from` and may resolve a DIFFERENT driver than the new
+/// side). A side with no command is diffed raw. A modification whose converted
+/// content is unchanged is dropped (like a whitespace-only change);
+/// created/deleted/renamed files keep their header. Returns the set of textconv'd
+/// paths so the later context/whitespace post-pass skips them. Blob read failures
+/// surface as errors (not empty content).
+#[allow(clippy::too_many_arguments)]
+fn apply_textconv(
+    files: &mut Vec<DiffFileStat>,
+    path_commands: &HashMap<String, (Option<String>, Option<String>)>,
+    first_map: &HashMap<PathBuf, ObjectHash>,
+    second_map: &HashMap<PathBuf, ObjectHash>,
+    worktree_entries: &HashMap<PathBuf, ObjectHash>,
+    context: usize,
+    ws_normalize: Option<fn(&str) -> String>,
+    ignore_blank: bool,
+) -> Result<std::collections::HashSet<String>, DiffError> {
+    // `None` = the side is absent from its map (a created/deleted side) and must
+    // stay raw-empty — NOT fed through textconv (a converter that emits text for
+    // empty input would fabricate hunks). `Some` = a present blob; a mapped blob
+    // that fails to load is a real error and propagates.
+    let load =
+        |path: &str, map: &HashMap<PathBuf, ObjectHash>| -> Result<Option<Vec<u8>>, DiffError> {
+            let pb = PathBuf::from(path);
+            let Some(hash) = map.get(&pb) else {
+                return Ok(None);
+            };
+            let bytes = if worktree_entries.get(&pb) == Some(hash) {
+                read_worktree_blob_content(&pb)?
+            } else {
+                load_repo_blob_content(hash)?
+            };
+            Ok(Some(bytes))
+        };
+    // Convert one side with its own driver, or pass the raw bytes through when
+    // that side has no driver (Git resolves textconv per blob/path).
+    let convert = |cmd: Option<&str>, raw: &[u8]| -> Result<String, DiffError> {
+        match cmd {
+            Some(cmd) => Ok(String::from_utf8_lossy(&run_textconv(cmd, raw)?).into_owned()),
+            None => Ok(String::from_utf8_lossy(raw).into_owned()),
+        }
+    };
+    let regen = |old: &str, new: &str| -> String {
+        if ignore_blank {
+            match ws_normalize {
+                Some(n) => compute_unified_hunks_ignore_blank_normalized(old, new, context, n),
+                None => compute_unified_hunks_ignore_blank(old, new, context),
+            }
+        } else if let Some(n) = ws_normalize {
+            compute_unified_hunks_normalized(old, new, context, n)
+        } else {
+            compute_unified_hunks(old, new, context)
+        }
+    };
+
+    // Pass 1: load + convert both sides (so a read error can propagate — this
+    // cannot be done inside `retain_mut`, whose closure returns `bool`).
+    let mut converted: HashMap<String, (String, String)> = HashMap::new();
+    for file in files.iter() {
+        let Some((old_cmd, new_cmd)) = path_commands.get(&file.path) else {
+            continue;
+        };
+        // Over-large files are emitted as a `<LargeFile>` marker LINE (no content
+        // was loaded for diffing); leave them as-is rather than loading/converting
+        // a potentially huge blob. Match the sentinel as a line PREFIX — a normal
+        // hunk line containing that text is `+`/`-`/space-prefixed, so it never
+        // starts a line and is correctly still converted.
+        if file
+            .raw_diff
+            .lines()
+            .any(|line| line.starts_with("<LargeFile>"))
+        {
+            continue;
+        }
+        // A rename's old side is at `rename_from`; both sides of anything else are
+        // at `file.path`. Each PRESENT side is converted with its OWN driver's
+        // command; an absent side stays empty (no textconv on a missing blob).
+        let old_path = file.rename_from.as_deref().unwrap_or(&file.path);
+        let old_text = match load(old_path, first_map)? {
+            Some(bytes) => convert(old_cmd.as_deref(), &bytes)?,
+            None => String::new(),
+        };
+        let new_text = match load(&file.path, second_map)? {
+            Some(bytes) => convert(new_cmd.as_deref(), &bytes)?,
+            None => String::new(),
+        };
+        converted.insert(file.path.clone(), (old_text, new_text));
+    }
+
+    // Pass 2: splice the re-diffed body (no fallible work).
+    let mut done = std::collections::HashSet::new();
+    files.retain_mut(|file| {
+        let Some((old_text, new_text)) = converted.get(&file.path) else {
+            return true;
+        };
+        let body = regen(old_text, new_text);
+        done.insert(file.path.clone());
+        // An exact rename has no content hunk; everything else does (Libra emits a
+        // hunk for every changed file).
+        let has_body = file.raw_diff.contains("\n@@ ");
+        if body.trim().is_empty() {
+            if !has_body {
+                // Exact rename whose converted content is also identical: nothing
+                // to add, keep the rename header.
+                return true;
+            }
+            // Converted content is identical: drop a pure modification, but keep a
+            // created/deleted/renamed entry (header only, zero counts).
+            let keep_header = matches!(file.status.as_str(), "added" | "deleted" | "renamed");
+            if !keep_header {
+                return false;
+            }
+            file.insertions = 0;
+            file.deletions = 0;
+            file.hunks = Vec::new();
+            file.raw_diff = strip_unified_diff_body(&file.raw_diff);
+            return true;
+        }
+        let (insertions, deletions) = count_body_changes(&body);
+        file.insertions = insertions;
+        file.deletions = deletions;
+        if has_body {
+            file.raw_diff = splice_unified_body(&file.raw_diff, &body);
+        } else if file.status != "renamed" {
+            // The only no-hunk entry that can reach here is an exact rename (large
+            // files were skipped in pass 1). Anything else: leave it untouched.
+            return true;
+        } else {
+            // An exact rename whose converted sides DIFFER (e.g. the old/new paths
+            // resolve different drivers) has no body yet — synthesize the
+            // `index`/`---`/`+++`/hunk onto the existing rename header.
+            let old_path = file
+                .rename_from
+                .clone()
+                .unwrap_or_else(|| file.path.clone());
+            let abbrev = |map: &HashMap<PathBuf, ObjectHash>, p: &str| {
+                map.get(&PathBuf::from(p))
+                    .map(|h| h.to_string()[..7].to_string())
+                    .unwrap_or_else(|| "0000000".to_string())
+            };
+            let mut raw = file.raw_diff.clone();
+            if !raw.ends_with('\n') {
+                raw.push('\n');
+            }
+            raw.push_str(&format!(
+                "index {}..{} 100644\n--- a/{old_path}\n+++ b/{}\n",
+                abbrev(first_map, &old_path),
+                abbrev(second_map, &file.path),
+                file.path,
+            ));
+            raw.push_str(&body);
+            file.raw_diff = raw;
+        }
+        file.hunks = parse_diff_hunks(&file.raw_diff);
+        true
+    });
+    Ok(done)
 }
 
 /// Replace each file's patch body with the output of the configured external
@@ -3135,6 +3487,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         no_relative: false,
         relative: None,
         no_indent_heuristic: false,
+        textconv: false,
         no_textconv: false,
         ext_diff: false,
     };

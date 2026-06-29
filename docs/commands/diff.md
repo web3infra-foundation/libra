@@ -58,7 +58,8 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Relative | | `--relative[=<path>]` | Restrict the diff to a directory and show paths relative to it: with a value, `<path>` is resolved from the current directory; bare `--relative` uses the current directory. Files outside the directory are excluded and the prefix is stripped from displayed paths (also in `--stat` and JSON). With an external `diff.external` driver, the file-set restriction still applies but the prefix is NOT stripped from the driver's verbatim output. |
 | No relative | | `--no-relative` | Show full repo-root-relative paths. This is Libra's default; accepted for Git parity and takes precedence over `--relative`. |
 | No indent heuristic | | `--no-indent-heuristic` | Disable the indent heuristic for hunk boundaries. Accepted no-op: Libra's diff does not apply Git's indent heuristic. (Git's `--indent-heuristic` is not supported.) |
-| No textconv | | `--no-textconv` | Do not run a textconv filter to make binary files diffable. Accepted no-op: Libra's diff has no textconv filters and always diffs raw content. (Git's `--textconv` is not supported.) |
+| Textconv | | `--textconv` | Run textconv filters to make content human-diffable: a file whose `diff=<driver>` attribute (in the root `.libra_attributes`) names a driver with a configured `diff.<driver>.textconv` command has each side converted by that command before diffing. On by default for `diff` (like Git); this flag is the explicit opposite of `--no-textconv`. The resulting patch is for reading, not applying. A failing textconv command is a fatal error; textconv is not applied under `--check` or when `diff.external` is active; only the root `.libra_attributes` is consulted. |
+| No textconv | | `--no-textconv` | Diff the raw content, skipping any textconv filter (countermands an earlier `--textconv`). |
 | JSON | | `--json` | Emit structured JSON output. |
 | Quiet | | `--quiet` | Suppress stdout; exit code 1 if differences exist, 0 otherwise. When combined with `--output`, the file is still written. |
 
@@ -289,6 +290,8 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | Quiet (exit code only) | `--quiet` | `--quiet` | N/A |
 | JSON output | `--json` | Not supported | N/A |
 | Rename detection | `-M[<n>]` / `--find-renames[=<n>]` (similarity matches Git for typical content; opt-in, not auto-enabled via `diff.renames`) | `-M` / `--find-renames` | Automatic |
+| Moved-line color | `--color-moved[=<mode>]` / `--no-color-moved` (`plain` semantics; block modes approximated) | `--color-moved[=<mode>]` | N/A |
+| Textconv | `--textconv` / `--no-textconv` (on by default; `.libra_attributes` `diff=<driver>` + `diff.<driver>.textconv`) | `--textconv` / `--no-textconv` | N/A |
 | Copy detection | Not supported | `-C` / `--find-copies` | N/A |
 | Three-dot diff | Not supported | `<A>...<B>` (merge base) | N/A |
 

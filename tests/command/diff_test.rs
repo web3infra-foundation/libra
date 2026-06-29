@@ -2311,6 +2311,219 @@ fn test_diff_rename_threshold_and_no_renames() {
     );
 }
 
+/// Textconv: a file whose `diff=<driver>` attribute names a driver with a
+/// `diff.<driver>.textconv` command has each side converted before diffing. It is
+/// on by default; `--no-textconv` diffs the raw bytes.
+#[cfg(unix)]
+#[test]
+fn test_diff_textconv() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    // `*.dat` files diff through the `upper` driver, which uppercases content.
+    fs::write(p.join(".libra_attributes"), "*.dat diff=upper\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.upper.textconv", "tr a-z A-Z <"], p),
+        "set textconv",
+    );
+    fs::write(p.join("f.dat"), "hello\nworld\nfoo\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "f.dat", ".libra_attributes"], p),
+        "add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("f.dat"), "hello\nplanet\nfoo\n").unwrap();
+
+    // Default: the diff is of the uppercased (textconv'd) content.
+    let conv = run_libra_command(&["diff", "f.dat"], p);
+    let cs = String::from_utf8_lossy(&conv.stdout);
+    assert!(
+        cs.contains(" HELLO") && cs.contains("-WORLD") && cs.contains("+PLANET"),
+        "textconv converts both sides before diffing: {cs}"
+    );
+
+    // `--no-textconv`: raw content.
+    let raw = run_libra_command(&["diff", "--no-textconv", "f.dat"], p);
+    let rs = String::from_utf8_lossy(&raw.stdout);
+    assert!(
+        rs.contains("-world") && rs.contains("+planet") && !rs.contains("PLANET"),
+        "--no-textconv diffs the raw bytes: {rs}"
+    );
+
+    // A later `-diff` clears the driver (Git's last-match-wins): `z.dat` is not
+    // textconv'd even though `*.dat diff=upper` would otherwise match it.
+    fs::write(
+        p.join(".libra_attributes"),
+        "*.dat diff=upper\nz.dat -diff\n",
+    )
+    .unwrap();
+    fs::write(p.join("z.dat"), "low\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", ".libra_attributes", "z.dat"], p),
+        "add z",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "z", "--no-verify"], p),
+        "commit z",
+    );
+    fs::write(p.join("z.dat"), "high\n").unwrap();
+    let cleared = run_libra_command(&["diff", "z.dat"], p);
+    let zs = String::from_utf8_lossy(&cleared.stdout);
+    assert!(
+        zs.contains("-low") && zs.contains("+high") && !zs.contains("LOW"),
+        "a later -diff clears the textconv driver: {zs}"
+    );
+
+    // A detected rename of a textconv'd file converts its content body too.
+    fs::write(p.join("r.dat"), "aa\nbb\ncc\ndd\nee\nff\ngg\nhh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r.dat"], p), "add r");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "r", "--no-verify"], p),
+        "commit r",
+    );
+    fs::remove_file(p.join("r.dat")).unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r.dat"], p), "stage r deletion");
+    fs::write(p.join("r2.dat"), "aa\nbb\nXX\ndd\nee\nff\ngg\nhh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r2.dat"], p), "add r2");
+    let rn = run_libra_command(&["diff", "-M", "--cached", "r.dat", "r2.dat"], p);
+    let rns = String::from_utf8_lossy(&rn.stdout);
+    assert!(
+        rns.contains("rename from r.dat") && rns.contains("-CC") && rns.contains("+XX"),
+        "a renamed textconv'd file has its body converted, keeping rename headers: {rns}"
+    );
+
+    // A failing textconv command is fatal (like Git's "unable to read files to
+    // diff"), not a silent fall-back to raw bytes.
+    fs::write(
+        p.join(".libra_attributes"),
+        "*.dat diff=upper\nb.dat diff=bad\n",
+    )
+    .unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.bad.textconv", "false"], p),
+        "set failing textconv",
+    );
+    fs::write(p.join("b.dat"), "x\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", ".libra_attributes", "b.dat"], p),
+        "add b",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "b", "--no-verify"], p),
+        "commit b",
+    );
+    fs::write(p.join("b.dat"), "y\n").unwrap();
+    let failing = run_libra_command(&["diff", "b.dat"], p);
+    assert!(
+        !failing.status.success()
+            && String::from_utf8_lossy(&failing.stderr).contains("textconv filter"),
+        "a failing textconv command is fatal: {}",
+        String::from_utf8_lossy(&failing.stderr)
+    );
+
+    // A rename across drivers resolves each side independently: `*.foo`
+    // uppercases, `*.bar` has no driver, so a `old.foo -> new.bar` rename shows
+    // the uppercased old side and the raw new side.
+    fs::write(p.join(".libra_attributes"), "*.foo diff=upper\n").unwrap();
+    fs::write(p.join("old.foo"), "aa\nbb\ncc\ndd\nee\nff\ngg\nhh\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", ".libra_attributes", "old.foo"], p),
+        "add foo",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "foo", "--no-verify"], p),
+        "commit foo",
+    );
+    fs::remove_file(p.join("old.foo")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "old.foo"], p),
+        "stage foo deletion",
+    );
+    fs::write(p.join("new.bar"), "aa\nbb\nzz\ndd\nee\nff\ngg\nhh\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "new.bar"], p), "add bar");
+    let xr = run_libra_command(&["diff", "-M", "--cached", "old.foo", "new.bar"], p);
+    let xrs = String::from_utf8_lossy(&xr.stdout);
+    assert!(
+        xrs.contains("rename from old.foo") && xrs.contains("-AA") && xrs.contains("+zz"),
+        "per-side drivers: old side uppercased, new side raw: {xrs}"
+    );
+
+    // An EXACT rename (identical raw bytes → no content hunk) across differing
+    // drivers must still synthesize a body when the converted sides differ.
+    fs::write(p.join("ex.foo"), "kk\nll\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "ex.foo"], p), "add ex.foo");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "ex", "--no-verify"], p),
+        "commit ex",
+    );
+    fs::remove_file(p.join("ex.foo")).unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "ex.foo"], p),
+        "stage ex deletion",
+    );
+    fs::write(p.join("ex.bar"), "kk\nll\n").unwrap(); // identical raw content
+    assert_cli_success(&run_libra_command(&["add", "ex.bar"], p), "add ex.bar");
+    let exact = run_libra_command(&["diff", "-M", "--cached", "ex.foo", "ex.bar"], p);
+    let exs = String::from_utf8_lossy(&exact.stdout);
+    assert!(
+        exs.contains("similarity index 100%") && exs.contains("-KK") && exs.contains("+kk"),
+        "exact rename across drivers synthesizes a converted body: {exs}"
+    );
+
+    // A textconv whose output is non-empty for EMPTY input must not fabricate
+    // content for the missing side of an added file.
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.pre.textconv", "sed s/^/L:/"], p),
+        "set prefix textconv",
+    );
+    fs::write(p.join(".libra_attributes"), "*.pre diff=pre\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", ".libra_attributes"], p),
+        "add attrs",
+    );
+    fs::write(p.join("n.pre"), "one\ntwo\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "n.pre"], p), "add n.pre");
+    let added = run_libra_command(&["diff", "--cached", "n.pre"], p);
+    let adds = String::from_utf8_lossy(&added.stdout);
+    assert!(
+        adds.contains("+L:one") && !adds.lines().any(|l| l.starts_with("-L:")),
+        "an added file's absent old side is not textconv'd into fake removals: {adds}"
+    );
+}
+
+/// A normal textconv'd file whose CONTENT contains a literal `<LargeFile>` line
+/// must still be converted — the over-large sentinel is only matched as a line
+/// prefix, and hunk content is `+`/`-`/space-prefixed, so it never matches.
+#[cfg(unix)]
+#[test]
+fn test_diff_textconv_literal_largefile_content() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join(".libra_attributes"), "*.dat diff=upper\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["config", "set", "diff.upper.textconv", "tr a-z A-Z <"], p),
+        "set textconv",
+    );
+    fs::write(p.join("x.dat"), "<LargeFile>abc\nkeep\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "x.dat", ".libra_attributes"], p),
+        "add",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    fs::write(p.join("x.dat"), "<LargeFile>xyz\nkeep\n").unwrap();
+    let out = run_libra_command(&["diff", "x.dat"], p);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("-<LARGEFILE>ABC") && s.contains("+<LARGEFILE>XYZ"),
+        "a literal <LargeFile> content line is still textconv'd: {s}"
+    );
+}
+
 /// `--color-moved` colors moved lines (removed in one place, added in another)
 /// with a distinct color under `--color=always`; `--color=never`, omitting the
 /// flag, or `--no-color-moved` leaves them as normal add/remove colors. An

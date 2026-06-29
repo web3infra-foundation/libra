@@ -48,7 +48,19 @@ fn ai_libra_vcs_safety_allows_read_only_parameter_combinations() {
     for (command, args) in [
         ("status", vec!["--json"]),
         ("status", vec!["--porcelain", "v2", "--untracked-files=all"]),
-        ("diff", vec!["--stat", "--", "src/main.rs"]),
+        // A diff is read-only only with BOTH `--no-textconv` and `--no-ext-diff`
+        // (textconv and the external diff driver both run configured shell
+        // commands by default).
+        (
+            "diff",
+            vec![
+                "--no-textconv",
+                "--no-ext-diff",
+                "--stat",
+                "--",
+                "src/main.rs",
+            ],
+        ),
         ("log", vec!["--oneline", "--max-count=5"]),
         ("log", vec!["--patch-with-stat", "--max-count=1"]),
         ("show", vec!["HEAD", "--stat"]),
@@ -88,6 +100,21 @@ fn ai_libra_vcs_safety_requires_human_for_recoverable_or_unknown_combinations() 
             "branch",
             vec!["feat/local-spike"],
             "libra_vcs.recoverable_mutation",
+        ),
+        // A diff WITHOUT both filter-disabling flags may run a configured textconv
+        // or external-diff shell command.
+        ("diff", vec!["--stat"], "libra_vcs.diff_default_filters"),
+        // `--no-textconv` alone is not enough — `diff.external` still runs.
+        (
+            "diff",
+            vec!["--no-textconv", "--stat"],
+            "libra_vcs.diff_default_filters",
+        ),
+        // Filter-disabling flags AFTER `--` are pathspecs, not the flags.
+        (
+            "diff",
+            vec!["--stat", "--", "--no-textconv", "--no-ext-diff"],
+            "libra_vcs.diff_default_filters",
         ),
         ("ls-files", vec!["-z"], "libra_vcs.unknown_args"),
         // A grouped short containing a non-allowlisted letter (`z`) stays unknown.
