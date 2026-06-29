@@ -34,7 +34,7 @@ libra restore --ignore-unmerged [--source <tree-ish>] <pathspec>...
 | Worktree | `-W` | `--worktree` | 恢复工作树。当未给出 `--staged` 时这是默认值。 |
 | Ours | `-2` | `--ours` | 对未合并路径，将冲突 stage 2（我方）写入工作树。与 `--theirs`、`--source`、`--staged`、`--ignore-unmerged` 互斥。 |
 | Theirs | `-3` | `--theirs` | 对未合并路径，将冲突 stage 3（对方）写入工作树。互斥关系同 `--ours`。 |
-| Merge | | `--merge` | 对未合并路径，从索引 stage 重建冲突标记写回工作树（ours=stage 2、theirs=stage 3），索引保持未合并。Libra 写整文件 `ours`/`theirs` 标记（与 `libra merge` 的整文件标记同形、标签为通用 `ours`/`theirs`），非 Git 行级 3-way。互斥关系同 `--ours`。 |
+| Merge | | `--merge` | 对未合并路径，从索引 stage 重建冲突标记写回工作树（ours=stage 2、theirs=stage 3），索引保持未合并。Libra 写整文件 `ours`/`theirs` 标记（标签为通用 `ours`/`theirs`），非 Git 行级 3-way。（注：`libra merge`/`cherry-pick` 现经三方合并引擎写行级标记；restore 的索引-stage 重建仍为整文件。）互斥关系同 `--ours`。 |
 | 冲突风格 | | `--conflict <style>` | 隐含 `--merge`。`merge`（默认）写 `ours`/`theirs` 块；`diff3` 额外含 base 块（stage 1）。`zdiff3` 不支持。 |
 | 忽略未合并 | | `--ignore-unmerged` | 跳过未合并路径而非报错；其余路径仍正常恢复。 |
 | 从文件读取 pathspec | | `--pathspec-from-file <FILE>` | 从 `<FILE>` 读取 pathspec（每行一个，`-` 读 stdin）。给出此选项时，文件内容会替换位置 pathspec（此时无需再提供位置参数）。 |
@@ -101,7 +101,7 @@ libra restore --theirs file.txt
 libra restore --ignore-unmerged --source HEAD .
 ```
 
-> **尚未支持：** Git 的行级 3-way 冲突标记与 `zdiff3` 风格（Libra 重建整文件 `ours`/`theirs` 标记，与 `libra merge` 整文件标记同形），以及 `-p` / `--patch` 仍被推迟。参见 [COMPATIBILITY.md](../../../COMPATIBILITY.md)。
+> **尚未支持：** Git 的行级 3-way 冲突标记与 `zdiff3` 风格（Libra 从索引 stage 重建整文件 `ours`/`theirs` 标记——不同于现已行级的 `libra merge`/`cherry-pick`），以及 `-p` / `--patch` 仍被推迟。参见 [COMPATIBILITY.md](../../../COMPATIBILITY.md)。
 
 ## 常用命令
 

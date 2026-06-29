@@ -1454,3 +1454,58 @@ fn test_merge_verify_signatures_accepts_signed_rejects_unsigned() {
         "signed tip whose message contains the END marker still verifies",
     );
 }
+
+/// A three-way `merge` conflict on one line of a multi-line file produces
+/// LINE-LEVEL markers (matching Git): shared context lines stay OUTSIDE the
+/// `<<<<<<< / ======= / >>>>>>>` region. Fails under the old whole-file
+/// presentation (which enclosed every line of each side).
+#[test]
+fn test_merge_conflict_is_line_level() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+
+    commit_file(p, "shared.txt", "top\nl1\nl2\nl3\nbottom\n", "base shared");
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "co feature",
+    );
+    commit_file(
+        p,
+        "shared.txt",
+        "top\nl1\nFEATURE\nl3\nbottom\n",
+        "feature edit",
+    );
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+    commit_file(p, "shared.txt", "top\nl1\nMAIN\nl3\nbottom\n", "main edit");
+
+    let out = run_libra_command(&["merge", "feature"], p);
+    assert_eq!(out.status.code(), Some(128), "merge conflict exits 128");
+    let body = std::fs::read_to_string(p.join("shared.txt")).expect("read conflict");
+
+    assert!(
+        body.starts_with("top\nl1\n<<<<<<< HEAD\n"),
+        "shared prefix precedes the markers: {body:?}"
+    );
+    assert!(
+        body.ends_with("l3\nbottom\n"),
+        "shared suffix follows the markers: {body:?}"
+    );
+    let ours = body
+        .split_once("<<<<<<< HEAD\n")
+        .and_then(|(_, rest)| rest.split_once("\n======="))
+        .map(|(mid, _)| mid)
+        .expect("conflict region present");
+    assert_eq!(
+        ours, "MAIN",
+        "ours hunk is just the diverging line: {body:?}"
+    );
+    assert!(
+        body.contains("\nFEATURE\n"),
+        "theirs hunk present: {body:?}"
+    );
+    assert!(
+        !ours.contains("top") && !ours.contains("bottom"),
+        "shared lines must not be inside the conflict region: {body:?}"
+    );
+}

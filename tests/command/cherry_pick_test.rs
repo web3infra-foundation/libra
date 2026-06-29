@@ -2246,3 +2246,71 @@ fn cherry_pick_empty_drop_survives_conflict_resume() {
         "state cleared after resume"
     );
 }
+
+/// A modify/modify conflict on one line of a multi-line file produces LINE-LEVEL
+/// conflict markers (matching Git): the shared context lines stay OUTSIDE the
+/// `<<<<<<< / ======= / >>>>>>>` region, which only encloses the diverging line.
+/// This would fail under the old whole-file presentation (which wrapped every
+/// line of each side inside the markers).
+#[test]
+fn cherry_pick_conflict_is_line_level() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("shared.txt"), "top\nl1\nl2\nl3\nbottom\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    assert_cli_success(
+        &run_libra_command(&["switch", "-c", "feature"], p),
+        "branch",
+    );
+    std::fs::write(p.join("shared.txt"), "top\nl1\nFEATURE\nl3\nbottom\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add feat");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feature edit", "--no-verify"], p),
+        "commit feat",
+    );
+    let feat = cp_rev_parse(p, "HEAD");
+    assert_cli_success(&run_libra_command(&["switch", "main"], p), "switch main");
+    std::fs::write(p.join("shared.txt"), "top\nl1\nMAIN\nl3\nbottom\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "shared.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main edit", "--no-verify"], p),
+        "commit main",
+    );
+
+    let out = run_libra_command(&["cherry-pick", &feat], p);
+    assert_eq!(out.status.code(), Some(128), "conflict exits 128");
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+
+    // Shared context is OUTSIDE the conflict region (line-level, like Git).
+    assert!(
+        body.starts_with("top\nl1\n<<<<<<< HEAD\n"),
+        "shared prefix precedes the markers: {body:?}"
+    );
+    assert!(
+        body.ends_with("l3\nbottom\n"),
+        "shared suffix follows the markers: {body:?}"
+    );
+    // The "ours" region encloses ONLY the diverging line, not the whole file.
+    let ours = body
+        .split_once("<<<<<<< HEAD\n")
+        .and_then(|(_, rest)| rest.split_once("\n======="))
+        .map(|(mid, _)| mid)
+        .expect("conflict region present");
+    assert_eq!(
+        ours, "MAIN",
+        "ours hunk is just the diverging line: {body:?}"
+    );
+    assert!(
+        body.contains("\nFEATURE\n"),
+        "theirs hunk present: {body:?}"
+    );
+    // Whole-file would have put the shared lines inside the markers.
+    assert!(
+        !ours.contains("top") && !ours.contains("bottom"),
+        "shared lines must not be inside the conflict region: {body:?}"
+    );
+}

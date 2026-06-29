@@ -47,6 +47,16 @@ use crate::{
     },
 };
 
+/// A divergent path recorded during replay: `(path, ours blob, theirs blob,
+/// base blob)`. Each blob side is `None` when that side has no content (an
+/// add/delete on that side). The base feeds the line-level conflict merge.
+type ConflictEntry = (
+    PathBuf,
+    Option<ObjectHash>,
+    Option<ObjectHash>,
+    Option<ObjectHash>,
+);
+
 const CHERRY_PICK_EXAMPLES: &str = "\
 EXAMPLES:
     libra cherry-pick abc1234              Apply a single commit
@@ -1129,7 +1139,7 @@ async fn cherry_pick_single_commit(
         })
         .collect();
 
-    let mut conflicts: Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> = Vec::new();
+    let mut conflicts: Vec<ConflictEntry> = Vec::new();
     for (path, their_hash, base_hash) in diff_trees(&their_tree, &parent_tree) {
         let ours_hash = ours_items.get(&path).cloned();
         if ours_hash == base_hash {
@@ -1152,7 +1162,7 @@ async fn cherry_pick_single_commit(
             if let Some(t) = their_hash {
                 add_stage_entry(&mut index, &path, t, 3)?;
             }
-            conflicts.push((path, ours_hash, their_hash));
+            conflicts.push((path, ours_hash, their_hash, base_hash));
         }
     }
 
@@ -1164,12 +1174,12 @@ async fn cherry_pick_single_commit(
         // onto each divergent path so the user can resolve them in the worktree.
         reset_workdir_tracked_only(&current_index, &index)?;
         let short_src = short_display_hash(&commit_id.to_string()).to_string();
-        for (path, ours_hash, their_hash) in &conflicts {
-            write_conflict_markers_file(path, ours_hash, their_hash, &short_src)?;
+        for (path, ours_hash, their_hash, base_hash) in &conflicts {
+            write_conflict_markers_file(path, ours_hash, their_hash, base_hash, &short_src)?;
         }
         let mut paths: Vec<String> = conflicts
             .iter()
-            .map(|(path, _, _)| path.display().to_string())
+            .map(|(path, _, _, _)| path.display().to_string())
             .collect();
         paths.sort();
         return Err(CherryPickSingleError::Conflicted(paths));
@@ -1485,27 +1495,68 @@ fn add_stage_entry(
 
 /// Write Git-style conflict markers for a divergent path into the working tree.
 ///
-/// Uses a whole-file (path-level) presentation — ours between `<<<<<<< HEAD`
-/// and `=======`, theirs up to `>>>>>>> <short-source>` — rather than Git's
-/// line-level hunk merge. This is an intentional simplification for cherry-pick:
-/// a divergent path is surfaced as a single conflict the user resolves by hand.
+/// When both sides and the base are UTF-8 text, this delegates to the shared
+/// line-level renderer ([`merge::render_line_level_conflict`]) so the conflict
+/// markers enclose only the diverging hunks, matching Git. A delete/modify
+/// conflict (one side absent) or binary content falls back to a whole-file
+/// presentation — ours between `<<<<<<< HEAD` and `=======`, theirs up to
+/// `>>>>>>> <short-source>`.
 fn write_conflict_markers_file(
     path: &Path,
     ours_hash: &Option<ObjectHash>,
     their_hash: &Option<ObjectHash>,
+    base_hash: &Option<ObjectHash>,
     short_src: &str,
 ) -> Result<(), CherryPickSingleError> {
-    fn side_text(hash: &Option<ObjectHash>) -> String {
-        match hash {
-            Some(h) => {
-                let blob = git_internal::internal::object::blob::Blob::load(h);
-                String::from_utf8_lossy(&blob.data).into_owned()
-            }
-            None => String::new(),
-        }
+    fn side_bytes(hash: &Option<ObjectHash>) -> Option<Vec<u8>> {
+        hash.as_ref()
+            .map(|h| git_internal::internal::object::blob::Blob::load(h).data)
     }
-    let ours = side_text(ours_hash);
-    let theirs = side_text(their_hash);
+    let ours_bytes = side_bytes(ours_hash);
+    let theirs_bytes = side_bytes(their_hash);
+    let base_bytes = side_bytes(base_hash);
+
+    // Line-level merge applies only when both sides are present and text; the
+    // shared helper returns None otherwise so we fall back to whole-file markers.
+    let content: Vec<u8> = match (&ours_bytes, &theirs_bytes) {
+        (Some(ours), Some(theirs)) => {
+            super::merge::render_line_level_conflict(base_bytes.as_deref(), ours, theirs, short_src)
+                .unwrap_or_else(|| whole_file_conflict(ours, theirs, short_src))
+        }
+        _ => whole_file_conflict(
+            ours_bytes.as_deref().unwrap_or(&[]),
+            theirs_bytes.as_deref().unwrap_or(&[]),
+            short_src,
+        ),
+    };
+
+    let target = util::working_dir().join(path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CherryPickSingleError::SaveFailed(format!(
+                "failed to create parent directory '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(&target, &content).map_err(|e| {
+        CherryPickSingleError::SaveFailed(format!(
+            "failed to write conflict markers to '{}': {e}",
+            target.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Whole-file conflict presentation, used when a line-level merge does not apply
+/// (a delete/modify conflict, or binary content): ours between `<<<<<<< HEAD`
+/// and `=======`, theirs up to `>>>>>>> <short-source>`.
+fn whole_file_conflict(ours: &[u8], theirs: &[u8], short_src: &str) -> Vec<u8> {
+    fn side_text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+    let ours = side_text(ours);
+    let theirs = side_text(theirs);
 
     let mut content = String::from("<<<<<<< HEAD\n");
     content.push_str(&ours);
@@ -1518,23 +1569,7 @@ fn write_conflict_markers_file(
         content.push('\n');
     }
     content.push_str(&format!(">>>>>>> {short_src}\n"));
-
-    let target = util::working_dir().join(path);
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            CherryPickSingleError::SaveFailed(format!(
-                "failed to create parent directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
-    }
-    fs::write(&target, content.as_bytes()).map_err(|e| {
-        CherryPickSingleError::SaveFailed(format!(
-            "failed to write conflict markers to '{}': {e}",
-            target.display()
-        ))
-    })?;
-    Ok(())
+    content.into_bytes()
 }
 
 fn create_tree_from_index(index: &Index) -> Result<ObjectHash, CherryPickSingleError> {

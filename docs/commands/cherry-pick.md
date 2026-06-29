@@ -22,7 +22,7 @@ This is useful for selectively applying commits from one branch to another witho
 
 The command requires an active branch (not detached HEAD). Non-merge commits are applied directly; merge commits require `-m <parent-number>` to choose which parent to diff against.
 
-When a commit cannot be applied cleanly, Libra performs a three-way apply (base = parent tree, ours = current index, theirs = picked tree) and writes any divergent path to the index (stages 1/2/3) and the working tree (whole-file conflict markers). The in-progress sequence is persisted in the SQLite `cherry_pick_state` table, so you can resolve the conflict and continue with `--continue`, drop the conflicted commit with `--skip`, or undo the whole sequence with `--abort`/`--quit`. While a cherry-pick sequence is in progress, `merge` and `rebase` are blocked (`LBR-CONFLICT-002`).
+When a commit cannot be applied cleanly, Libra performs a three-way apply (base = parent tree, ours = current index, theirs = picked tree) and writes any divergent path to the index (stages 1/2/3) and the working tree (line-level conflict markers, matching Git). The in-progress sequence is persisted in the SQLite `cherry_pick_state` table, so you can resolve the conflict and continue with `--continue`, drop the conflicted commit with `--skip`, or undo the whole sequence with `--abort`/`--quit`. While a cherry-pick sequence is in progress, `merge` and `rebase` are blocked (`LBR-CONFLICT-002`).
 
 ## Options
 
@@ -232,9 +232,9 @@ When `--no-commit` is used, `new_commit` and `short_new` are `null`:
 
 Git maintains `.git/CHERRY_PICK_HEAD` and sequencer state files. Libra persists the in-progress sequence in the SQLite `cherry_pick_state` table instead, matching the repository's metadata-in-SQLite convention: the `DELETE`+`INSERT` save runs in a single transaction so a sequencer write is never left half-applied, and there is no loose dotfile that can drift from the refs. The AI-agent protocol is the same as Git's: detect the conflict code (`LBR-CONFLICT-001`), resolve, `libra add`, then `--continue` (or `--skip`/`--abort`/`--quit`).
 
-### Whole-file conflict markers, not line-level hunks
+### Line-level conflict hunks
 
-A divergent path is surfaced as a single whole-file conflict — ours between `<<<<<<< HEAD` and `=======`, theirs up to `>>>>>>> <short-source>` — rather than Git's line-level hunk merge. This is an intentional simplification: the user resolves the path by hand and stages it. Line-level hunk merging is not yet implemented.
+A divergent path is surfaced with line-level conflict markers, matching Git: a three-way merge (base = parent tree, ours = current index, theirs = picked tree) encloses only the diverging hunks between `<<<<<<< HEAD` / `=======` / `>>>>>>> <short-source>`, leaving lines that both sides share outside the markers. A delete/modify conflict (one side absent) or binary content falls back to a whole-file presentation, where a line-level merge would be meaningless. The `>>>>>>>` label is the picked commit's abbreviation (Libra omits the commit subject Git appends).
 
 ### Unsupported Git options are rejected, not silently ignored
 

@@ -233,10 +233,11 @@ pub struct RestoreArgs {
     /// conflict markers from the index stages (ours from stage 2, theirs from
     /// stage 3), leaving the index unmerged. Mutually exclusive with
     /// `--ours`/`--theirs`/`--source`/`--staged`/`--ignore-unmerged`. (Implied by
-    /// `--conflict`.) Libra writes whole-file `ours`/`theirs` markers — the same
-    /// whole-file marker shape `libra merge` uses (one `ours` block / one `theirs`
-    /// block), with generic `ours`/`theirs` labels since the index stages carry no
-    /// commit names — not Git's line-level 3-way merge.
+    /// `--conflict`.) Restore independently rebuilds whole-file `ours`/`theirs`
+    /// markers from the index stages (one `ours` block / one `theirs` block), with
+    /// generic `ours`/`theirs` labels since the stages carry no commit names — not
+    /// Git's line-level 3-way merge, and unlike `libra merge`/`cherry-pick`, which
+    /// now emit line-level hunks for both-modified text conflicts.
     #[clap(
         long,
         conflicts_with_all = ["ours", "theirs", "source", "staged", "ignore_unmerged"],
@@ -1019,9 +1020,10 @@ async fn restore_conflict_stage(
 /// `restore --merge` / `--conflict=<style>`: for each matched unmerged path,
 /// rebuild the conflict markers from the index stages (ours = stage 2, theirs =
 /// stage 3, base = stage 1) and write them to the working tree, leaving the index
-/// unmerged. `diff3` additionally emits the base block. The markers use the same
-/// whole-file SHAPE as `libra merge`'s `write_conflict_markers` (one `ours` block /
-/// one `theirs` block), with generic `ours`/`theirs` labels (the index stages carry
+/// unmerged. `diff3` additionally emits the base block. Restore rebuilds the
+/// markers independently from the index stages as a single whole-file `ours`
+/// block / `theirs` block, with generic `ours`/`theirs` labels (the index stages
+/// carry
 /// no commit names) — not Git's line-level 3-way merge.
 async fn restore_conflict_merge(
     pathspec: &[String],
@@ -1078,9 +1080,10 @@ fn stage_payload(index: &Index, path: &str, stage: u8) -> Result<Option<String>,
 /// Build conflict-marker content from the present stages: a single `<<<<<<<
 /// ours` block, `=======`, a single `>>>>>>> theirs` block, with an optional
 /// `||||||| base` block for `diff3`. A missing ours/theirs side is rendered as
-/// `(deleted)`. This is the same whole-file marker SHAPE that `libra merge`'s
-/// `write_conflict_markers` produces (one `ours` block / one `theirs` block, not
-/// Git's line-level 3-way hunks), but the labels are the generic `ours`/`theirs`
+/// `(deleted)`. This is an independent whole-file rebuild from the index stages
+/// (one `ours` block / one `theirs` block, not Git's line-level 3-way hunks —
+/// and unlike `libra merge`/`cherry-pick`, which now emit line-level hunks for
+/// both-modified text conflicts), with the generic `ours`/`theirs`
 /// rather than merge's `HEAD` / commit-abbrev — the index stages do not carry the
 /// original commit names. (If the labels are ever unified, update both sites.)
 fn build_conflict_markers(

@@ -34,7 +34,7 @@ LFS-managed files are automatically downloaded from the LFS server when restorin
 | Worktree | `-W` | `--worktree` | Restore the working tree. This is the default when `--staged` is not given. |
 | Ours | `-2` | `--ours` | For an unmerged path, write conflict stage 2 (our side) to the working tree. Mutually exclusive with `--theirs`, `--source`, `--staged`, and `--ignore-unmerged`. |
 | Theirs | `-3` | `--theirs` | For an unmerged path, write conflict stage 3 (their side) to the working tree. Same exclusions as `--ours`. |
-| Merge | | `--merge` | For an unmerged path, rewrite the working tree with the conflict markers rebuilt from the index stages (`ours` from stage 2, `theirs` from stage 3), leaving the index unmerged. Libra writes whole-file `ours`/`theirs` markers (the same whole-file marker shape `libra merge` produces, with generic `ours`/`theirs` labels) — not Git's line-level 3-way. Same exclusions as `--ours`. |
+| Merge | | `--merge` | For an unmerged path, rewrite the working tree with the conflict markers rebuilt from the index stages (`ours` from stage 2, `theirs` from stage 3), leaving the index unmerged. Libra writes whole-file `ours`/`theirs` markers (with generic `ours`/`theirs` labels) — not Git's line-level 3-way. (Note: `libra merge`/`cherry-pick` now write line-level markers via the three-way merge engine; restore's index-stage rebuild remains whole-file.) Same exclusions as `--ours`. |
 | Conflict style | | `--conflict <style>` | Implies `--merge`. `merge` (default) writes `ours`/`theirs` blocks; `diff3` also includes the `base` block (stage 1). `zdiff3` is not supported. |
 | Ignore unmerged | | `--ignore-unmerged` | Skip unmerged paths instead of erroring; the remaining paths still restore. |
 | Pathspec from file | | `--pathspec-from-file <FILE>` | Read pathspecs from `<FILE>` (one per line; `-` reads stdin). When given, the file contents replace any positional pathspecs (which then need not be supplied). |
@@ -101,7 +101,7 @@ A plain `libra restore` over an unmerged path refuses to act and reports `path '
 libra restore --ignore-unmerged --source HEAD .
 ```
 
-> **Not yet supported:** Git's line-level 3-way conflict markers and the `zdiff3` style (Libra rebuilds whole-file `ours`/`theirs` markers, consistent with `libra merge`), and `-p` / `--patch`, are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
+> **Not yet supported:** Git's line-level 3-way conflict markers and the `zdiff3` style (Libra rebuilds whole-file `ours`/`theirs` markers from the index stages — unlike `libra merge`/`cherry-pick`, which now write line-level markers), and `-p` / `--patch`, are deferred. See [COMPATIBILITY.md](../../COMPATIBILITY.md).
 
 ## Common Commands
 

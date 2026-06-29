@@ -1189,6 +1189,10 @@ enum MergeResolution {
 #[derive(Debug, Copy, Clone)]
 enum ConflictKind {
     BothChanged {
+        /// Common-ancestor blob (`None` for an add/add conflict with no base),
+        /// used to compute line-level conflict hunks like Git rather than
+        /// wrapping the whole file in one conflict region.
+        base: Option<ObjectHash>,
         ours: ObjectHash,
         theirs: ObjectHash,
     },
@@ -1242,6 +1246,7 @@ fn resolve_three_way(
                 MergeResolution::Use(theirs)
             } else {
                 MergeResolution::Conflict(ConflictKind::BothChanged {
+                    base: None,
                     ours: ours.hash,
                     theirs: theirs.hash,
                 })
@@ -1261,6 +1266,7 @@ fn resolve_three_way(
                 MergeResolution::Use(merged)
             } else {
                 MergeResolution::Conflict(ConflictKind::BothChanged {
+                    base: base.map(|b| b.hash),
                     ours: ours.hash,
                     theirs: theirs.hash,
                 })
@@ -1436,16 +1442,17 @@ fn write_conflict_markers(
     commit_abbrev: &str,
     kind: ConflictKind,
 ) -> Result<(), String> {
-    let content = match kind {
-        ConflictKind::BothChanged { ours, theirs } => {
+    let content: Vec<u8> = match kind {
+        ConflictKind::BothChanged { base, ours, theirs } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
-            format!(
-                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                conflict_payload(&ours_blob.data),
-                conflict_payload(&theirs_blob.data),
-                commit_abbrev
-            )
+            both_changed_conflict_content(
+                base,
+                &ours_blob.data,
+                &theirs_blob.data,
+                marker_eol,
+                commit_abbrev,
+            )?
         }
         ConflictKind::OursModifiedTheirsDeleted { ours } => {
             let ours_blob: Blob = load_object(&ours).map_err(|error| error.to_string())?;
@@ -1454,6 +1461,7 @@ fn write_conflict_markers(
                 conflict_payload(&ours_blob.data),
                 commit_abbrev
             )
+            .into_bytes()
         }
         ConflictKind::TheirsModifiedOursDeleted { theirs } => {
             let theirs_blob: Blob = load_object(&theirs).map_err(|error| error.to_string())?;
@@ -1462,9 +1470,159 @@ fn write_conflict_markers(
                 conflict_payload(&theirs_blob.data),
                 commit_abbrev
             )
+            .into_bytes()
         }
     };
-    write_workdir_file(workdir, path, content.as_bytes())
+    write_workdir_file(workdir, path, &content)
+}
+
+/// Build the worktree content for a both-modified conflict.
+///
+/// When all three sides are UTF-8 text, this runs a line-level three-way merge
+/// (`diffy` with Git's two-marker `merge` conflict style) so the conflict
+/// markers enclose only the diverging hunks — matching Git — instead of wrapping
+/// each whole file in a single conflict region. A missing base (an add/add
+/// conflict) is treated as an empty common ancestor and still merges line-level.
+/// Binary content falls back to whole-file markers, where a line-level merge
+/// would be meaningless; an unreadable base blob is a hard error (propagated),
+/// not a silent fallback.
+fn both_changed_conflict_content(
+    base: Option<ObjectHash>,
+    ours: &[u8],
+    theirs: &[u8],
+    marker_eol: &str,
+    commit_abbrev: &str,
+) -> Result<Vec<u8>, String> {
+    let whole_file = || {
+        format!(
+            "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+            conflict_payload(ours),
+            conflict_payload(theirs),
+            commit_abbrev
+        )
+        .into_bytes()
+    };
+
+    // Load the common-ancestor content (if any) and defer to the shared
+    // line-level renderer; fall back to whole-file markers for binary sides.
+    let base_data: Option<Vec<u8>> = match base {
+        Some(base) => {
+            let base_blob: Blob = load_object(&base).map_err(|error| error.to_string())?;
+            Some(base_blob.data)
+        }
+        None => None,
+    };
+    Ok(
+        render_line_level_conflict(base_data.as_deref(), ours, theirs, commit_abbrev)
+            .unwrap_or_else(whole_file),
+    )
+}
+
+/// Render a both-modified conflict as a line-level three-way merge, matching
+/// Git: the conflict markers enclose only the diverging hunks (lines shared by
+/// both sides stay outside the markers) instead of wrapping each whole file in a
+/// single conflict region. Shared by `merge`/`pull` (here) and `cherry-pick`.
+///
+/// Returns `None` when a line-level merge is not applicable — any side is not
+/// UTF-8 text (binary), or the content merged with no real text conflict — so
+/// the caller can fall back to its whole-file presentation. `base` is the
+/// common-ancestor content (`None` for an add/add conflict with no base).
+/// `commit_label` is the `>>>>>>>` side label (e.g. the other commit's
+/// abbreviation).
+pub(crate) fn render_line_level_conflict(
+    base: Option<&[u8]>,
+    ours: &[u8],
+    theirs: &[u8],
+    commit_label: &str,
+) -> Option<Vec<u8>> {
+    if std::str::from_utf8(ours).is_err()
+        || std::str::from_utf8(theirs).is_err()
+        || base.is_some_and(|b| std::str::from_utf8(b).is_err())
+    {
+        return None;
+    }
+
+    // Choose a marker length long enough that no line in the inputs can be
+    // mistaken for (and then wrongly relabelled as) a generated marker — Git's
+    // conflict-marker-size bumping. With this length the relabel below matches
+    // only `diffy`'s emitted markers.
+    let marker_len = conflict_marker_length(&[base.unwrap_or(&[]), ours, theirs]);
+    let mut options = diffy::MergeOptions::new();
+    options.set_conflict_style(diffy::ConflictStyle::Merge);
+    options.set_conflict_marker_length(marker_len);
+    match options.merge_bytes(base.unwrap_or(&[]), ours, theirs) {
+        // A genuine conflict: `diffy` returns the file with line-level markers
+        // labelled `ours`/`theirs`; relabel them to Git's `HEAD`/<commit>.
+        Err(conflicted) => Some(relabel_conflict_markers(
+            conflicted,
+            marker_len,
+            commit_label,
+        )),
+        // Content merged cleanly with no markers (no real text conflict — e.g. a
+        // mode-only divergence): let the caller surface it as a whole-file
+        // conflict rather than writing the silently-merged text.
+        Ok(_) => None,
+    }
+}
+
+/// The conflict-marker length to use, mirroring Git: the default of 7, bumped to
+/// one longer than the longest run of leading conflict-marker characters
+/// (`<` `>` `=` `|`) on any line of the inputs, so a content line that itself
+/// looks like a marker is never confused with a generated one.
+fn conflict_marker_length(sides: &[&[u8]]) -> usize {
+    const DEFAULT_MARKER_LENGTH: usize = 7;
+    let mut longest = 0usize;
+    for side in sides {
+        for line in side.split(|&b| b == b'\n') {
+            let Some(&first) = line.first() else { continue };
+            if matches!(first, b'<' | b'>' | b'=' | b'|') {
+                let run = line.iter().take_while(|&&b| b == first).count();
+                if run >= DEFAULT_MARKER_LENGTH {
+                    longest = longest.max(run);
+                }
+            }
+        }
+    }
+    if longest >= DEFAULT_MARKER_LENGTH {
+        longest + 1
+    } else {
+        DEFAULT_MARKER_LENGTH
+    }
+}
+
+/// Rewrite `diffy`'s conflict-marker labels (`ours` / `theirs`) to Git's
+/// (`HEAD` / the other side's abbreviation).
+///
+/// Matches WHOLE LINES only: a line is relabelled exactly when it equals the
+/// generated marker (`{marker} ours` / `{marker} theirs`). Combined with the
+/// [`conflict_marker_length`] bump (which guarantees no input line *starts* with
+/// that many markers), this leaves any content that merely *contains* a
+/// marker-like substring — e.g. `prefix <<<<<<< ours` — untouched.
+fn relabel_conflict_markers(conflicted: Vec<u8>, marker_len: usize, commit_label: &str) -> Vec<u8> {
+    let open = "<".repeat(marker_len);
+    let close = ">".repeat(marker_len);
+    let ours_marker = format!("{open} ours");
+    let theirs_marker = format!("{close} theirs");
+    let head_marker = format!("{open} HEAD");
+    let label_marker = format!("{close} {commit_label}");
+
+    let text = String::from_utf8_lossy(&conflicted);
+    // `split('\n')` + `join('\n')` round-trips exactly (including a trailing
+    // newline, which yields a final empty segment that re-joins cleanly).
+    let relabelled = text
+        .split('\n')
+        .map(|line| {
+            if line == ours_marker {
+                head_marker.as_str()
+            } else if line == theirs_marker {
+                label_marker.as_str()
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    relabelled.into_bytes()
 }
 
 fn index_tree_items(index: &Index) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {
@@ -1689,6 +1847,78 @@ mod tests {
             hash: ObjectHash::new(&[byte; 20]),
             mode,
         }
+    }
+
+    #[test]
+    fn render_line_level_conflict_isolates_diverging_hunk() {
+        let base = b"top\nl1\nl2\nl3\nbottom\n";
+        let ours = b"top\nl1\nMAIN\nl3\nbottom\n";
+        let theirs = b"top\nl1\nOTHER\nl3\nbottom\n";
+        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234")
+            .expect("a real text conflict renders line-level markers");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "top\nl1\n<<<<<<< HEAD\nMAIN\n=======\nOTHER\n>>>>>>> abc1234\nl3\nbottom\n",
+            "only the diverging line is enclosed; shared context stays outside"
+        );
+    }
+
+    #[test]
+    fn render_line_level_conflict_does_not_corrupt_marker_like_content() {
+        // A shared line that itself looks like a conflict marker must survive
+        // verbatim: the generated markers are bumped to 8 chars, so the 7-char
+        // content line is neither treated as a marker nor relabelled.
+        let base = b"<<<<<<< ours\nl2\n";
+        let ours = b"<<<<<<< ours\nMAIN\n";
+        let theirs = b"<<<<<<< ours\nOTHER\n";
+        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with("<<<<<<< ours\n"),
+            "the literal marker-like content line is preserved verbatim: {text:?}"
+        );
+        assert!(
+            text.contains("<<<<<<<< HEAD\n") && text.contains(">>>>>>>> abc1234\n"),
+            "generated markers are bumped to 8 chars so they cannot collide: {text:?}"
+        );
+        // The marker-like content line keeps its original ` ours` label — a naive
+        // 7-char relabel would have rewritten it to `<<<<<<< HEAD`.
+        assert!(
+            text.contains("<<<<<<< ours\n"),
+            "the 7-char content line was preserved, not relabelled: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_line_level_conflict_preserves_non_leading_marker_substring() {
+        // A shared line that merely CONTAINS a marker-like substring (not at the
+        // start of the line, so it does not bump the marker length) must survive
+        // verbatim — only complete generated marker lines are relabelled.
+        let base = b"prefix <<<<<<< ours\nl2\n";
+        let ours = b"prefix <<<<<<< ours\nMAIN\n";
+        let theirs = b"prefix <<<<<<< ours\nOTHER\n";
+        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with("prefix <<<<<<< ours\n"),
+            "the mid-line marker-like content is preserved, not relabelled: {text:?}"
+        );
+        assert!(
+            text.contains("<<<<<<< HEAD\n") && text.contains(">>>>>>> abc1234\n"),
+            "the generated 7-char markers are relabelled normally: {text:?}"
+        );
+        assert!(
+            !text.contains("prefix <<<<<<< HEAD"),
+            "the marker-like substring was NOT rewritten to HEAD: {text:?}"
+        );
+    }
+
+    #[test]
+    fn render_line_level_conflict_skips_binary_and_clean_merges() {
+        // Binary side -> None (caller falls back to whole-file markers).
+        assert!(render_line_level_conflict(None, b"a\n", &[0xff, 0xfe], "x").is_none());
+        // No real text conflict (only one side changed) -> None.
+        assert!(render_line_level_conflict(Some(b"a\n"), b"a\n", b"b\n", "x").is_none());
     }
 
     #[test]

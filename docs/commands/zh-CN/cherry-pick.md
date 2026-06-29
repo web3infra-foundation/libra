@@ -22,7 +22,7 @@ libra cherry-pick (--continue | --skip | --abort | --quit)
 
 该命令要求处于活动分支（不是 detached HEAD）。非 merge commit 直接应用；cherry-pick merge commit 需用 `-m <n>`/`--mainline <n>` 指定沿哪个父提交做 diff。
 
-当某提交无法干净应用时，Libra 执行三方 apply（base = 父提交树，ours = 当前索引，theirs = 被 pick 的树），并把任何发散路径写入索引（stage 1/2/3）与工作树（整文件冲突标记）。进行中的序列持久化到 SQLite `cherry_pick_state` 表，因此你可以解决冲突后用 `--continue` 续作、用 `--skip` 丢弃冲突提交，或用 `--abort`/`--quit` 撤销整个序列。cherry-pick 序列进行期间，`merge` 与 `rebase` 被阻止（`LBR-CONFLICT-002`）。
+当某提交无法干净应用时，Libra 执行三方 apply（base = 父提交树，ours = 当前索引，theirs = 被 pick 的树），并把任何发散路径写入索引（stage 1/2/3）与工作树（行级冲突标记，与 Git 一致）。进行中的序列持久化到 SQLite `cherry_pick_state` 表，因此你可以解决冲突后用 `--continue` 续作、用 `--skip` 丢弃冲突提交，或用 `--abort`/`--quit` 撤销整个序列。cherry-pick 序列进行期间，`merge` 与 `rebase` 被阻止（`LBR-CONFLICT-002`）。
 
 ## 选项
 
@@ -234,9 +234,9 @@ Changes from abc1234 staged. Use 'libra commit' to finalize.
 
 Git 维护 `.git/CHERRY_PICK_HEAD` 与 sequencer 状态文件。Libra 改为把进行中的序列持久化到 SQLite `cherry_pick_state` 表，与“元数据存 SQLite”的约定一致：`DELETE`+`INSERT` 保存在单个事务内，故 sequencer 写入不会半途残留，也不会有可能与 refs 漂移的松散 dotfile。AI-agent 协议与 Git 相同：检测冲突码（`LBR-CONFLICT-001`）、解决、`libra add`，再 `--continue`（或 `--skip`/`--abort`/`--quit`）。
 
-### 整文件冲突标记，而非行级 hunk
+### 行级冲突 hunk
 
-发散路径以单个整文件冲突呈现——`<<<<<<< HEAD` 与 `=======` 之间为 ours，到 `>>>>>>> <short-source>` 为 theirs——而非 Git 的行级 hunk 合并。这是有意简化：用户手动解决该路径并暂存。行级 hunk 合并尚未实现。
+发散路径以行级冲突标记呈现，与 Git 一致：三方合并（base = 父提交树，ours = 当前索引，theirs = 被 pick 的树）仅把发散的 hunk 包在 `<<<<<<< HEAD` / `=======` / `>>>>>>> <short-source>` 之间，两侧共享的行留在标记之外。删除/修改冲突（某一侧缺失）或二进制内容回退为整文件呈现（此时行级合并无意义）。`>>>>>>>` 标签为被 pick 提交的缩写（Libra 省略了 Git 追加的提交主题）。
 
 ### 不支持的 Git 选项被拒绝，而非静默忽略
 

@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。fast-forward 与单头三方合并已支持；`-m <msg>`、`--ff-only`、`--no-ff`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op；Libra 从不为 merge 打开编辑器）、`--stat`/`-n`/`--no-stat`（last-wins 切换；`--stat` 打印合并后 diffstat=「合并前 HEAD↔新提交」的变更，复用 `diff --stat` 渲染；默认不打印）、`--verify-signatures`（验证被合并分支 tip 的 PGP 签名：重建签名内容并经 vault key 校验，未签名/校验失败则中止；仅能验证本仓库 vault key 所签，无外部 keyring）、`--no-verify-signatures`（默认；与 `--verify-signatures` 组成 toggle，last-wins）、`--no-rerere-autoupdate`（接受为 no-op；Libra 无 rerere）已支持；octopus/自定义策略与 `--rerere-autoupdate` 仍未实现。
+- 兼容级别：`partial`。fast-forward 与单头三方合并已支持；`-m <msg>`、`--ff-only`、`--no-ff`、`--squash`、`--no-commit`、`--no-edit`（接受为 no-op；Libra 从不为 merge 打开编辑器）、`--stat`/`-n`/`--no-stat`（last-wins 切换；`--stat` 打印合并后 diffstat=「合并前 HEAD↔新提交」的变更，复用 `diff --stat` 渲染；默认不打印）、`--verify-signatures`（验证被合并分支 tip 的 PGP 签名：重建签名内容并经 vault key 校验，未签名/校验失败则中止；仅能验证本仓库 vault key 所签，无外部 keyring）、`--no-verify-signatures`（默认；与 `--verify-signatures` 组成 toggle，last-wins）、`--no-rerere-autoupdate`（接受为 no-op；Libra 无 rerere）已支持；冲突路径以行级 hunk 呈现（共享 `merge::render_line_level_conflict`：`diffy` `ConflictStyle::Merge` + 把 `ours`/`theirs` 重写为 `HEAD`/被合并 commit 缩写，仅发散行包在标记内，与 Git 一致；二进制/modify-delete 回退整文件；该 helper 同时被 pull/cherry-pick 复用）；octopus/自定义策略与 `--rerere-autoupdate` 仍未实现。
 
 - 当前矩阵明确仍是部分兼容；未覆盖的 Git surface 必须显式列在“还未实现的功能”。
 
