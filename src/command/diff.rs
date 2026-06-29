@@ -33,7 +33,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
-        output::{OutputConfig, ProgressMode, emit_json_data},
+        output::{ColorChoice, OutputConfig, ProgressMode, emit_json_data},
         pager::Pager,
         path, util,
     },
@@ -202,11 +202,30 @@ pub struct DiffArgs {
     #[clap(long = "no-ext-diff")]
     pub no_ext_diff: bool,
 
-    /// Do not color moved lines differently from added/removed lines. Accepted
-    /// for Git parity and is a no-op: Libra's diff never performs moved-line
-    /// detection or coloring, so this already matches the default. (Git's
-    /// opposite `--color-moved[=<mode>]` is not implemented.)
-    #[clap(long = "no-color-moved")]
+    /// Color moved lines (lines deleted in one place and added in another) with a
+    /// distinct color in terminal output. Bare `--color-moved` and the
+    /// block-significance modes (`default`/`zebra`/`blocks`/`dimmed-zebra`) are
+    /// accepted but approximated by `plain` — Libra colors EVERY moved line
+    /// (removed → bold magenta, added → bold cyan); it does not implement Git's
+    /// conservative moved-block significance/zebra striping. `--color-moved=no`
+    /// or `--no-color-moved` turns it off (the default). Only affects colored
+    /// output (a terminal or `--color=always`).
+    // `require_equals` is safe here (unlike `-M`, this is long-only with no glued
+    // short form): bare `--color-moved` uses the default mode, `--color-moved=<m>`
+    // sets it, and `--color-moved <pathspec>` is NOT swallowed as the mode.
+    #[clap(
+        long = "color-moved",
+        value_name = "mode",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "default",
+        overrides_with = "no_color_moved"
+    )]
+    pub color_moved: Option<String>,
+
+    /// Do not color moved lines differently from added/removed lines (the default;
+    /// countermands an earlier `--color-moved`).
+    #[clap(long = "no-color-moved", overrides_with = "color_moved")]
     pub no_color_moved: bool,
 
     /// Detect renames: a deleted + added pair whose content is similar enough is
@@ -348,6 +367,9 @@ pub(crate) enum DiffError {
 
     #[error("invalid argument to find-renames: '{0}'")]
     InvalidRenameScore(String),
+
+    #[error("invalid argument to color-moved: '{0}'")]
+    InvalidColorMoved(String),
 }
 
 impl From<DiffError> for CliError {
@@ -383,6 +405,9 @@ impl From<DiffError> for CliError {
                 .with_hint(
                     "use -M, -M<n> (e.g. -M90%), or --find-renames=<n>; a pathspec after a bare -M must follow '--'",
                 ),
+            DiffError::InvalidColorMoved(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("expected no, default, plain, blocks, zebra, or dimmed-zebra"),
         }
     }
 }
@@ -1588,6 +1613,24 @@ fn worktree_file_mode(path: &Path) -> String {
     }
 }
 
+/// Resolve `--color-moved[=<mode>]`: whether moved lines should be colored.
+/// `no`/`--no-color-moved`/unset → off. Every other (valid) mode → on; Libra
+/// approximates Git's block-significance modes with `plain` coloring. An
+/// unrecognized mode is a usage error.
+fn color_moved_active(args: &DiffArgs) -> Result<bool, DiffError> {
+    if args.no_color_moved {
+        return Ok(false);
+    }
+    let Some(mode) = args.color_moved.as_deref() else {
+        return Ok(false);
+    };
+    match mode {
+        "no" => Ok(false),
+        "default" | "plain" | "blocks" | "zebra" | "dimmed-zebra" | "dimmed_zebra" => Ok(true),
+        other => Err(DiffError::InvalidColorMoved(other.to_string())),
+    }
+}
+
 /// Resolve `-M`/`--find-renames[=<n>]` to a similarity score threshold on Git's
 /// 0..60000 scale, or `None` when rename detection is off (or `--no-renames`).
 fn resolve_rename_threshold(args: &DiffArgs) -> Result<Option<u32>, DiffError> {
@@ -2153,6 +2196,9 @@ fn render_diff_output(
     result: &DiffOutput,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    // Validate `--color-moved[=<mode>]` up front (even for non-colored paths, so a
+    // bad mode is rejected like Git does at parse time).
+    let color_moved = color_moved_active(args)?;
     // `--check` replaces the normal diff output with whitespace-error warnings.
     if args.check {
         return render_diff_check(result);
@@ -2284,7 +2330,16 @@ fn render_diff_output(
     {
         rendered
     } else {
-        maybe_colorize_diff(&rendered, io::stdout().is_terminal())
+        // Honor `--color`: `always` forces color even when piped (the global
+        // `colored` override is already set), `never` disables it, `auto` follows
+        // the terminal. (Previously this only checked the terminal, so
+        // `--color=always | pipe` produced no color — and no moved-line color.)
+        let should_colorize = match output.color {
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+            ColorChoice::Auto => io::stdout().is_terminal(),
+        };
+        maybe_colorize_diff(&rendered, should_colorize, color_moved)
     };
     // `-z` records carry their own NUL terminators, and external-driver output is
     // emitted byte-for-byte, so neither gets an appended trailing newline.
@@ -3073,6 +3128,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         reverse: false,
         text: false,
         no_ext_diff: false,
+        color_moved: None,
         no_color_moved: false,
         find_renames: None,
         no_renames: false,
@@ -3086,12 +3142,39 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
     Ok(format_unified_diff(&result))
 }
 
-fn maybe_colorize_diff(diff_text: &str, should_colorize: bool) -> String {
+fn maybe_colorize_diff(diff_text: &str, should_colorize: bool, color_moved: bool) -> String {
     if should_colorize {
-        colorize_diff(diff_text)
+        colorize_diff(diff_text, color_moved)
     } else {
         diff_text.to_string()
     }
+}
+
+/// Collect the set of moved-line bodies for `--color-moved`: a body that appears
+/// as BOTH a removed (`-`) and an added (`+`) line somewhere in the patch is
+/// "moved". (Git's `plain` semantics — Libra approximates the block modes with
+/// this.) File-header lines (`---`/`+++`) are excluded.
+fn moved_line_bodies(diff_text: &str) -> std::collections::HashSet<&str> {
+    let mut removed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut added: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Only `-`/`+` lines INSIDE a hunk are real removals/additions. Tracking hunk
+    // state avoids mistaking a body line like `---foo` (a removed `--foo`) for the
+    // `--- a/<path>` file header, which precedes the first `@@`.
+    let mut in_hunk = false;
+    for line in diff_text.lines() {
+        if line.starts_with("diff --git") {
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk {
+            if let Some(body) = line.strip_prefix('-') {
+                removed.insert(body);
+            } else if let Some(body) = line.strip_prefix('+') {
+                added.insert(body);
+            }
+        }
+    }
+    removed.intersection(&added).copied().collect()
 }
 
 /// Render `--shortstat`: just the trailing summary line of `--stat`, omitting
@@ -3292,18 +3375,41 @@ fn parse_hunk_range_count(value: &str) -> Option<usize> {
     }
 }
 
-fn colorize_diff(diff_text: &str) -> String {
+fn colorize_diff(diff_text: &str, color_moved: bool) -> String {
     let mut output = String::with_capacity(diff_text.len() + 500);
+    // For `--color-moved`, precompute which line bodies are moved (appear as both
+    // a removed and an added line). Moved lines get a distinct color.
+    let moved = if color_moved {
+        moved_line_bodies(diff_text)
+    } else {
+        std::collections::HashSet::new()
+    };
 
+    // Track hunk state so `-`/`+` are only treated as removals/additions inside a
+    // hunk — a body line like `---foo` is a removed `--foo`, not the `--- a/<path>`
+    // file header (which precedes the first `@@`).
+    let mut in_hunk = false;
     for line in diff_text.lines() {
         let colored_line = if line.starts_with("diff --git") {
+            in_hunk = false;
             line.bold().to_string()
         } else if line.starts_with("@@") {
+            in_hunk = true;
             line.cyan().to_string()
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            line.red().to_string()
-        } else if line.starts_with('+') && !line.starts_with("+++") {
-            line.green().to_string()
+        } else if in_hunk && line.starts_with('-') {
+            // A moved removed line → bold magenta (Git's `oldMoved`); else red.
+            if color_moved && moved.contains(&line[1..]) {
+                line.magenta().bold().to_string()
+            } else {
+                line.red().to_string()
+            }
+        } else if in_hunk && line.starts_with('+') {
+            // A moved added line → bold cyan (Git's `newMoved`); else green.
+            if color_moved && moved.contains(&line[1..]) {
+                line.cyan().bold().to_string()
+            } else {
+                line.green().to_string()
+            }
         } else {
             line.to_string()
         };
@@ -3632,8 +3738,8 @@ mod test {
         let _guard = ColorOverrideReset;
         colored::control::set_override(true);
 
-        let plain = maybe_colorize_diff(diff, false);
-        let colored = maybe_colorize_diff(diff, true);
+        let plain = maybe_colorize_diff(diff, false, false);
+        let colored = maybe_colorize_diff(diff, true, false);
 
         assert!(
             !plain.contains("\u{1b}["),
@@ -3642,6 +3748,26 @@ mod test {
         assert!(
             colored.contains("\u{1b}["),
             "colored output should contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_color_moved_uses_distinct_colors() {
+        let _guard = ColorOverrideReset;
+        colored::control::set_override(true);
+        // `keepA` is removed in one place and added in another → moved.
+        let diff =
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n+keepA\n block\n-keepA\n";
+        let with_moved = colorize_diff(diff, true);
+        let without = colorize_diff(diff, false);
+        // Without --color-moved, the moved lines use the normal red/green (31/32).
+        assert!(without.contains("\u{1b}[32m") && without.contains("\u{1b}[31m"));
+        // With it, the moved added line is bold cyan (1;36) and removed bold
+        // magenta (1;35), distinct from plain red/green.
+        assert!(
+            with_moved.contains("1;36") && with_moved.contains("1;35"),
+            "moved lines get bold cyan/magenta: {with_moved:?}"
         );
     }
 

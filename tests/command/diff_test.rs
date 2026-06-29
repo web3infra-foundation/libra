@@ -2311,6 +2311,90 @@ fn test_diff_rename_threshold_and_no_renames() {
     );
 }
 
+/// `--color-moved` colors moved lines (removed in one place, added in another)
+/// with a distinct color under `--color=always`; `--color=never`, omitting the
+/// flag, or `--no-color-moved` leaves them as normal add/remove colors. An
+/// invalid mode is a usage error.
+#[test]
+fn test_diff_color_moved() {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f.txt"), "keepA\nkeepB\nblock1\nblock2\nblock3\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit",
+    );
+    // Move keepA/keepB to the end.
+    fs::write(p.join("f.txt"), "block1\nblock2\nblock3\nkeepA\nkeepB\n").unwrap();
+
+    // `--color=always --color-moved=plain`: moved lines get the bold magenta
+    // (removed, `1;35`) / bold cyan (added, `1;36`) move colors.
+    let moved = run_libra_command(
+        &["diff", "--color=always", "--color-moved=plain", "f.txt"],
+        p,
+    );
+    let ms = String::from_utf8_lossy(&moved.stdout);
+    assert!(
+        ms.contains("\u{1b}[1;35m") && ms.contains("\u{1b}[1;36m"),
+        "moved lines are bold magenta/cyan: {ms:?}"
+    );
+
+    // Without --color-moved, moved lines use the normal red/green.
+    let plain = run_libra_command(&["diff", "--color=always", "f.txt"], p);
+    let ps = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        !ps.contains("\u{1b}[1;35m") && ps.contains("\u{1b}[31m") && ps.contains("\u{1b}[32m"),
+        "without --color-moved, normal red/green: {ps:?}"
+    );
+
+    // `--color=never` suppresses all color, including move color.
+    let never = run_libra_command(
+        &["diff", "--color=never", "--color-moved=plain", "f.txt"],
+        p,
+    );
+    assert!(
+        !String::from_utf8_lossy(&never.stdout).contains("\u{1b}["),
+        "--color=never emits no ANSI"
+    );
+
+    // An invalid mode is a usage error.
+    let bad = run_libra_command(&["diff", "--color-moved=bogus", "f.txt"], p);
+    assert!(
+        !bad.status.success()
+            && String::from_utf8_lossy(&bad.stderr).contains("invalid argument to color-moved"),
+        "invalid --color-moved mode is rejected"
+    );
+
+    // Bare `--color-moved` followed by a pathspec must NOT swallow the pathspec as
+    // the mode (`require_equals` makes the value `=`-attached only).
+    let bare = run_libra_command(&["diff", "--color=always", "--color-moved", "f.txt"], p);
+    assert!(
+        bare.status.success(),
+        "bare --color-moved + pathspec is not a usage error: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+
+    // A moved line whose content begins with `--` (rendered `---…` for the
+    // removal) is still detected/colored, not mistaken for a `--- a/<path>` header.
+    fs::write(p.join("g.txt"), "--dashline\nkeepX\nkeepY\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "g.txt"], p), "add g");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "g", "--no-verify"], p),
+        "commit g",
+    );
+    fs::write(p.join("g.txt"), "keepX\nkeepY\n--dashline\n").unwrap();
+    let dash = run_libra_command(
+        &["diff", "--color=always", "--color-moved=plain", "g.txt"],
+        p,
+    );
+    let ds = String::from_utf8_lossy(&dash.stdout);
+    assert!(
+        ds.contains("\u{1b}[1;35m---dashline") && ds.contains("\u{1b}[1;36m+--dashline"),
+        "a `--`-prefixed moved body line is colored as moved, not skipped: {ds:?}"
+    );
+}
+
 /// `-M --relative=<dir>` strips the directory prefix from BOTH sides of a rename
 /// — the `a/`/`rename from`/`--- ` old-side headers and the `rename_from` field,
 /// not just the new path — so no header keeps the stripped prefix.
