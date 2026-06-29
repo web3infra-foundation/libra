@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS `reflog` (
     `action`          TEXT NOT NULL,
     `message`         TEXT NOT NULL
 );
+-- The matching indexes must be created too, so a migration-only (bare) DB has
+-- the same constraints production has — in particular the partial UNIQUE index
+-- `idx_name_kind` that the conflict-safety `NOT EXISTS` clause below relies on
+-- to keep the `traces` rename from colliding with an existing branch row.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_name_kind_remote ON `reference`(`name`, `kind`, `remote`)
+WHERE `remote` IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_name_kind ON `reference`(`name`, `kind`)
+WHERE `remote` IS NULL;
+CREATE INDEX IF NOT EXISTS idx_ref_name_timestamp ON `reflog`(`ref_name`, `timestamp`);
 
 UPDATE `reference`
 SET `name` = 'traces'
