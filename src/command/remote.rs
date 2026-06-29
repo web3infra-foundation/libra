@@ -988,6 +988,60 @@ async fn fetch_remote_by_name(name: &str, output: &OutputConfig) -> Result<(), R
     Ok(())
 }
 
+/// Build the set of branch names a remote currently advertises, normalised into
+/// the local remote-tracking display form used by [`classify_stale_tracking_branches`]:
+/// `<branch>` for `refs/heads/<branch>` and `mr/<x>` for `refs/mr/<x>`. Peeled
+/// (`^{}`) and tag refs are ignored — they are not tracked under
+/// `refs/remotes/<name>/*`. Shared by `remote prune` and `fetch --prune` so both
+/// derive the live-branch set identically.
+pub(crate) fn remote_advertised_branch_names(refs: &[DiscRef]) -> HashSet<String> {
+    refs.iter()
+        .filter_map(|reference| {
+            reference
+                ._ref
+                .strip_prefix("refs/heads/")
+                .map(String::from)
+                .or_else(|| {
+                    reference
+                        ._ref
+                        .strip_prefix("refs/mr/")
+                        .map(|mr| format!("mr/{mr}"))
+                })
+        })
+        .collect()
+}
+
+/// Classify which locally-stored remote-tracking branches under
+/// `refs/remotes/<name>/*` are stale — i.e. the remote no longer advertises a
+/// matching `refs/heads/<branch>` (or `refs/mr/<x>`). The cached
+/// `refs/remotes/<name>/HEAD` is never reported. Pure (no deletion); shared by
+/// `remote prune` and `fetch --prune` so both classify staleness identically.
+pub(crate) fn classify_stale_tracking_branches(
+    name: &str,
+    remote_branch_names: &HashSet<String>,
+    local_remote_branches: &[Branch],
+) -> Vec<RemotePruneEntry> {
+    let head_ref = format!("refs/remotes/{name}/HEAD");
+    let prefix = format!("refs/remotes/{name}/");
+    let mut stale_branches = Vec::new();
+    for local_branch in local_remote_branches {
+        if local_branch.name == head_ref {
+            continue;
+        }
+        let Some(branch_name) = local_branch.name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if remote_branch_names.contains(branch_name) {
+            continue;
+        }
+        stale_branches.push(RemotePruneEntry {
+            remote_ref: local_branch.name.clone(),
+            branch: format!("{name}/{branch_name}"),
+        });
+    }
+    stale_branches
+}
+
 async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, RemoteError> {
     ensure_remote_exists(&name).await?;
     let remote_config = ConfigKv::remote_config(&name)
@@ -1010,22 +1064,7 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
 
     set_wire_hash_kind(discovery.hash_kind);
 
-    let remote_branch_names: HashSet<String> = discovery
-        .refs
-        .iter()
-        .filter_map(|reference| {
-            reference
-                ._ref
-                .strip_prefix("refs/heads/")
-                .map(String::from)
-                .or_else(|| {
-                    reference
-                        ._ref
-                        .strip_prefix("refs/mr/")
-                        .map(|mr| format!("mr/{mr}"))
-                })
-        })
-        .collect();
+    let remote_branch_names = remote_advertised_branch_names(&discovery.refs);
 
     let local_remote_branches =
         Branch::list_branches_result(Some(&name))
@@ -1040,25 +1079,12 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
                 },
             })?;
 
-    let head_ref = format!("refs/remotes/{name}/HEAD");
-    let prefix = format!("refs/remotes/{name}/");
-    let mut stale_branches = Vec::new();
+    let stale_branches =
+        classify_stale_tracking_branches(&name, &remote_branch_names, &local_remote_branches);
 
-    for local_branch in &local_remote_branches {
-        if local_branch.name == head_ref {
-            continue;
-        }
-
-        let Some(branch_name) = local_branch.name.strip_prefix(&prefix) else {
-            continue;
-        };
-
-        if remote_branch_names.contains(branch_name) {
-            continue;
-        }
-
-        if !dry_run {
-            Branch::delete_branch_result(&local_branch.name, Some(&name))
+    if !dry_run {
+        for entry in &stale_branches {
+            Branch::delete_branch_result(&entry.remote_ref, Some(&name))
                 .await
                 .map_err(|error| match error {
                     BranchStoreError::Delete { name, detail } => {
@@ -1073,11 +1099,6 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
                     },
                 })?;
         }
-
-        stale_branches.push(RemotePruneEntry {
-            remote_ref: local_branch.name.clone(),
-            branch: format!("{name}/{branch_name}"),
-        });
     }
 
     Ok(RemoteOutput::Prune {

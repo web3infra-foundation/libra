@@ -35,7 +35,8 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `--no-tags` | Fetch no tags at all, not even tags reachable from fetched commits (overrides the default auto-follow). | `libra fetch origin --no-tags` |
 | `--no-auto-gc` | Do not run a repacking/gc pass after fetching. Accepted no-op for Git parity: Libra's fetch never triggers an automatic gc, so there is nothing to disable. | `libra fetch origin --no-auto-gc` |
 | `--no-progress` | Do not show the progress meter (the "Receiving objects" spinner / remote progress) on stderr, matching `git fetch --no-progress`. | `libra fetch origin --no-progress` |
-| `--no-prune` | Do not prune remote-tracking refs that no longer exist on the remote. Accepted no-op for Git parity: Libra's fetch never prunes, so this already matches the default. (Git's `--prune`/`-p` is not exposed.) | `libra fetch origin --no-prune` |
+| `-p`, `--prune` | After the fetch, delete remote-tracking refs under `refs/remotes/<remote>/*` that the remote no longer advertises (reusing `remote prune`'s stale classification). Deletions plus an audit reflog entry run in one transaction. Local branches, tags, `refs/remotes/<remote>/HEAD`, and other remotes are never touched. With `--dry-run`, the stale refs are reported but not deleted. | `libra fetch origin -p` |
+| `--no-prune` | Do not prune remote-tracking refs (the default). `--prune`/`--no-prune` form a last-one-wins toggle: when both are given, the last on the command line wins (Git semantics). | `libra fetch origin --no-prune` |
 | `-f`, `--force` | Allow non-fast-forward updates and overwrite (clobber) a local tag that points elsewhere. Forced updates are marked `+` in `--porcelain` / `(forced update)` in human output. | `libra fetch origin --tags --force` |
 | `--dry-run` | Preview the remote-tracking ref updates the fetch would produce without downloading any objects or writing refs, reflog, or `FETCH_HEAD`. | `libra fetch origin --dry-run` |
 | `--append` | Append fetched ref records to `.libra/FETCH_HEAD` instead of overwriting it. (`-a` is reserved for `--all`.) | `libra fetch origin --append` |
@@ -176,17 +177,26 @@ Example (already up to date):
 
 ## Design Rationale
 
-### Why no --prune by default?
+### Pruning is opt-in, not the default
 
-Git added `fetch.prune = true` as a recommended default because stale remote-tracking
-refs accumulate silently. Libra chose not to prune by default for two reasons: (1) pruning
-requires an additional round-trip to enumerate the remote's current refs, adding latency to
-every fetch, and (2) in agent-driven workflows, stale tracking refs can serve as useful
-historical anchors for diffing against a previous remote state. When pruning is desired,
-`libra remote prune <name>` provides an explicit, auditable operation. This keeps `fetch`
-fast and predictable while giving users a deliberate pruning path. Git's `--no-prune`
-(don't prune) is accepted as a no-op since this already matches Libra's default; Git's
-opposite `--prune`/`-p` (prune during the fetch) is not exposed.
+Git ships `fetch.prune = true` as a recommended default because stale remote-tracking
+refs accumulate silently. Libra does **not** prune by default for two reasons: (1) in
+agent-driven workflows, stale tracking refs can serve as useful historical anchors for
+diffing against a previous remote state, and (2) destructive ref cleanup should be a
+deliberate choice. Pruning is therefore opt-in via `--prune`/`-p` (or the standalone
+`libra remote prune <name>`). `--no-prune` is the default; `--prune`/`--no-prune` form a
+last-one-wins toggle, matching Git.
+
+When `--prune` is given, after the fetch completes Libra removes every
+`refs/remotes/<remote>/*` ref the remote no longer advertises, classified by the same rule
+`remote prune` uses. The deletions and a non-lossy audit reflog entry (`<old> -> 0…0`) run
+in a single transaction, so a mid-prune failure rolls back every deletion. `--dry-run`
+reports the stale refs without writing. Documented narrowings versus Git: pruning is
+**full-remote scoped** (it cleans every stale tracking ref for the remote, like
+`remote prune`, rather than restricting to an explicit refspec), it is **skipped entirely
+when the remote advertises no refs at all** (so a transient empty advertisement cannot wipe
+every tracking ref), and pruned refs never appear in `FETCH_HEAD` (which records only
+fetched refs).
 
 ### Shallow fetch (`--depth`) is exposed as a stable flag
 
@@ -230,7 +240,7 @@ by default for maximum script friendliness.
 | Named remote | `libra fetch origin` | `git fetch origin` | `jj git fetch --remote origin` |
 | Single branch | `libra fetch origin main` | `git fetch origin main` | `jj git fetch --remote origin --branch main` |
 | All remotes | `libra fetch --all` | `git fetch --all` | `jj git fetch --all-remotes` |
-| Prune stale refs | `libra remote prune <name>` | `git fetch --prune` | Automatic |
+| Prune stale refs | `libra fetch -p` / `libra remote prune <name>` | `git fetch --prune` | Automatic |
 | Shallow fetch | `libra fetch --depth N` | `git fetch --depth N` | Not supported |
 | Dry-run preview | `libra fetch --dry-run` | `git fetch --dry-run` | Not supported |
 | Porcelain output | `libra fetch --porcelain` | `git fetch --porcelain` | No |

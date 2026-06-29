@@ -296,6 +296,8 @@ pub(crate) async fn run_pull(
         // `git pull` auto-follows tags (and honours remote.<name>.tagOpt).
         None,
         false,
+        // `pull` does not prune; use `fetch --prune` or `remote prune`.
+        false,
         &child_output,
     )
     .await

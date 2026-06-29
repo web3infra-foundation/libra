@@ -6,7 +6,7 @@
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`partial`。repository/refspec、`--all`、`--depth`、`--dry-run`、`-v/--verbose`、`--porcelain` 以及 `FETCH_HEAD` 写入与 `--append` 已公开；prune/tags、`-f/--force`、`--refmap`、`--atomic` 与 shallow 扩展参数（`--shallow-since` / `--shallow-exclude` / `--update-shallow`）仍未公开（依赖当前 build 缺失的 shallow/tag/prune 子系统）。
+- 兼容级别：`partial`。repository/refspec、`--all`、`--depth`、`--dry-run`、`-v/--verbose`、`--porcelain`、`--tags`/`--no-tags`、`--prune`/`-p`/`--no-prune` 以及 `FETCH_HEAD` 写入与 `--append` 已公开；`--refmap`、`--atomic` 与 shallow 扩展参数（`--shallow-since` / `--shallow-exclude` / `--update-shallow`）仍未公开。`--prune`/`-p` 在 fetch 完成后按 `remote prune` 的 stale 分类删除远端已不再 advertise 的 `refs/remotes/<remote>/*`（删除 + 审计 reflog 在单事务内，失败回滚；`--dry-run` 只预览不写；full-remote 范围而非 refspec 范围、远端 advertise 空 refs 时跳过——均为相对 Git 的有意收窄；本地分支、tag、`refs/remotes/<remote>/HEAD` 与其它远端不受影响）。`--prune`/`--no-prune` 为 last-one-wins toggle。
 
 - 当前矩阵承诺常用 Git 行为已支持；新增语义必须同步矩阵、用户文档和测试。
 
@@ -50,7 +50,7 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/fetch.md`。
 - Synopsis：`libra fetch [OPTIONS] [<repository> [<refspec>]]`。
-- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-a, --all`、`--depth <N>`、`--dry-run`、`--append`、`-v, --verbose`、`--porcelain`、`--tags`、`--no-tags`、`--no-auto-gc`（接受式 no-op：Libra 的 fetch 从不触发自动 gc，故无可禁用；字段 `no_auto_gc` 在解构 `FetchArgs` 时以 `_` 绑定、不被读取）、`--no-progress`（**实际生效**：经 `apply_no_progress` 把 `OutputConfig.progress` 强制为 `ProgressMode::None`（并 `progress_preference=None`）后再下传，从而抑制 `read_fetch_stream` 的 “Receiving objects” 进度 spinner 与 NDJSON 进度事件，对齐 `git fetch --no-progress`；带单元测试 `apply_no_progress_forces_progress_mode_off`）、`--no-prune`（接受式 no-op：Libra 的 fetch 从不修剪 remote-tracking 引用，故无可禁用；字段 `no_prune` 在解构 `FetchArgs` 时以 `_` 绑定、不被读取。Git 的 `--prune`/`-p` 未公开）。
+- 公开参数/子命令包括：`[<repository>]`、`[<refspec>]`、`-a, --all`、`--depth <N>`、`--dry-run`、`--append`、`-v, --verbose`、`--porcelain`、`--tags`、`--no-tags`、`--no-auto-gc`（接受式 no-op：Libra 的 fetch 从不触发自动 gc，故无可禁用；字段 `no_auto_gc` 在解构 `FetchArgs` 时以 `_` 绑定、不被读取）、`--no-progress`（**实际生效**：经 `apply_no_progress` 把 `OutputConfig.progress` 强制为 `ProgressMode::None`（并 `progress_preference=None`）后再下传，从而抑制 `read_fetch_stream` 的 “Receiving objects” 进度 spinner 与 NDJSON 进度事件，对齐 `git fetch --no-progress`；带单元测试 `apply_no_progress_forces_progress_mode_off`）、`-p, --prune`（**实际生效**：fetch 后用 `remote_advertised_branch_names` + `classify_stale_tracking_branches`（与 `remote prune` 共用，定义在 `remote.rs`）找出远端已不再 advertise 的 `refs/remotes/<remote>/*`，由 `prune_stale_remote_refs` 在单事务内逐条写一条审计 reflog（`<old> -> 0…0`，`ReflogAction::Fetch`）再删除该 ref，失败整体回滚；`pruned` 结果进入 `FetchRepositoryResult.pruned` 并在 human（`- [deleted] … -> <remote>/<branch>`）/porcelain（`- <old> <zero> <ref>`）/JSON 输出中呈现。`--dry-run` 只 classify 不删；远端 advertise 空 refs 时整体跳过 prune）、`--no-prune`（默认行为；`no_prune` 字段解构时以 `_` 绑定不被读取——`--prune`/`--no-prune` 经 clap `overrides_with` 组成 last-one-wins toggle）。
 - tag 处理（每 remote 解析：CLI flag > `remote.<name>.tagOpt` > 默认 **auto-follow**）。默认 auto-follow：协商时发送 `include-tag` capability，fetch 后把「对象/目标已落本地」的远端 tag 持久化到共享 `refs/tags/*`（lightweight 看 commit 是否到位，annotated 看 tag 对象是否经 include-tag 到位）。`--tags` 抓全部远端 tag（显式 `want` `refs/tags/*`）；`--no-tags` 一个都不抓。本地已存在同名 tag 时 create-if-absent / 相同跳过 / 不同则跳过并 warning，`-f`/`--force` 时 clobber。tag 不写 reflog。
 - `-f` / `--force`：允许非 fast-forward 更新并 clobber 指向别处的本地 tag；输出对非 FF/clobber 标 `+`（porcelain）/`(forced update)`（human）。FF 判定用 `commit_is_ancestor`（remote-tracking 分支本就强制更新，故 `forced` 主要是信息性标记 + tag clobber 闸门）。
 

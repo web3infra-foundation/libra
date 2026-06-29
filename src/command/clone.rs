@@ -3182,6 +3182,8 @@ async fn clone_into_destination(
         false,
         Some(clone_tag_mode),
         false,
+        // A fresh clone has no remote-tracking refs to prune.
+        false,
         &child_output,
     )
     .await

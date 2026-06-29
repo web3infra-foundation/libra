@@ -19,7 +19,10 @@ use libra::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
     },
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    utils::{
+        output::OutputConfig,
+        test::{ChangeDirGuard, setup_with_new_libra_in},
+    },
 };
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};
@@ -1321,9 +1324,18 @@ async fn test_fetch_tags_creates_local_tags_and_is_idempotent() {
         second_json["data"]["remotes"][0]["objects_fetched"], 0,
         "second --tags fetch must download nothing (no re-download): {second_json}"
     );
-    assert_eq!(
-        second_json["data"]["remotes"][0]["bytes_received"], 0,
-        "second --tags fetch transfers no bytes: {second_json}"
+    // The real idempotency guarantee is `objects_fetched == 0` (above). The
+    // second `--tags` fetch re-advertises the already-present tags, so depending
+    // on the transport's up-to-date short-circuit, `git-upload-pack` may still
+    // return a minimal *empty* pack (a 12-byte header + a 20-byte SHA-1 / 32-byte
+    // SHA-256 trailer). Allow that empty-pack overhead rather than asserting an
+    // exact zero, which is environment-dependent on the system Git version.
+    let second_bytes = second_json["data"]["remotes"][0]["bytes_received"]
+        .as_u64()
+        .expect("bytes_received should be a number");
+    assert!(
+        second_bytes <= 44,
+        "second --tags fetch must transfer no real data, only at most an empty pack: {second_json}"
     );
 }
 
@@ -1711,5 +1723,239 @@ fn fetch_no_prune_flag_is_accepted() {
     assert!(
         !stderr.contains("unexpected argument"),
         "--no-prune is accepted by the parser: {stderr}"
+    );
+}
+
+/// Build a bare git remote carrying `main` plus `feature1/2/3`, and a Libra repo
+/// that has fetched all of them (so `refs/remotes/origin/*` tracking refs
+/// exist). Returns `(temp_root, repo_dir, default_branch, cwd_guard)`; the guard
+/// keeps the process CWD pointed at the Libra repo for in-process fetch calls
+/// and must be held for the duration of the test.
+async fn setup_multi_branch_remote_and_fetch() -> (TempDir, PathBuf, String, ChangeDirGuard) {
+    let temp_root = tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+    let repo_dir = temp_root.path().join("libra_repo");
+
+    let git = |args: &[&str], cwd: Option<&Path>| {
+        let mut cmd = Command::new("git");
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        assert!(
+            cmd.args(args)
+                .status()
+                .expect("git command failed")
+                .success(),
+            "git {args:?} failed"
+        );
+    };
+
+    git(&["init", "--bare", remote_dir.to_str().unwrap()], None);
+    git(&["init", work_dir.to_str().unwrap()], None);
+    git(&["config", "user.name", "Libra Tester"], Some(&work_dir));
+    git(
+        &["config", "user.email", "tester@example.com"],
+        Some(&work_dir),
+    );
+    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    git(&["add", "README.md"], Some(&work_dir));
+    git(&["commit", "-m", "initial commit"], Some(&work_dir));
+
+    let default_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+
+    git(
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+        Some(&work_dir),
+    );
+    git(
+        &[
+            "push",
+            "origin",
+            &format!("HEAD:refs/heads/{default_branch}"),
+        ],
+        Some(&work_dir),
+    );
+    for branch in ["feature1", "feature2", "feature3"] {
+        git(&["checkout", "-b", branch], Some(&work_dir));
+        git(&["push", "origin", branch], Some(&work_dir));
+    }
+
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let guard = ChangeDirGuard::new(&repo_dir);
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
+
+    // Initial fetch establishes the `refs/remotes/origin/*` tracking refs.
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path,
+        },
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    (temp_root, repo_dir, default_branch, guard)
+}
+
+/// Construct a minimal local `FetchArgs` for the given repository, toggling only
+/// `--prune` / `--dry-run`. Progress is suppressed to keep test output quiet.
+fn local_fetch_args(repository: &str, prune: bool, dry_run: bool) -> fetch::FetchArgs {
+    fetch::FetchArgs {
+        repository: Some(repository.to_string()),
+        refspec: None,
+        all: false,
+        depth: None,
+        dry_run,
+        append: false,
+        verbose: false,
+        porcelain: false,
+        force: false,
+        tags: false,
+        no_tags: false,
+        no_auto_gc: false,
+        no_progress: true,
+        prune,
+        no_prune: false,
+    }
+}
+
+async fn origin_tracking_ref_exists(branch: &str) -> bool {
+    Branch::find_branch_result(&format!("refs/remotes/origin/{branch}"), Some("origin"))
+        .await
+        .expect("failed to query remote-tracking branch")
+        .is_some()
+}
+
+/// `fetch --prune` removes `refs/remotes/origin/*` refs the remote no longer
+/// advertises, while leaving live tracking refs intact.
+#[tokio::test]
+#[serial]
+async fn test_fetch_prune_removes_stale_tracking_refs() {
+    let (temp_root, _repo_dir, default_branch, _guard) =
+        setup_multi_branch_remote_and_fetch().await;
+    let remote_dir = temp_root.path().join("remote.git");
+
+    for branch in ["feature1", "feature2", "feature3"] {
+        assert!(
+            origin_tracking_ref_exists(branch).await,
+            "{branch} should be tracked after the initial fetch"
+        );
+    }
+
+    // Remove two branches on the remote, then prune.
+    for branch in ["feature1", "feature3"] {
+        assert!(
+            Command::new("git")
+                .current_dir(&remote_dir)
+                .args(["update-ref", "-d", &format!("refs/heads/{branch}")])
+                .status()
+                .expect("git update-ref -d failed")
+                .success()
+        );
+    }
+
+    fetch::execute_safe(
+        local_fetch_args("origin", true, false),
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("fetch --prune should succeed");
+
+    assert!(
+        !origin_tracking_ref_exists("feature1").await,
+        "stale feature1 tracking ref should be pruned"
+    );
+    assert!(
+        !origin_tracking_ref_exists("feature3").await,
+        "stale feature3 tracking ref should be pruned"
+    );
+    assert!(
+        origin_tracking_ref_exists("feature2").await,
+        "live feature2 tracking ref must be kept"
+    );
+    assert!(
+        origin_tracking_ref_exists(&default_branch).await,
+        "live default-branch tracking ref must be kept"
+    );
+}
+
+/// `fetch --dry-run --prune` reports stale refs but must not delete them; a real
+/// `fetch --prune` afterwards removes them.
+#[tokio::test]
+#[serial]
+async fn test_fetch_prune_dry_run_previews_without_deleting() {
+    let (temp_root, _repo_dir, _default_branch, _guard) =
+        setup_multi_branch_remote_and_fetch().await;
+    let remote_dir = temp_root.path().join("remote.git");
+
+    assert!(
+        Command::new("git")
+            .current_dir(&remote_dir)
+            .args(["update-ref", "-d", "refs/heads/feature1"])
+            .status()
+            .expect("git update-ref -d failed")
+            .success()
+    );
+
+    // Dry-run prune must not write anything.
+    fetch::execute_safe(
+        local_fetch_args("origin", true, true),
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("fetch --dry-run --prune should succeed");
+    assert!(
+        origin_tracking_ref_exists("feature1").await,
+        "dry-run prune must not delete the stale tracking ref"
+    );
+
+    // A real prune then removes it.
+    fetch::execute_safe(
+        local_fetch_args("origin", true, false),
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("fetch --prune should succeed");
+    assert!(
+        !origin_tracking_ref_exists("feature1").await,
+        "a real prune removes the stale tracking ref"
+    );
+}
+
+/// `-p` / `--prune` are accepted by the parser, and `--prune --no-prune` form a
+/// last-one-wins toggle (clap `overrides_with`) rather than a hard conflict.
+#[test]
+fn test_fetch_prune_flag_and_toggle_parse() {
+    let repo = init_temp_repo();
+    for flag in ["-p", "--prune"] {
+        let output = run_libra_command(&["fetch", flag], repo.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("unexpected argument") && !stderr.contains("unrecognized"),
+            "fetch {flag} should be accepted by the parser: {stderr}"
+        );
+    }
+    let output = run_libra_command(&["fetch", "--prune", "--no-prune"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("cannot be used with"),
+        "--prune and --no-prune should form a last-wins toggle, not a hard conflict: {stderr}"
     );
 }

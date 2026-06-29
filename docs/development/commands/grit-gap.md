@@ -702,12 +702,12 @@ gantt
   - `--all` + `--prune`：每个 remote fetch 后独立 prune，不需要两段式全成功门。
   - `--tags` + `--prune`：tag 不被 prune（`refs/tags/*` 不在 stale tracking 列表中），但 `refs/tags/<remote-tag>` 不存在时也不删除本地存在的相同名 tag。
   - `--depth` + `--prune`：shallow 仓库下 prune 行为必须与 `--depth` 一致，不得因为 prune 引入新的边界拉取。
-  - `--porcelain` + `--prune`：prune 报告行必须以 `pruned <local-ref>` 形式与 `tag-update` / `branch-update` 同构。
+  - `--porcelain` + `--prune`：**已实现并定稿为 Git 兼容格式**——prune 报告行用 `-` flag，输出 `- <old-oid> <zero-oid> <local-ref>`，与 update 行的 `<flag> <old> <new> <ref>` 列结构同构（`old-oid`/`zero-oid` 按 hash kind 取 40/64 位）。早期草案写的 `pruned <local-ref>` 因破坏列结构被放弃；以本行为准。
   - `--force` + `--prune` + 非 fast-forward：force fetch 后的 prune 仍只针对 stale 远端 ref，不删除 force 更新过的本地 ref。
   - `--multiple` / `<repository> <refspec>` + `--prune`：refspec 解析为 fetch spec 后，prune 仅清理 `refs/remotes/<remote>/*` 中**未匹配本次 refspec** 的 ref（不能清掉本次将更新的 ref）。
-- [ ] **FETCH_HEAD 与 prune 顺序**：`--append` + `--prune` 时，FETCH_HEAD 追加发生在 prune 之前；`--prune` 删掉的 ref 不出现在追加的 FETCH_HEAD 行中。
-- [ ] **reflog 语义**：被 prune 的 ref 写一条 `refs/remotes/<remote>/<branch>: HEAD: deleted by fetch --prune`（或等效非丢失分类的 entry），不丢失审计链。
-- [ ] **退出码**：成功（含 prune 删了 ref）exit 0；部分 ref prune 失败仍 exit 0 但 stderr 输出失败 ref 列表；网络中断导致 fetch 未完成的 remote 不进入 prune 阶段（`remote update` 已有此行为，需复用到 `fetch --prune`）。
+- [x] **FETCH_HEAD 与 prune**：核心不变量是「`--prune` 删掉的 ref 不出现在 FETCH_HEAD 行中」。**已满足且与执行顺序无关**：被 prune 的 ref 是远端已不再 advertise 的 stale ref，从不进入 `refs_updated`，而 `format_fetch_head` 只遍历 `refs_updated`，因此无论 prune 在 FETCH_HEAD 写入之前还是之后（当前实现：prune 在 `fetch_repository_with_result` 内、FETCH_HEAD 在其后写），pruned ref 都不可能出现在 FETCH_HEAD 中。原草案要求的「FETCH_HEAD 追加发生在 prune 之前」因此是充分而非必要条件，不再作为硬约束。
+- [x] **reflog 语义**：**已实现**——`prune_stale_remote_refs` 在删除每个 stale ref 前，于同一事务内写一条 `ReflogAction::Fetch` 的 reflog entry（`old_oid -> 0…0`）。reflog 表以 ref 名为键、对 reference 行无外键级联，故该 entry 在 ref 删除后仍保留，构成「非丢失分类的 entry」审计链。
+- [x] **退出码**：成功（含 prune 删了 ref）exit 0。**prune 失败采用「原子回滚 + 非零退出」**，而非早期草案设想的「部分失败仍 exit 0」——后者与下一条「失败恢复」的全量回滚要求自相矛盾。当前实现把一次 prune 的所有 ref 删除 + 审计 reflog 放在单个事务里：任一条失败即整体回滚并向上传播错误（fetch 退出非零），不会出现「部分 ref 被删、部分保留」的中间态。网络中断导致 fetch 未完成的 remote 不进入 prune 阶段（fetch 失败即返回，prune 是 fetch 成功后的后续步骤）。
 - [ ] **失败恢复**：prune 阶段若因 SQLite 事务失败中断，已删除的 refs 必须全部回滚，不得出现部分 remote 被 prune 而部分未 prune 的状态。
 
 **验证**：

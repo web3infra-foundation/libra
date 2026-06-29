@@ -29,7 +29,12 @@ use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::{
-    command::{index_pack, load_object},
+    command::{
+        index_pack, load_object,
+        remote::{
+            RemotePruneEntry, classify_stale_tracking_branches, remote_advertised_branch_names,
+        },
+    },
     git_protocol::ServiceType::{self, UploadPack},
     internal::{
         branch::Branch,
@@ -568,10 +573,20 @@ pub struct FetchArgs {
     #[clap(long = "no-progress")]
     pub no_progress: bool,
 
+    /// Before fetching, delete any remote-tracking ref under
+    /// `refs/remotes/<remote>/*` that the remote no longer advertises (a
+    /// `refs/heads/*` or `refs/mr/*` ref). Reuses `remote prune`'s stale
+    /// classification. With `--dry-run`, the stale refs are reported but not
+    /// deleted. Mutually exclusive with `--no-prune` on a last-one-wins basis
+    /// (matching Git). Local branches, tags, and other remotes are never
+    /// touched.
+    #[clap(short = 'p', long = "prune", overrides_with = "no_prune")]
+    pub prune: bool,
+
     /// Do not prune remote-tracking refs that no longer exist on the remote.
-    /// Accepted for Git parity and is a no-op: Libra's fetch never prunes, so
-    /// this already matches the default. (Git's `--prune` / `-p` is not exposed.)
-    #[clap(long = "no-prune")]
+    /// This is the default. Pass `--prune`/`-p` to enable pruning; when both are
+    /// given, the last one on the command line wins (Git semantics).
+    #[clap(long = "no-prune", overrides_with = "prune")]
     pub no_prune: bool,
 }
 
@@ -608,6 +623,25 @@ pub struct FetchRepositoryResult {
     /// Bytes received in the fetch pack stream (the `.pack` payload size). Zero
     /// when nothing was transferred (already up to date / nothing to fetch).
     pub bytes_received: usize,
+    /// Stale remote-tracking refs removed by `--prune`/`-p` (or, with
+    /// `--dry-run`, the refs that *would* be removed). Empty unless pruning was
+    /// requested. Serialized only when non-empty so a plain fetch keeps its
+    /// original JSON shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<FetchPruneEntry>,
+}
+
+/// A remote-tracking ref removed (or, in `--dry-run`, slated for removal) by
+/// `fetch --prune`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FetchPruneEntry {
+    /// Full local ref name, e.g. `refs/remotes/origin/feature`.
+    pub remote_ref: String,
+    /// Display form `<remote>/<branch>`, e.g. `origin/feature`.
+    pub branch: String,
+    /// The object id the ref pointed at before deletion, when it could be read.
+    /// Populated for the porcelain old-oid column and JSON audit output.
+    pub old_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -916,6 +950,19 @@ fn format_fetch_porcelain(result: &FetchOutput) -> String {
                 update.new_oid, update.remote_ref
             ));
         }
+        // `--prune`/`-p`: a removed ref uses the `-` flag with an all-zero
+        // new-oid (the ref no longer exists), structurally isomorphic with the
+        // `{flag} {old} {new} {ref}` update lines above. A missing old-oid falls
+        // back to the hash-kind-correct zero id (40 hex for SHA-1, 64 for
+        // SHA-256); the new-oid zero always matches the old-oid width.
+        for entry in &remote.pruned {
+            let old_oid = entry
+                .old_oid
+                .clone()
+                .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
+            let zero = "0".repeat(old_oid.len());
+            lines.push(format!("- {old_oid} {zero} {}", entry.remote_ref));
+        }
     }
     lines.join("\n")
 }
@@ -953,6 +1000,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         no_tags,
         no_auto_gc: _,
         no_progress,
+        prune,
         no_prune: _,
     } = args;
 
@@ -991,7 +1039,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
             }
             results.push(
                 fetch_repository_with_result(
-                    remote, None, false, depth, dry_run, tag_cli, force, output,
+                    remote, None, false, depth, dry_run, tag_cli, force, prune, output,
                 )
                 .await
                 .map_err(CliError::from)?,
@@ -1053,6 +1101,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         dry_run,
         tag_cli,
         force,
+        prune,
         output,
     )
     .await
@@ -1095,7 +1144,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
         writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
-        if remote.refs_updated.is_empty() {
+        if remote.refs_updated.is_empty() && remote.pruned.is_empty() {
             writeln!(writer, "Already up to date with '{}'", remote.remote)
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
             continue;
@@ -1135,6 +1184,17 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
                     }
                 }
             }
+        }
+
+        // `--prune`/`-p`: report each removed stale remote-tracking ref, in the
+        // `<remote>/<branch>` display form used for the other ref lines.
+        for entry in &remote.pruned {
+            writeln!(
+                writer,
+                " - [deleted]         (none)     -> {}",
+                entry.branch
+            )
+            .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
         }
 
         writeln!(writer, " {} objects fetched", remote.objects_fetched)
@@ -1270,6 +1330,7 @@ pub async fn fetch_repository_safe(
         false,
         tag_cli,
         false,
+        false,
         output,
     )
     .await
@@ -1285,6 +1346,7 @@ pub(crate) async fn fetch_repository_with_result(
     dry_run: bool,
     tag_cli: Option<TagFetchMode>,
     force: bool,
+    prune: bool,
     output: &OutputConfig,
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
@@ -1314,12 +1376,16 @@ pub(crate) async fn fetch_repository_with_result(
     let mut refs = discovery.refs.clone();
     if refs.is_empty() {
         tracing::debug!("fetch skipped because remote has no refs");
+        // Conservatively skip pruning when the remote advertises no refs at all
+        // (a transient/broken advertisement) so a single empty response cannot
+        // wipe every remote-tracking ref.
         return Ok(FetchRepositoryResult {
             remote: remote_config.name,
             url: normalized_url,
             refs_updated: Vec::new(),
             objects_fetched: 0,
             bytes_received: 0,
+            pruned: Vec::new(),
         });
     }
 
@@ -1374,12 +1440,25 @@ pub(crate) async fn fetch_repository_with_result(
     // FETCH_HEAD).
     if dry_run {
         let refs_updated = compute_fetch_ref_preview(&remote_config, &refs).await?;
+        // `--dry-run --prune`: report the stale refs that would be removed, but
+        // write nothing.
+        let pruned = if prune {
+            prune_stale_remote_refs(
+                &remote_config.name,
+                &remote_advertised_branch_names(&discovery.refs),
+                true,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         return Ok(FetchRepositoryResult {
             remote: remote_config.name,
             url: normalized_url,
             refs_updated,
             objects_fetched: 0,
             bytes_received: 0,
+            pruned,
         });
     }
 
@@ -1456,12 +1535,28 @@ pub(crate) async fn fetch_repository_with_result(
     };
     refs_updated.extend(persist_fetched_tags(&tags_to_persist, force).await?);
 
+    // `--prune`/`-p`: after the fetch has updated tracking refs, delete any
+    // `refs/remotes/<name>/*` the remote no longer advertises (transactionally,
+    // with an audit reflog entry). Only stale tracking refs for *this* remote
+    // are touched.
+    let pruned = if prune {
+        prune_stale_remote_refs(
+            &remote_config.name,
+            &remote_advertised_branch_names(&discovery.refs),
+            false,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+
     Ok(FetchRepositoryResult {
         remote: remote_config.name,
         url: normalized_url,
         refs_updated,
         objects_fetched,
         bytes_received,
+        pruned,
     })
 }
 
@@ -2234,6 +2329,99 @@ pub(crate) fn resolve_remote_default_branch(
         .map(str::to_owned)
 }
 
+/// Prune stale `refs/remotes/<name>/*` tracking refs after a fetch (`--prune`/`-p`).
+///
+/// Staleness is classified by [`classify_stale_tracking_branches`] — the same
+/// rule `remote prune` uses: a local tracking ref is stale when the remote no
+/// longer advertises a matching `refs/heads/*` / `refs/mr/*` ref.
+/// `refs/remotes/<name>/HEAD`, local branches, tags, and every other remote are
+/// never considered.
+///
+/// With `dry_run`, the stale refs are classified and returned but nothing is
+/// written. Otherwise each stale ref is removed and a non-lossy audit reflog
+/// entry (`<old> -> 0…0`) recorded **inside a single transaction**: a failure
+/// part-way through rolls back every deletion, so the repository never ends up
+/// in a partially-pruned state.
+async fn prune_stale_remote_refs(
+    remote_name: &str,
+    remote_branch_names: &HashSet<String>,
+    dry_run: bool,
+) -> Result<Vec<FetchPruneEntry>, FetchError> {
+    let local = Branch::list_branches_result(Some(remote_name))
+        .await
+        .map_err(|error| FetchError::UpdateRefs {
+            message: format!(
+                "failed to list remote-tracking refs for prune of '{remote_name}': {error}"
+            ),
+        })?;
+
+    let pruned: Vec<FetchPruneEntry> =
+        classify_stale_tracking_branches(remote_name, remote_branch_names, &local)
+            .into_iter()
+            .map(|entry: RemotePruneEntry| {
+                let old_oid = local
+                    .iter()
+                    .find(|b| b.name == entry.remote_ref)
+                    .map(|b| b.commit.to_string());
+                FetchPruneEntry {
+                    remote_ref: entry.remote_ref,
+                    branch: entry.branch,
+                    old_oid,
+                }
+            })
+            .collect();
+
+    if dry_run || pruned.is_empty() {
+        return Ok(pruned);
+    }
+
+    let db = get_db_conn_instance().await;
+    let remote_owned = remote_name.to_string();
+    let to_delete = pruned.clone();
+    let zero = ObjectHash::zero_str(get_hash_kind()).to_string();
+    db.transaction(|txn| {
+        Box::pin(async move {
+            for entry in &to_delete {
+                // Record a non-lossy audit entry before deleting the ref. The
+                // reflog table is keyed by ref name (no FK to the reference
+                // row), so the entry survives the ref's deletion and the prune
+                // audit chain is not lost.
+                let context = ReflogContext {
+                    old_oid: entry.old_oid.clone().unwrap_or_else(|| zero.clone()),
+                    new_oid: zero.clone(),
+                    action: ReflogAction::Fetch,
+                };
+                Reflog::insert_single_entry(txn, &context, &entry.remote_ref)
+                    .await
+                    .map_err(|source| FetchError::UpdateRefs {
+                        message: format!(
+                            "failed to record prune reflog for '{}': {source}",
+                            entry.remote_ref
+                        ),
+                    })?;
+                Branch::delete_branch_result_with_conn(txn, &entry.remote_ref, Some(&remote_owned))
+                    .await
+                    .map_err(|source| FetchError::UpdateRefs {
+                        message: format!(
+                            "failed to prune stale remote-tracking ref '{}': {source}",
+                            entry.remote_ref
+                        ),
+                    })?;
+            }
+            Ok::<_, FetchError>(())
+        })
+    })
+    .await
+    .map_err(|source| FetchError::UpdateRefs {
+        message: match source {
+            TransactionError::Connection(error) => error.to_string(),
+            TransactionError::Transaction(error) => error.to_string(),
+        },
+    })?;
+
+    Ok(pruned)
+}
+
 async fn update_references(
     remote_config: &RemoteConfig,
     refs: &[DiscRef],
@@ -2800,6 +2988,7 @@ mod tests {
                         forced: false,
                     },
                 ],
+                pruned: Vec::new(),
             }],
         };
 
@@ -2840,6 +3029,7 @@ mod tests {
                     new_oid: "d".repeat(40),
                     forced: false,
                 }],
+                pruned: Vec::new(),
             }],
         };
 
@@ -2848,6 +3038,93 @@ mod tests {
         assert!(body.contains("\tnot-for-merge\t"));
         // The tracking prefix is stripped to the bare branch name in the desc.
         assert!(body.contains("branch 'main' of https://example.com/x.git"));
+    }
+
+    /// `--prune` renders a `- <old> <zero> <ref>` porcelain line, structurally
+    /// isomorphic with the update lines, and pruned refs never leak into the
+    /// FETCH_HEAD body (which only records fetched refs).
+    #[test]
+    fn fetch_prune_porcelain_and_fetch_head_layout() {
+        use super::{
+            FetchOutput, FetchPruneEntry, FetchRepositoryResult, format_fetch_head,
+            format_fetch_porcelain,
+        };
+
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 0,
+                bytes_received: 0,
+                refs_updated: Vec::new(),
+                pruned: vec![FetchPruneEntry {
+                    remote_ref: "refs/remotes/origin/gone".to_string(),
+                    branch: "origin/gone".to_string(),
+                    old_oid: Some("e".repeat(40)),
+                }],
+            }],
+        };
+
+        let porcelain = format_fetch_porcelain(&output);
+        let cols: Vec<&str> = porcelain.split(' ').filter(|c| !c.is_empty()).collect();
+        assert!(porcelain.starts_with("- "), "pruned flag is `-`");
+        assert_eq!(cols.len(), 4, "<flag> <old> <new> <ref>");
+        assert_eq!(cols[0], "-");
+        assert_eq!(cols[1], "e".repeat(40));
+        assert_eq!(
+            cols[2],
+            "0".repeat(40),
+            "deleted ref has an all-zero new-oid"
+        );
+        assert_eq!(cols[3], "refs/remotes/origin/gone");
+
+        // Pruned refs are never fetched, so they must not appear in FETCH_HEAD.
+        let body = format_fetch_head(&output);
+        assert!(
+            !body.contains("gone"),
+            "pruned ref leaked into FETCH_HEAD: {body:?}"
+        );
+    }
+
+    /// The porcelain prune row uses a hash-kind-correct zero id even when the
+    /// pruned ref's old object id is unavailable: a SHA-256 repo emits 64 zeros,
+    /// not a hardcoded 40. `#[serial]` because it mutates the process-global
+    /// hash kind.
+    #[test]
+    #[serial_test::serial]
+    fn fetch_prune_porcelain_zero_oid_is_hash_kind_aware() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use super::{FetchOutput, FetchPruneEntry, FetchRepositoryResult, format_fetch_porcelain};
+
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
+        let output = FetchOutput {
+            all: false,
+            requested_remote: Some("origin".to_string()),
+            refspec: None,
+            remotes: vec![FetchRepositoryResult {
+                remote: "origin".to_string(),
+                url: "https://example.com/x.git".to_string(),
+                objects_fetched: 0,
+                bytes_received: 0,
+                refs_updated: Vec::new(),
+                pruned: vec![FetchPruneEntry {
+                    remote_ref: "refs/remotes/origin/gone".to_string(),
+                    branch: "origin/gone".to_string(),
+                    old_oid: None,
+                }],
+            }],
+        };
+        let porcelain = format_fetch_porcelain(&output);
+        let cols: Vec<&str> = porcelain.split(' ').filter(|c| !c.is_empty()).collect();
+        assert_eq!(cols.len(), 4, "<flag> <old> <new> <ref>");
+        assert_eq!(cols[0], "-");
+        assert_eq!(cols[1], "0".repeat(64), "SHA-256 old-oid zero is 64 hex");
+        assert_eq!(cols[2], "0".repeat(64), "SHA-256 new-oid zero is 64 hex");
+        assert_eq!(cols[3], "refs/remotes/origin/gone");
     }
 
     /// Pin the `Display` format for the static-message and direct-message
