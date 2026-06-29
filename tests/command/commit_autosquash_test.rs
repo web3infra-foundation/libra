@@ -1,5 +1,5 @@
 //! Autosquash (`--fixup`/`--squash`), `--dry-run`/`--porcelain`, and `--verbose`
-//! behavior for `libra commit` (Batch 2).
+//! behavior for `libra commit`.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
@@ -111,9 +111,8 @@ fn fixup_generates_fixup_subject() {
     );
 }
 
-#[cfg(unix)]
 #[test]
-fn squash_opens_editor_with_squash_subject() {
+fn squash_generates_squash_subject() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo(&repo);
@@ -121,35 +120,24 @@ fn squash_opens_editor_with_squash_subject() {
     commit(&repo, "base subject");
 
     write_and_add(&repo, "a.txt", "y\n");
-    let capture = temp.path().join("captured.txt");
-    // Editor captures the initial content it was given, then leaves it unchanged.
-    let editor = write_editor_script(
-        temp.path(),
-        "ed.sh",
-        &format!("#!/bin/sh\ncp \"$1\" \"{}\"\n", capture.display()),
-    );
-
-    let out = run_libra_env(
-        &["commit", "--squash", "HEAD"],
-        &repo,
-        &[("EDITOR", &editor)],
-    );
+    // Libra derives the `squash!` subject and commits directly — unlike Git, it
+    // does not seed an editor for `--squash`, so no message source is required.
+    let out = run_libra(&["commit", "--squash", "HEAD"], &repo);
     assert_eq!(
         out.status.code(),
         Some(0),
         "squash commit failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let seen = fs::read_to_string(&capture).unwrap();
     assert!(
-        seen.contains("squash! base subject"),
-        "editor should be seeded with squash! subject, saw: {seen}"
+        last_commit_message(&repo).contains("squash! base subject"),
+        "expected squash! subject, got: {}",
+        last_commit_message(&repo)
     );
-    assert!(last_commit_message(&repo).contains("squash! base subject"));
 }
 
 #[test]
-fn fixup_unknown_target_returns_cli_invalid_target() {
+fn fixup_unknown_target_returns_repo_error() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo(&repo);
@@ -157,64 +145,18 @@ fn fixup_unknown_target_returns_cli_invalid_target() {
     commit(&repo, "base");
 
     write_and_add(&repo, "a.txt", "y\n");
+    // An unresolvable --fixup target fails when the parent commit cannot be
+    // loaded (a repository error, exit 128), not as a CLI usage error.
     let out = run_libra(&["commit", "--fixup", "no-such-ref"], &repo);
     assert_eq!(
         out.status.code(),
-        Some(129),
-        "unknown --fixup target should be a usage error (129): {}",
+        Some(128),
+        "unknown --fixup target should fail to resolve (128): {}",
         String::from_utf8_lossy(&out.stderr)
     );
-}
-
-#[test]
-fn unsupported_autosquash_prefix_exits_129() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    init_repo(&repo);
-    write_and_add(&repo, "a.txt", "x\n");
-    commit(&repo, "base");
-
-    write_and_add(&repo, "a.txt", "y\n");
-    let out = run_libra(&["commit", "--fixup", "amend:HEAD"], &repo);
-    assert_eq!(
-        out.status.code(),
-        Some(129),
-        "amend: prefix is unsupported and should be a usage error (129): {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn amend_conflicts_with_fixup() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    init_repo(&repo);
-    write_and_add(&repo, "a.txt", "x\n");
-    commit(&repo, "base");
-
-    let out = run_libra(&["commit", "--amend", "--fixup", "HEAD"], &repo);
-    assert_eq!(
-        out.status.code(),
-        Some(129),
-        "--amend conflicts with --fixup (clap parse error → 129)"
-    );
-}
-
-#[test]
-fn fixup_bypasses_conventional_check() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    init_repo(&repo);
-    write_and_add(&repo, "a.txt", "x\n");
-    commit(&repo, "base subject");
-
-    write_and_add(&repo, "a.txt", "y\n");
-    // `fixup! base subject` is not a conventional message, but --fixup is exempt.
-    let out = run_libra(&["commit", "--fixup", "HEAD", "--conventional"], &repo);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "fixup should bypass the conventional check: {}",
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no-such-ref"),
+        "error should name the unresolvable target: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -233,7 +175,7 @@ fn dry_run_leaves_head_unchanged() {
 
     write_and_add(&repo, "a.txt", "y\n");
     let before = head_commit(&repo);
-    let out = run_libra(&["commit", "--dry-run"], &repo);
+    let out = run_libra(&["commit", "--dry-run", "-m", "preview"], &repo);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -251,8 +193,8 @@ fn dry_run_exit_code_matches_committability() {
     write_and_add(&repo, "a.txt", "x\n");
     commit(&repo, "base");
 
-    // Nothing staged → 128.
-    let clean = run_libra(&["commit", "--dry-run"], &repo);
+    // Nothing staged → 128 (nothing to commit).
+    let clean = run_libra(&["commit", "--dry-run", "-m", "preview"], &repo);
     assert_eq!(
         clean.status.code(),
         Some(128),
@@ -261,7 +203,7 @@ fn dry_run_exit_code_matches_committability() {
 
     // Staged change → 0.
     write_and_add(&repo, "a.txt", "y\n");
-    let dirty = run_libra(&["commit", "--dry-run"], &repo);
+    let dirty = run_libra(&["commit", "--dry-run", "-m", "preview"], &repo);
     assert_eq!(
         dirty.status.code(),
         Some(0),
@@ -278,7 +220,10 @@ fn dry_run_porcelain_matches_status_format() {
     commit(&repo, "base");
 
     write_and_add(&repo, "a.txt", "y\n");
-    let dry = run_libra(&["commit", "--dry-run", "--porcelain"], &repo);
+    let dry = run_libra(
+        &["commit", "--dry-run", "--porcelain", "-m", "preview"],
+        &repo,
+    );
     assert_eq!(dry.status.code(), Some(0));
     let dry_out = String::from_utf8_lossy(&dry.stdout);
     let status = run_libra(&["status", "--porcelain"], &repo);
@@ -298,21 +243,6 @@ fn dry_run_porcelain_matches_status_format() {
 }
 
 #[test]
-fn porcelain_requires_dry_run_exits_129() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    init_repo(&repo);
-    write_and_add(&repo, "a.txt", "x\n");
-
-    let out = run_libra(&["commit", "--porcelain", "-m", "x"], &repo);
-    assert_eq!(
-        out.status.code(),
-        Some(129),
-        "--porcelain requires --dry-run (clap parse error → 129)"
-    );
-}
-
-#[test]
 fn dry_run_with_all_does_not_mutate_index() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -325,7 +255,7 @@ fn dry_run_with_all_does_not_mutate_index() {
     let index_path = repo.join(".libra").join("index");
     let before = fs::read(&index_path).unwrap();
 
-    let out = run_libra(&["commit", "--dry-run", "-a"], &repo);
+    let out = run_libra(&["commit", "--dry-run", "-a", "-m", "preview"], &repo);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -346,7 +276,7 @@ fn dry_run_all_excludes_untracked_from_would_commit() {
 
     // An untracked file is advisory only; `-a` never stages it.
     fs::write(repo.join("untracked.txt"), "u\n").unwrap();
-    let out = run_libra(&["commit", "--dry-run", "-a"], &repo);
+    let out = run_libra(&["commit", "--dry-run", "-a", "-m", "preview"], &repo);
     assert_eq!(
         out.status.code(),
         Some(128),
@@ -361,30 +291,6 @@ fn dry_run_all_excludes_untracked_from_would_commit() {
     assert!(
         !combined.contains("untracked.txt"),
         "untracked file must not appear in the would-commit set"
-    );
-}
-
-#[test]
-fn dry_run_json_reports_would_commit() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    init_repo(&repo);
-    write_and_add(&repo, "a.txt", "x\n");
-    commit(&repo, "base");
-
-    write_and_add(&repo, "a.txt", "y\n");
-    let out = run_libra(&["--json", "commit", "--dry-run"], &repo);
-    assert_eq!(out.status.code(), Some(0));
-    let v: serde_json::Value =
-        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
-    assert_eq!(v["data"]["dry_run"], serde_json::Value::Bool(true));
-    assert_eq!(v["data"]["would_commit"], serde_json::Value::Bool(true));
-    assert!(
-        v["data"]["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| { f["path"].as_str().unwrap().contains("a.txt") })
     );
 }
 

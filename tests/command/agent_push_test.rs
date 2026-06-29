@@ -13,7 +13,7 @@ use std::{
 
 #[cfg(unix)]
 use libra::{
-    internal::branch::{TRACES_BRANCH, Branch as InternalBranch},
+    internal::branch::{Branch as InternalBranch, TRACES_BRANCH},
     utils::test::ChangeDirGuard,
 };
 #[cfg(unix)]
@@ -131,11 +131,7 @@ fn init_repo_with_agent_traces_tip(local_dir: &Path) -> String {
     let _guard = ChangeDirGuard::new(local_dir);
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     runtime
-        .block_on(InternalBranch::update_branch(
-            TRACES_BRANCH,
-            &head,
-            None,
-        ))
+        .block_on(InternalBranch::update_branch(TRACES_BRANCH, &head, None))
         .expect("failed to point traces branch at HEAD");
 
     head

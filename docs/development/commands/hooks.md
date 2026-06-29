@@ -2,11 +2,11 @@
 
 ## 命令实现目标
 
-`libra hooks` 的目标是为 `libra agent enable` 安装的 hook 配置提供隐藏兼容入口。它不作为普通用户主命令推广，主要用于帮助文本、测试和 agent hook 配置的稳定性。
+`libra hooks` 的目标是为 `libra agent enable` 安装的 AI provider hook 配置提供隐藏兼容入口。它不作为普通用户主命令推广，主要用于帮助文本、测试和 agent hook 配置的稳定性。它不是 Git hooks bridge：不读取 `.git/hooks`，不读取 `core.hooksPath`，也不把 stock Git hook 生命周期纳入 Libra 核心能力；该决策见 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性)。
 
 ## 对比 Git 与兼容性
 
-- 兼容级别：`intentionally-different`。Hidden compatibility entry for hook configs installed by `libra agent enable`
+- 兼容级别：`intentionally-different`。Hidden compatibility entry for AI provider hook configs installed by `libra agent enable`; not a Git hooks bridge.
 
 - 该命令或行为属于 Libra 扩展/有意差异；重点是清晰边界、结构化输出和可测试错误，而不是 Git 完全同形。
 
@@ -51,7 +51,7 @@ flowchart TD
 
 | 类别 | 未完成项 | 当前处理 |
 |---|---|---|
-| 兼容矩阵说明 | 隐藏兼容入口 for hook configs installed by `libra agent enable` | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
+| 兼容矩阵说明 | 隐藏兼容入口 for AI provider hook configs installed by `libra agent enable`；不支持 `.git/hooks` / `core.hooksPath` Git hooks bridge（D3 拒绝） | 按当前兼容矩阵保留；实现状态变化时同步 `_compatibility.md` 和测试证据。 |
 
 ## 维护要求
 
