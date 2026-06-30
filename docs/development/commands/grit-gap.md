@@ -954,14 +954,18 @@ patch 输入
 
 **依赖**：GGT-09；`repack` 可独立于 diff plumbing。
 
-**验收标准**：
-- [ ] `repack` 复用 maintenance pack 编码，不复制 pack writer。
-- [ ] hidden `pack-objects` 只为内部/integration 使用，不进入用户 README 公共承诺，除非另有决策。
-- [ ] `diff-index` / `diff-files` / `diff-tree` 作为 `diff` 引擎入口复用，不分叉三套 diff 实现。
+**验收标准**（Phase A：diff plumbing —— v0.17.1769；Phase B：repack/pack-objects 见下）：
+- [x] `diff-index` / `diff-files` / `diff-tree` 作为 `diff` 引擎入口复用，不分叉三套 diff 实现。新建 `command/diff_plumbing.rs`：三命令各自合成等价 `diff` argv（`DiffArgs::try_parse_from`）后委托 `command::diff::execute_safe`，输出/退出码/rename/空白全一致。
+  - `diff-tree <a> <b>` = `diff --old a --new b`；`diff-files` = 裸 `diff`（index 对工作树）；`diff-index <tree>` = `diff --old <tree>`（tree 对工作树）。
+  - `diff-index --cached`（tree 对 index）暂不支持 → 退出 128 指引 `diff --staged`（Libra diff 引擎暂无任意-tree-对-index 模式）。
+  - **退出码（Git 底层语义，与 porcelain `diff` 不同）**：三命令 argv 恒带 `--exit-code` → **有差异 exit 1 / 无差异 exit 0 / 错误 128**（codex 指出 porcelain `diff` 默认 exit 0，底层 diff-* 必须 1）。
+  - **有意 stricter-than-Git 差异**：路径限定需 `--` 分隔（clap `last=true`），Git 允许裸路径；记此为已知收窄（可后续放宽）。
+- [ ] （Phase B）`repack` 复用 maintenance pack 编码，不复制 pack writer。**有意延后**（pack writer territory；与 diff plumbing 解耦，计划亦标注「repack 可独立于 diff plumbing」）。
+- [ ] （Phase B）hidden `pack-objects` 只为内部/integration 使用，不进 README 公共承诺。**随 Phase B 落地。**
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test repack -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test diff_plumbing -- --nocapture`
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test diff_plumbing`（6 passed：diff-tree 两 tree、pathspec 限定、diff-files 未暂存、diff-index tree 对工作树、`--cached` → 128、非仓库 128）
+- [ ] （Phase B）`repack` 测试 —— 随 repack 落地。
 
 ### GGT-12：新增 `rerere`
 

@@ -1,0 +1,38 @@
+# diff-tree 命令开发设计
+
+## 命令实现目标
+
+`libra diff-tree <a> <b>` 显示两个 tree 之间的差异，作为 `diff` 引擎的底层入口，不分叉第二套 diff 实现。
+
+## 对比 Git 与兼容性
+
+- 兼容级别：`partial`。
+- 已支持：`diff-tree <tree-a> <tree-b> [-- <path>...]`（= `diff --old a --new b`），所有 `diff` 全局标志与 `--json`。
+- 未公开（延后）：单提交 `diff-tree <commit>`（对比父）、`-r`/`-t`/`--stdin`、raw 输出格式。
+
+## 设计方案
+
+- 入口与分发：`src/cli.rs::Commands::DiffTree` → `command::diff_plumbing::execute_tree_safe`。
+- 源码分层：`src/command/diff_plumbing.rs`（三命令共享）：`DiffTreeArgs`（`tree_a`/`tree_b`/`paths`(last=true)）→ 合成 argv `["diff","--old",a,"--new",b,"--",paths...]` → `DiffArgs::try_parse_from` → `command::diff::execute_safe`。**复用唯一 diff 引擎**（输出/退出码/rename/空白全一致）。
+- 底层操作对象：对象库（读 tree，经 diff 引擎）。无 refs/网络/index/工作树写入。
+
+## 实现历史
+
+- 2026-06-30（GGT-11 diff-plumbing 部分，`grit-gap.md` 阶段 4-5）：与 `diff-index`/`diff-files` 同批新增；`repack`/`pack-objects` 为后续 Phase B。
+
+## 当前状态
+
+- 公开状态：已公开（`Commands::DiffTree`）。
+- 测试：`tests/command/diff_plumbing_test.rs`（diff-tree 两 tree、pathspec 限定、非仓库 128）。
+- 用户文档：`docs/commands/diff-tree.md`（EN + zh-CN）。
+
+## 还未实现的功能
+
+| 类别 | 未完成项 | 当前处理 |
+|---|---|---|
+| 兼容差异项 | 单提交 vs 父、`-r`/`-t`/`--stdin`、raw | 延后；更多用 `libra diff`。 |
+
+## 维护要求
+
+- 改进本命令前先阅读 [docs/development/commands/_general.md](_general.md)。
+- 必须继续复用 `command::diff` 引擎，不得新建第二套 diff 实现。

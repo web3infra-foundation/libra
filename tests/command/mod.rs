@@ -299,6 +299,7 @@ mod commit_test;
 mod config_test;
 mod describe_long_test;
 mod describe_test;
+mod diff_plumbing_test;
 mod diff_test;
 mod fetch_test;
 mod for_each_ref_test;

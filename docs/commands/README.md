@@ -48,6 +48,9 @@ Every Libra command accepts the following global flags:
 | `libra shortlog` | `slog` | Summarize reachable commits grouped by author | [shortlog.md](shortlog.md) |
 | `libra show` | | Display a commit, tag, tree, blob, or `REV:path` content | [show.md](show.md) |
 | `libra diff` | | Compare differences between HEAD, index, working tree, or two revisions | [diff.md](diff.md) |
+| `libra diff-tree` | | Diff between two trees (git diff-tree) | [diff-tree.md](diff-tree.md) |
+| `libra diff-index` | | Diff a tree against the working tree (git diff-index) | [diff-index.md](diff-index.md) |
+| `libra diff-files` | | Diff the index against the working tree (git diff-files) | [diff-files.md](diff-files.md) |
 | `libra blame` | | Trace each line of a file to its introducing commit | [blame.md](blame.md) |
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |

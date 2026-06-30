@@ -31,6 +31,7 @@ pub mod commit;
 pub mod config;
 pub mod describe;
 pub mod diff;
+pub mod diff_plumbing;
 pub mod editor;
 pub mod fetch;
 pub mod for_each_ref;
