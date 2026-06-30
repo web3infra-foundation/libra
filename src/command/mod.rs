@@ -73,6 +73,7 @@ pub mod rebase;
 pub mod reflog;
 pub mod remote;
 pub mod remove;
+pub mod replace;
 pub mod rerere;
 pub mod reset;
 pub mod restore;
@@ -132,9 +133,13 @@ pub fn load_object<T>(hash: &ObjectHash) -> Result<T, GitError>
 where
     T: ObjectTrait,
 {
+    // Apply any `refs/replace/<oid>` substitution before reading, so `log`,
+    // `show`, `rev-parse` peeling, etc. transparently see the replacement.
+    // Cheap no-op when no replacements exist.
+    let hash = replace::resolve(*hash);
     let storage = util::objects_storage();
-    let data = storage.get(hash)?;
-    T::from_bytes(&data.to_vec(), *hash)
+    let data = storage.get(&hash)?;
+    T::from_bytes(&data.to_vec(), hash)
 }
 
 // impl save for all objects

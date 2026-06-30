@@ -1000,13 +1000,13 @@ patch 输入
 - bundle 中的 pack 使用 v2 格式；拒绝未知版本。
 - `bundle create` 输出临时文件，完成后再 rename 到目标路径；失败删除临时文件。
 
-**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；✅ fast-export（v0.17.1773，整树重建 deleteall+M，只读，拓扑序）；✅ bundle（v0.17.1774，完整 v2 bundle create/verify/list-heads，复用 PackEncoder，hash-kind 正确，temp-then-rename）；⏭️ replace / fast-import 待办。
+**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；✅ fast-export（v0.17.1773，整树重建 deleteall+M，只读，拓扑序）；✅ bundle（v0.17.1774，完整 v2 bundle create/verify/list-heads，复用 PackEncoder，hash-kind 正确，temp-then-rename）；✅ replace（v0.17.1775，refs/replace 松散 ref + load_object 全链路 peel，create/-d/-l）；⏭️ fast-import 待办（最后一个）。
 
 **验收标准**：
 - [x] `bundle` 使用 reachability + pack 写入，能 clone/fetch 基本 bundle（v0.17.1774：`create`/`verify`/`list-heads`，完整 v2 bundle，复用 `PackEncoder`（hash-kind 正确），系统 Git 可 clone；prerequisite/thin/增量、`unbundle`、libra 侧 clone-from-bundle、完整 pack 校验和延后）。
 - [ ] `fast-export` / `fast-import` 事务性处理 object/ref 写入，失败不留下半导入 refs。
 - [x] `check-mailmap` 先只做解析和查询（v0.17.1772：4 种 `.mailmap` 行形式、`(name,email)` 优先于 email-only、email 大小写不敏感、`--stdin`、`--json`），再接入 log/blame —— 后者（log/blame 集成）+ `mailmap.file`/`.blob` 配置为后续。
-- [ ] `replace` 统一影响 `rev-parse`、`log`、`show` 和 object peel，不只改一个调用点。
+- [x] `replace` 统一影响 `rev-parse`、`log`、`show` 和 object peel，不只改一个调用点（v0.17.1775：peel 在 `command::load_object` 生效，故所有经 load_object 的读取者透明遵守；`refs/replace/<oid>` 松散 ref 存储；create/`-f`/`-d`/`-l`。接入 SQLite reference 表 + `--edit`/`--graft` 延后）。
 - [ ] `bundle` / `fast-export` 输出可被系统 Git 或 Grit smoke 读取；`fast-import` 对 malformed stream、重复 marks、非法 ref、object format mismatch 和中断输入有失败测试。
 - [ ] **格式版本**：`bundle` 支持 v2 bundle header（`# v2 git bundle`）；pack 使用 v2 格式（`PACK` + version 2）；SHA-1 和 SHA-256 仓库的 bundle/export 必须在 header/prerequisite ref 中使用正确的 hash 长度。`fast-import`/`fast-export` 的 marks 文件格式与 Git 兼容。
 - [ ] **崩溃恢复**：`fast-import` 中断后仓库状态定义明确——已写入的对象保留（可被后续 `gc` 清理），但 refs 不更新（事务边界在 `checkpoint` 或流结束时）；文档说明恢复步骤（`libra fsck` + `libra gc`）。`bundle` 写入失败时临时文件必须删除，不留半包。

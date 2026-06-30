@@ -347,6 +347,7 @@ mod rebase_test;
 mod reflog_test;
 mod remote_test;
 mod remove_test;
+mod replace_test;
 mod rerere_test;
 mod reset_test;
 mod restore_test;

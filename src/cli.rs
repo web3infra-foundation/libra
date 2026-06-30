@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -504,6 +504,11 @@ enum Commands {
     Maintenance(command::maintenance::MaintenanceArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
+    #[command(
+        about = "Create, list, or delete object replacements (refs/replace)",
+        after_help = command::replace::REPLACE_EXAMPLES
+    )]
+    Replace(command::replace::ReplaceArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(about = "View and restore command-level operation history")]
@@ -1428,6 +1433,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
+        Commands::Replace(cmd_args) => command::replace::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
