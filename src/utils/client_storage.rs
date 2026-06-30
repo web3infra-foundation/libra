@@ -173,6 +173,18 @@ impl ClientStorage {
         ClientStorage { storage, base_path }
     }
 
+    /// Construct a strictly **local** `ClientStorage` rooted at `base_path`,
+    /// ignoring `LIBRA_STORAGE_TYPE` and any cloud configuration.
+    ///
+    /// Use this when reading a *foreign* object store (for example another
+    /// repository's `objects` directory): the tiered backend would otherwise
+    /// fall back to the configured remote on a miss and could write fetched
+    /// objects back into that foreign directory using cloud credentials.
+    pub fn init_local(base_path: PathBuf) -> ClientStorage {
+        let storage = Arc::new(LocalStorage::new(base_path.clone()));
+        ClientStorage { storage, base_path }
+    }
+
     /// Create a storage backend.
     ///
     /// # Remote Storage

@@ -95,7 +95,7 @@ see `docs/development/commands/_general.md` item B).
 
 ## Notes
 
-- `ls-remote` performs only protocol discovery (`git-upload-pack --advertise-refs` equivalent for local Git repositories).
+- `ls-remote` performs only protocol discovery (the in-process equivalent of `git-upload-pack --advertise-refs` for local Git repositories — Libra reads their refs directly).
 - It does not write objects, remote-tracking refs, config, or working-tree files.
 - `--heads` and `--tags` can be combined to show both branch and tag refs while excluding `HEAD`.
 - `--get-url` exits before protocol discovery and prints the same redacted URL form used by remote diagnostics.

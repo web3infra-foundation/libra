@@ -1,8 +1,8 @@
 //! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
 
 use std::{
-    collections::HashSet,
-    env,
+    collections::{BTreeMap, HashSet, VecDeque},
+    env, fs,
     future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
@@ -11,26 +11,27 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream;
 use git_internal::{
     errors::GitError,
-    hash::{HashKind, get_hash_kind, set_hash_kind},
+    hash::{HashKind, ObjectHash, get_hash_kind, set_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
+            ObjectTrait,
             blob::Blob,
+            commit::Commit,
+            tag::Tag,
             tree::{Tree, TreeItemMode},
+            types::ObjectType,
         },
         pack::{encode::PackEncoder, entry::Entry},
     },
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
+use tokio::sync::Mutex;
 use url::Url;
 
-use super::{
-    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
-    parse_discovered_references,
-};
+use super::{DiscoveryResult, FetchStream, ProtocolClient};
 use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
@@ -39,6 +40,7 @@ use crate::{
         protocol::DiscRef, reflog, tag,
     },
     utils::{
+        client_storage::ClientStorage,
         object_ext::TreeExt,
         util::{DATABASE, cur_dir},
     },
@@ -289,25 +291,26 @@ impl LocalClient {
         }
         match self.source_type {
             RepoType::GitRepo => {
-                let output = Command::new("git-upload-pack")
-                    .arg("--advertise-refs")
-                    .arg(&self.repo_path)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        GitError::NetworkError(format!(
-                            "Failed to spawn git-upload-pack for discovery: {}",
-                            e
-                        ))
-                    })?;
-                if !output.status.success() {
-                    return Err(GitError::NetworkError(format!(
-                        "git-upload-pack --advertise-refs failed: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    )));
-                }
-                let bytes = Bytes::from(output.stdout);
-                parse_discovered_references(bytes, service)
+                // In-process discovery: read the foreign Git repository's refs
+                // directly instead of spawning `git-upload-pack --advertise-refs`.
+                let hash_kind = git_repo_hash_kind(&self.repo_path);
+                let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
+                let refs = read_git_repo_refs(&self.repo_path).map_err(|error| {
+                    GitError::NetworkError(format!(
+                        "failed to read references from local repository '{}': {error}",
+                        self.repo_path.display()
+                    ))
+                })?;
+                // Advertise `symref=HEAD:<target>` like `git-upload-pack` so
+                // `ls-remote --symref` still prints HEAD's target for Git repos.
+                let capabilities = git_repo_head_symref(&self.repo_path)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                Ok(DiscoveryResult {
+                    refs,
+                    capabilities,
+                    hash_kind,
+                })
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
@@ -369,37 +372,29 @@ impl LocalClient {
     ) -> Result<FetchStream, IoError> {
         match self.source_type {
             RepoType::GitRepo => {
-                let body = generate_upload_pack_content(have, want, shallow, depth);
-                let mut child = Command::new("git-upload-pack");
-                child.arg("--stateless-rpc");
-                child.arg(&self.repo_path);
-                child.stdin(std::process::Stdio::piped());
-                child.stdout(std::process::Stdio::piped());
-                child.stderr(std::process::Stdio::piped());
-                let mut child = child
-                    .spawn()
-                    .map_err(|e| IoError::other(format!("Failed to spawn git-upload-pack: {e}")))?;
-
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(&body).await?;
-                } else {
-                    return Err(IoError::other(
-                        "Failed to capture stdin for git-upload-pack process",
-                    ));
-                }
-
-                let output = child.wait_with_output().await.map_err(|e| {
-                    IoError::other(format!("Failed to wait for git-upload-pack: {e}"))
-                })?;
-                if !output.status.success() {
-                    tracing::error!(
-                        "git-upload-pack stderr: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                    return Err(IoError::other("git-upload-pack exited with failure"));
-                }
-                let stdout = Bytes::from(output.stdout);
-                Ok(stream::once(async move { Ok(stdout) }).boxed())
+                // In-process fetch: assemble the pack from the foreign Git
+                // repository's own object store instead of spawning
+                // `git-upload-pack --stateless-rpc`.
+                let _ = shallow; // requested-shallow negotiation is not honoured (matches LibraRepo)
+                let hash_kind = git_repo_hash_kind(&self.repo_path);
+                // A strictly local store — never route a foreign repo's reads
+                // through cloud storage or write objects back into it.
+                let storage = ClientStorage::init_local(self.repo_path.join("objects"));
+                // Collect synchronously with the foreign hash kind active, then
+                // drop the (thread-local) guard before the async encode so it is
+                // never held across an `.await`.
+                let (entries, shallow) = {
+                    let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
+                    collect_git_repo_entries(&storage, &self.repo_path, want, have, depth).map_err(
+                        |error| {
+                            IoError::other(format!(
+                                "failed to assemble pack for '{}': {error}",
+                                self.repo_path.display()
+                            ))
+                        },
+                    )?
+                };
+                encode_entries_to_fetch_response(entries, shallow, hash_kind).await
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
@@ -515,96 +510,439 @@ impl LocalClient {
                     all_entries.extend(blob_entries);
                     all_entries.extend(tag_entries);
 
-                    let (entry_tx, entry_rx) =
-                        tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
-                    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
-
-                    let total_objects = all_entries.len();
-                    let window_size = 0;
-
-                    let encoder = PackEncoder::new(total_objects, window_size, stream_tx);
-
-                    let encode_handle = encoder
-                        .encode_async(entry_rx)
-                        .await
-                        .map_err(|e| IoError::other(format!("Failed to start encoding: {}", e)))?;
-
-                    for entry in all_entries {
-                        let entry_meta = EntryMeta::default();
-                        let meta_entry = MetaAttached {
-                            inner: entry,
-                            meta: entry_meta,
-                        };
-
-                        if let Err(e) = entry_tx.send(meta_entry).await {
-                            return Err(IoError::other(format!("Failed to send entry: {}", e)));
-                        }
-                    }
-
-                    drop(entry_tx);
-
-                    let mut pack_data = Vec::new();
-                    while let Some(chunk) = stream_rx.recv().await {
-                        pack_data.extend(chunk);
-                    }
-
-                    encode_handle
-                        .await
-                        .map_err(|e| IoError::other(format!("Encode task panicked: {}", e)))?;
-
-                    if pack_data.len() < 12 {
-                        return Err(IoError::other("Pack data too short"));
-                    }
-
-                    if &pack_data[0..4] != b"PACK" {
-                        return Err(IoError::other("Invalid pack signature"));
-                    }
-
-                    let mut response_data = Vec::new();
-
-                    let nak_line = "NAK\n";
-                    let nak_len = nak_line.len() + 4;
-                    let nak_len_hex = format!("{:04x}", nak_len);
-                    response_data.extend_from_slice(nak_len_hex.as_bytes());
-                    response_data.extend_from_slice(nak_line.as_bytes());
-
-                    let chunk_size = 65500;
-                    for chunk in pack_data.chunks(chunk_size) {
-                        let mut sideband_data = Vec::with_capacity(1 + chunk.len());
-                        sideband_data.push(1);
-                        sideband_data.extend_from_slice(chunk);
-
-                        let total_len = sideband_data.len() + 4;
-                        let len_hex = format!("{:04x}", total_len);
-
-                        response_data.extend_from_slice(len_hex.as_bytes());
-                        response_data.extend_from_slice(&sideband_data);
-
-                        // Send progress update every ~10 chunks (approximately 655KB)
-                        const PROGRESS_CHUNK_INTERVAL: usize = 10;
-                        if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
-                            let progress_msg =
-                                format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
-                            let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
-                            progress_data.push(2);
-                            progress_data.extend_from_slice(progress_msg.as_bytes());
-
-                            let progress_len = progress_data.len() + 4;
-                            let progress_len_hex = format!("{:04x}", progress_len);
-                            response_data.extend_from_slice(progress_len_hex.as_bytes());
-                            response_data.extend_from_slice(&progress_data);
-                        }
-                    }
-
-                    response_data.extend_from_slice(b"0000");
-
-                    let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
-                    Ok(Box::pin(response_stream) as FetchStream)
+                    // The Libra-native fetch path does not negotiate shallow
+                    // boundaries, so no `shallow` lines are emitted.
+                    encode_entries_to_fetch_response(all_entries, Vec::new(), repo_hash_kind).await
                 })
                 .await
             }
         }
     }
+}
+
+/// Read `objectformat` from a foreign Git repository's `config`, defaulting to
+/// SHA-1 (the overwhelmingly common case for local Git remotes).
+fn git_repo_hash_kind(repo_path: &Path) -> HashKind {
+    if let Ok(text) = fs::read_to_string(repo_path.join("config")) {
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("objectformat") && lower.contains("sha256") {
+                return HashKind::Sha256;
+            }
+        }
+    }
+    HashKind::Sha1
+}
+
+/// Read every ref a foreign Git repository advertises: loose `refs/**`,
+/// `packed-refs`, and the symbolic/detached `HEAD`. Loose refs win over packed
+/// entries of the same name. The returned list mirrors what
+/// `git-upload-pack --advertise-refs` would produce, in-process.
+fn read_git_repo_refs(repo_path: &Path) -> std::io::Result<Vec<DiscRef>> {
+    // BTreeMap keeps the advertisement deterministic.
+    let mut refs: BTreeMap<String, String> = BTreeMap::new();
+
+    let refs_root = repo_path.join("refs");
+    collect_loose_refs(&refs_root, &refs_root, &mut refs)?;
+
+    if let Ok(text) = fs::read_to_string(repo_path.join("packed-refs")) {
+        for line in text.lines() {
+            let line = line.trim();
+            // `^<oid>` peel lines are ignored — the peel is always derived from
+            // the *advertised* tag object below, so a packed peel can never be
+            // applied to a loose tag that shadows the packed entry.
+            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            if let Some((oid, name)) = line.split_once(' ') {
+                refs.entry(name.trim().to_string())
+                    .or_insert_with(|| oid.trim().to_string());
+            }
+        }
+    }
+
+    let mut out: Vec<DiscRef> = refs
+        .into_iter()
+        .map(|(name, oid)| DiscRef {
+            _hash: oid,
+            _ref: name,
+        })
+        .collect();
+
+    // Advertise the peeled commit of every annotated tag as `<ref>^{}`, like
+    // `git-upload-pack`. Always dereference the *advertised* tag object through
+    // the (strictly local) object store, so loose/packed shadowing is correct.
+    let storage = ClientStorage::init_local(repo_path.join("objects"));
+    let tag_refs: Vec<(String, String)> = out
+        .iter()
+        .filter(|r| r._ref.starts_with("refs/tags/"))
+        .map(|r| (r._ref.clone(), r._hash.clone()))
+        .collect();
+    for (name, oid) in tag_refs {
+        if let Some(target) = peel_tag(&storage, &oid)
+            && target != oid
+        {
+            out.push(DiscRef {
+                _hash: target,
+                _ref: format!("{name}^{{}}"),
+            });
+        }
+    }
+
+    // HEAD: a `ref: <target>` symref resolves to the target's oid; a bare oid is
+    // a detached HEAD.
+    if let Ok(head) = fs::read_to_string(repo_path.join("HEAD")) {
+        let head = head.trim();
+        if let Some(target) = head.strip_prefix("ref: ") {
+            if let Some(hash) = out
+                .iter()
+                .find(|r| r._ref == target.trim())
+                .map(|r| r._hash.clone())
+            {
+                out.push(DiscRef {
+                    _hash: hash,
+                    _ref: reflog::HEAD.to_string(),
+                });
+            }
+        } else if !head.is_empty() {
+            out.push(DiscRef {
+                _hash: head.to_string(),
+                _ref: reflog::HEAD.to_string(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Dereference an annotated tag (following nested tags) to its final non-tag
+/// object id, reading from a strictly local store. Returns `None` on any read
+/// failure so a malformed tag never breaks the whole advertisement.
+fn peel_tag(storage: &ClientStorage, oid: &str) -> Option<String> {
+    let mut current = ObjectHash::from_str(oid).ok()?;
+    for _ in 0..32 {
+        match storage.get_object_type(&current) {
+            Ok(ObjectType::Tag) => {
+                let tag = Tag::from_bytes(&storage.get(&current).ok()?, current).ok()?;
+                current = tag.object_hash;
+            }
+            Ok(_) => return Some(current.to_string()),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// If `HEAD` is a symbolic ref, return the `symref=HEAD:<target>` capability
+/// string `git-upload-pack` would advertise (so `ls-remote --symref` keeps
+/// printing HEAD's target). A detached HEAD has no symref capability.
+fn git_repo_head_symref(repo_path: &Path) -> Option<String> {
+    let head = fs::read_to_string(repo_path.join("HEAD")).ok()?;
+    let target = head.trim().strip_prefix("ref: ")?.trim().to_string();
+    Some(format!("symref=HEAD:{target}"))
+}
+
+/// Recursively collect loose refs under `dir` into `out`, keyed by their full
+/// `refs/…` name.
+fn collect_loose_refs(
+    root: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_loose_refs(root, &path, out)?;
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            let oid = fs::read_to_string(&path)?.trim().to_string();
+            if oid.is_empty() {
+                continue;
+            }
+            let name = format!("refs/{}", rel.to_string_lossy().replace('\\', "/"));
+            out.insert(name, oid);
+        }
+    }
+    Ok(())
+}
+
+/// Walk a foreign Git repository's object store and collect every object the
+/// client needs: the wanted commits and their ancestors (minus `have`, bounded
+/// by `depth`), every tree and blob they reference, and any annotated tag
+/// objects (peeled to their target commit). Reads exclusively from `storage`
+/// (the foreign `.git/objects`), never the current Libra repository.
+fn collect_git_repo_entries(
+    storage: &ClientStorage,
+    repo_path: &Path,
+    want: &[String],
+    have: &[String],
+    depth: Option<usize>,
+) -> Result<(Vec<Entry>, Vec<String>), GitError> {
+    let have_set: HashSet<String> = have.iter().cloned().collect();
+    let mut seen: HashSet<String> = have_set.clone();
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut commit_queue: VecDeque<(ObjectHash, usize)> = VecDeque::new();
+    let mut tree_roots: Vec<ObjectHash> = Vec::new();
+    // Commits whose parents are cut off by `depth` — the shallow boundary.
+    let mut shallow: Vec<String> = Vec::new();
+
+    // Resolve each want; peel annotated tags (emitting each tag object) down to
+    // the commit they target.
+    for spec in want {
+        let Ok(oid) = ObjectHash::from_str(spec) else {
+            continue;
+        };
+        if matches!(storage.get_object_type(&oid), Ok(ObjectType::Tag)) {
+            let mut current = oid;
+            for _ in 0..32 {
+                if !seen.insert(current.to_string()) {
+                    break;
+                }
+                let tag = Tag::from_bytes(&storage.get(&current)?, current)?;
+                let target = tag.object_hash;
+                entries.push(Entry::from(tag));
+                match storage.get_object_type(&target) {
+                    Ok(ObjectType::Tag) => current = target,
+                    Ok(ObjectType::Commit) => {
+                        commit_queue.push_back((target, 0));
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        } else {
+            commit_queue.push_back((oid, 0));
+        }
+    }
+
+    // Breadth-first over reachable commits.
+    while let Some((oid, distance)) = commit_queue.pop_front() {
+        if !seen.insert(oid.to_string()) {
+            continue;
+        }
+        let commit = Commit::from_bytes(&storage.get(&oid)?, oid)?;
+        tree_roots.push(commit.tree_id);
+        let parents = commit.parent_commit_ids.clone();
+        entries.push(Entry::from(commit));
+        if depth.is_none_or(|max| distance + 1 < max) {
+            for parent in parents {
+                if !seen.contains(&parent.to_string()) {
+                    commit_queue.push_back((parent, distance + 1));
+                }
+            }
+        } else {
+            // `depth` stops the walk here, so this commit is a shallow boundary
+            // (advertised even for a root commit, matching `git-upload-pack`).
+            shallow.push(oid.to_string());
+        }
+    }
+
+    // Every tree and blob reachable from the collected commits.
+    let mut tree_queue: VecDeque<ObjectHash> = tree_roots.into_iter().collect();
+    while let Some(tree_oid) = tree_queue.pop_front() {
+        if !seen.insert(tree_oid.to_string()) {
+            continue;
+        }
+        let tree = Tree::from_bytes(&storage.get(&tree_oid)?, tree_oid)?;
+        for item in &tree.tree_items {
+            match item.mode {
+                TreeItemMode::Tree => tree_queue.push_back(item.id),
+                // A gitlink points at a commit in another repository.
+                TreeItemMode::Commit => {}
+                _ => {
+                    if seen.insert(item.id.to_string()) {
+                        let blob = Blob::from_bytes(&storage.get(&item.id)?, item.id)?;
+                        entries.push(Entry::from(blob));
+                    }
+                }
+            }
+        }
+        entries.push(Entry::from(tree));
+    }
+
+    // include-tag: like `git-upload-pack`, also send an annotated tag object
+    // whose target commit is being sent, so the receiver can create
+    // `refs/tags/<name>` for tags it auto-follows.
+    include_reachable_tags(storage, repo_path, &have_set, &mut seen, &mut entries)?;
+
+    Ok((entries, shallow))
+}
+
+/// Add annotated tag objects whose peeled target is in the just-sent set.
+fn include_reachable_tags(
+    storage: &ClientStorage,
+    repo_path: &Path,
+    have_set: &HashSet<String>,
+    seen: &mut HashSet<String>,
+    entries: &mut Vec<Entry>,
+) -> Result<(), GitError> {
+    let Ok(refs) = read_git_repo_refs(repo_path) else {
+        return Ok(());
+    };
+    // `refs/tags/<name>` -> peeled target oid, for annotated tags only.
+    let peeled: BTreeMap<String, String> = refs
+        .iter()
+        .filter_map(|r| {
+            r._ref
+                .strip_suffix("^{}")
+                .map(|base| (base.to_string(), r._hash.clone()))
+        })
+        .collect();
+
+    for r in &refs {
+        if r._ref.ends_with("^{}") || !r._ref.starts_with("refs/tags/") {
+            continue;
+        }
+        let Some(target) = peeled.get(&r._ref) else {
+            continue; // lightweight tag: no tag object to send
+        };
+        // Send only when the target was just packed (not merely already had) and
+        // the tag object itself has not been sent yet.
+        if !seen.contains(target) || have_set.contains(target) || seen.contains(&r._hash) {
+            continue;
+        }
+        if let Ok(oid) = ObjectHash::from_str(&r._hash)
+            && matches!(storage.get_object_type(&oid), Ok(ObjectType::Tag))
+        {
+            let tag = Tag::from_bytes(&storage.get(&oid)?, oid)?;
+            seen.insert(r._hash.clone());
+            entries.push(Entry::from(tag));
+        }
+    }
+    Ok(())
+}
+
+/// Encode `entries` into a v2 pack and wrap it in the upload-pack wire response
+/// (`NAK`, then the pack over sideband-64k channel 1 with channel-2 progress,
+/// then a flush). Shared by the Libra-native and foreign-Git fetch paths.
+/// A valid empty v2 pack: the 12-byte header followed by its trailer hashed in
+/// the repository's hash kind. Sent when an up-to-date fetch has nothing to give.
+fn empty_pack_bytes(hash_kind: HashKind) -> Vec<u8> {
+    let mut pack = Vec::with_capacity(32);
+    pack.extend_from_slice(b"PACK");
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&0u32.to_be_bytes());
+    match hash_kind {
+        HashKind::Sha1 => {
+            use sha1::Digest;
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&pack);
+            pack.extend_from_slice(&hasher.finalize());
+        }
+        HashKind::Sha256 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&pack);
+            pack.extend_from_slice(&hasher.finalize());
+        }
+    }
+    pack
+}
+
+/// Encode `entries` (non-empty) into a v2 pack, propagating the repository hash
+/// kind into the encoder's spawned task.
+async fn encode_pack_bytes(entries: Vec<Entry>, hash_kind: HashKind) -> Result<Vec<u8>, IoError> {
+    let (entry_tx, entry_rx) = tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
+
+    let total_objects = entries.len();
+    let encode_handle = tokio::spawn(async move {
+        // Set the hash kind BEFORE constructing the encoder: `PackEncoder::new`
+        // initializes the pack-trailer hasher from the thread-local, so it must
+        // see the repository's kind (not whatever this worker thread last had).
+        set_hash_kind(hash_kind);
+        let mut encoder = PackEncoder::new(total_objects, 0, stream_tx);
+        encoder.encode(entry_rx).await
+    });
+
+    for entry in entries {
+        let meta_entry = MetaAttached {
+            inner: entry,
+            meta: EntryMeta::default(),
+        };
+        if let Err(e) = entry_tx.send(meta_entry).await {
+            return Err(IoError::other(format!("Failed to send entry: {}", e)));
+        }
+    }
+    drop(entry_tx);
+
+    let mut pack_data = Vec::new();
+    while let Some(chunk) = stream_rx.recv().await {
+        pack_data.extend(chunk);
+    }
+    encode_handle
+        .await
+        .map_err(|e| IoError::other(format!("Encode task panicked: {}", e)))?
+        .map_err(|e| IoError::other(format!("Pack encoding failed: {}", e)))?;
+    Ok(pack_data)
+}
+
+async fn encode_entries_to_fetch_response(
+    entries: Vec<Entry>,
+    shallow: Vec<String>,
+    hash_kind: HashKind,
+) -> Result<FetchStream, IoError> {
+    // An up-to-date fetch produces no objects; `PackEncoder` panics on a
+    // zero-object pack, so emit a valid empty pack (header + trailer) instead.
+    // The hash kind is passed explicitly so we never depend on a thread-local
+    // held across this `.await` (Tokio may resume on another worker thread).
+    let pack_data = if entries.is_empty() {
+        empty_pack_bytes(hash_kind)
+    } else {
+        encode_pack_bytes(entries, hash_kind).await?
+    };
+
+    if pack_data.len() < 12 || &pack_data[0..4] != b"PACK" {
+        return Err(IoError::other("Invalid pack signature"));
+    }
+
+    let mut response_data = Vec::new();
+
+    // Shallow boundary section: `shallow <oid>` pkt-lines, then a flush, before
+    // the NAK — so the receiver can persist the shallow metadata.
+    if !shallow.is_empty() {
+        for oid in &shallow {
+            let line = format!("shallow {oid}\n");
+            let len_hex = format!("{:04x}", line.len() + 4);
+            response_data.extend_from_slice(len_hex.as_bytes());
+            response_data.extend_from_slice(line.as_bytes());
+        }
+        response_data.extend_from_slice(b"0000");
+    }
+
+    let nak_line = "NAK\n";
+    let nak_len_hex = format!("{:04x}", nak_line.len() + 4);
+    response_data.extend_from_slice(nak_len_hex.as_bytes());
+    response_data.extend_from_slice(nak_line.as_bytes());
+
+    let chunk_size = 65500;
+    for chunk in pack_data.chunks(chunk_size) {
+        let mut sideband_data = Vec::with_capacity(1 + chunk.len());
+        sideband_data.push(1);
+        sideband_data.extend_from_slice(chunk);
+        let len_hex = format!("{:04x}", sideband_data.len() + 4);
+        response_data.extend_from_slice(len_hex.as_bytes());
+        response_data.extend_from_slice(&sideband_data);
+
+        const PROGRESS_CHUNK_INTERVAL: usize = 10;
+        if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
+            let progress_msg = format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
+            let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
+            progress_data.push(2);
+            progress_data.extend_from_slice(progress_msg.as_bytes());
+            let progress_len_hex = format!("{:04x}", progress_data.len() + 4);
+            response_data.extend_from_slice(progress_len_hex.as_bytes());
+            response_data.extend_from_slice(&progress_data);
+        }
+    }
+    response_data.extend_from_slice(b"0000");
+
+    let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
+    Ok(Box::pin(response_stream) as FetchStream)
 }
 
 fn tag_object_hash(object: &tag::TagObject) -> String {
@@ -700,6 +1038,153 @@ mod tests {
             .await
             .unwrap();
         assert!(refs.refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_repo_discovery_lists_branch_and_head_in_process() {
+        // A non-bare Git repo with one commit: in-process discovery must list the
+        // branch ref and a matching HEAD without spawning git-upload-pack.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("work");
+        assert!(
+            run_git(None, ["init", repo.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (k, v) in [
+            ("user.name", "Local Tester"),
+            ("user.email", "local@test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_git(Some(&repo), ["config", k, v]).status().unwrap();
+        }
+        std::fs::write(repo.join("a.txt"), "content").unwrap();
+        run_git(Some(&repo), ["add", "a.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "c1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let head = String::from_utf8(
+            run_git(Some(&repo), ["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let client = LocalClient::from_path(&repo).unwrap();
+        let result = client
+            .discovery_reference(ServiceType::UploadPack)
+            .await
+            .unwrap();
+
+        // A branch ref pointing at HEAD's commit, plus a HEAD entry with the same oid.
+        assert!(
+            result
+                .refs
+                .iter()
+                .any(|r| r._ref.starts_with("refs/heads/") && r._hash == head),
+            "discovery should list the branch ref at {head}: {:?}",
+            result
+                .refs
+                .iter()
+                .map(|r| r._ref.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result
+                .refs
+                .iter()
+                .any(|r| r._ref == reflog::HEAD && r._hash == head),
+            "discovery should list HEAD at {head}"
+        );
+        // HEAD's symref target is advertised so `ls-remote --symref` keeps working.
+        assert!(
+            result
+                .capabilities
+                .iter()
+                .any(|cap| cap.starts_with("symref=HEAD:refs/heads/")),
+            "discovery should advertise the HEAD symref: {:?}",
+            result.capabilities
+        );
+    }
+
+    #[tokio::test]
+    async fn git_repo_discovery_advertises_peeled_annotated_tag() {
+        // An annotated tag must be advertised with its `refs/tags/<n>^{}` peel
+        // (the target commit), like `git-upload-pack --advertise-refs`.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("work");
+        assert!(
+            run_git(None, ["init", repo.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        for (k, v) in [
+            ("user.name", "Local Tester"),
+            ("user.email", "local@test"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+        ] {
+            run_git(Some(&repo), ["config", k, v]).status().unwrap();
+        }
+        std::fs::write(repo.join("a.txt"), "content").unwrap();
+        run_git(Some(&repo), ["add", "a.txt"]).status().unwrap();
+        assert!(
+            run_git(Some(&repo), ["commit", "-m", "c1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            run_git(Some(&repo), ["tag", "-a", "v1", "-m", "release v1"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let commit = String::from_utf8(
+            run_git(Some(&repo), ["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let client = LocalClient::from_path(&repo).unwrap();
+        let result = client
+            .discovery_reference(ServiceType::UploadPack)
+            .await
+            .unwrap();
+
+        assert!(
+            result.refs.iter().any(|r| r._ref == "refs/tags/v1"),
+            "the annotated tag ref should be advertised: {:?}",
+            result
+                .refs
+                .iter()
+                .map(|r| r._ref.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            result
+                .refs
+                .iter()
+                .any(|r| r._ref == "refs/tags/v1^{}" && r._hash == commit),
+            "the peeled tag ref should point at the commit {commit}: {:?}",
+            result
+                .refs
+                .iter()
+                .map(|r| r._ref.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

@@ -172,9 +172,10 @@ for local optimizations (copy/hardlink instead of the transport) when the source
 is on the local filesystem, and `--no-local` forces the transport to avoid
 hardlinks. Libra **never hardlinks** objects — it always copies — and how it
 reads a local-path source is determined by the source type, not by these flags:
-a local Libra repository is read directly, while a local Git repository is
-fetched via `git-upload-pack`. So both flags are accepted with no effect on the
-result. The two override each other; the last one given wins.
+a local Libra repository is read directly, while a local Git repository is read
+in-process (Libra reads its refs and objects directly, with no `git-upload-pack`
+dependency). So both flags are accepted with no effect on the result. The two
+override each other; the last one given wins.
 
 ```bash
 libra clone -l /path/to/source /path/to/dest

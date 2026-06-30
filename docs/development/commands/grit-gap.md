@@ -1024,12 +1024,14 @@ patch 输入
 
 **范围**：只替换 `local_client.rs` 的系统 git spawn 路径，不新增 `send-pack` / `fetch-pack` 用户命令。
 
+**进度（2026-07-01，v0.17.1777）**：✅ **核心已完成（Core）** —— `local_client.rs` 的两处 `git-upload-pack` spawn（discovery `--advertise-refs` + fetch `--stateless-rpc`）已替换为进程内实现（仅 `RepoType::GitRepo` 臂；`LibraRepo` 臂本就进程内）。discovery 读取外部 `.git` 的 loose `refs/**` + `packed-refs` + 符号 `HEAD`；fetch 用 `ClientStorage::init(<repo>/objects)` 读外部 git 对象，BFS 可达 commit（减 have、按 depth）+ 递归 tree/blob + 注解 tag peel，复用 `PackEncoder` 与 LibraRepo 臂相同的 NAK/sideband-64k/flush 线格式（已抽取为共享 `encode_entries_to_fetch_response`）。外部 repo hash kind 读自 `config` 的 objectformat（默认 SHA-1）。L1 验证：`fetch_objects_produces_pack_stream`（对真实 bare git remote 端到端：discovery 返回 refs + fetch 产出有效 PACK）+ `git_repo_discovery_lists_branch_and_head_in_process`（分支 ref + HEAD 解析）+ 既有 4 测试，共 6 通过。⏭️ **硬化为 Phase B（deferred）**：timeout 配置、v2 capability 协商、half-pack 恢复、sideband ERR 帧解析、及其 L2 `--features test-network` 回归测试（见下方未勾选项）。
+
 **验收标准**：
-- [ ] 本地 remote fetch 不再依赖系统 `git-upload-pack`。
-- [ ] pack 协商、thin pack、sideband progress 和 EOF 处理复用 `internal/protocol` 现有路径。
-- [ ] 错误信息说明 remote/path/protocol，不泄露凭据。
-- [ ] 保留连接/空闲 timeout、sideband 错误帧、半包/截断 pack 和远端无效能力声明的回归测试；协议错误不能被降级成成功的空 fetch。
-- [ ] **超时配置**（默认值，文档在 `fetch.md` 公开）：
+- [x] 本地 remote fetch 不再依赖系统 `git-upload-pack`（v0.17.1777：进程内 discovery + fetch，两处 spawn 移除）。
+- [x] pack 协商（want/have/depth BFS）、sideband progress 和 EOF（flush）处理复用 `internal/protocol` 现有路径（`PackEncoder` + 共享线格式封装）；thin pack 暂不生成（Phase B）。
+- [x] 错误信息说明 remote/path/protocol，不泄露凭据（错误含外部 repo 路径，无凭据）。
+- [ ] **（Phase B）** 保留连接/空闲 timeout、sideband 错误帧、半包/截断 pack 和远端无效能力声明的回归测试；协议错误不能被降级成成功的空 fetch。
+- [ ] **（Phase B）超时配置**（默认值，文档在 `fetch.md` 公开）：
   - `connect_timeout`：默认 30s；本地 remote 应 ≤ 5s
   - `idle_timeout`：默认 60s；流式 pack 接收空闲 60s 视为连接死
   - `first_byte_timeout`：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待
@@ -1040,7 +1042,8 @@ patch 输入
   - 测试需覆盖「远端不发 v2 → 客户端拒绝」、「远端缺 `side-band-64k` → 降级但要求 side-band 至少 16k」两条路径
 - [ ] **half pack 恢复**：远端在 pack 中途断开时，已接收对象保留（后续可被 `gc` 清理），但必须发出 `warning: incomplete pack received; ...` 且不更新 refs；测试需人为杀死一半 pack。
 - [ ] **sideband 错误帧**：sideband channel 2 的 `ERR` / `FATAL` 文本必须解析为 fetch 错误输出（包含远端路径/对象名），不得忽略；测试需 mock 远端发 ERR 后 fetch 必须非 0。
-- [ ] **协议升级不改变 wire 格式**：本任务不得引入 v3 pack；如未来需要 v3，单独开 GGT 任务。
+- [x] **协议升级不改变 wire 格式**：未引入 v3 pack；进程内路径复用 v2 pack + 既有 NAK/sideband/flush 线格式。
+- **（Phase B）capability/half-pack/sideband-ERR/timeout** 标为延后：local 进程内路径目前 `capabilities: vec![]`（不与外部 git-upload-pack 协商 cap，因不再 spawn 它），thin-pack 不生成，超时/半包/ERR 帧硬化随 L2 `--features test-network` 测试一起在后续会话落地。
 
 **验证**：
 - [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test network_remotes_test --features test-network -- --nocapture`
