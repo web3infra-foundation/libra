@@ -924,7 +924,27 @@ async fn normalize_diff_range(args: &mut DiffArgs) {
     let Some(first) = args.pathspec.first().cloned() else {
         return;
     };
-    if first.contains("...") || !first.contains("..") {
+    // Three-dot `A...B`: diff from the merge base of A and B to B (Git
+    // semantics). Leave the spec as a pathspec if either side cannot be
+    // resolved or the two commits share no merge base.
+    if let Some((left, right)) = first.split_once("...") {
+        let left_spec = if left.is_empty() { "HEAD" } else { left };
+        let right_spec = if right.is_empty() { "HEAD" } else { right };
+        let (Ok(left_id), Ok(right_id)) = (
+            crate::utils::util::get_commit_base(left_spec).await,
+            crate::utils::util::get_commit_base(right_spec).await,
+        ) else {
+            return;
+        };
+        let Ok(Some(base)) = crate::internal::merge_base::merge_base(&left_id, &right_id) else {
+            return;
+        };
+        args.old = Some(base.to_string());
+        args.new = Some(right_spec.to_string());
+        args.pathspec.remove(0);
+        return;
+    }
+    if !first.contains("..") {
         return;
     }
     let Some((left, right)) = first.split_once("..") else {

@@ -296,7 +296,7 @@ Allowing `--new` without `--old` would create an ambiguous comparison (new compa
 | Moved-line color | `--color-moved[=<mode>]` / `--no-color-moved` (`plain` semantics; block modes approximated) | `--color-moved[=<mode>]` | N/A |
 | Textconv | `--textconv` / `--no-textconv` (on by default; `.libra_attributes` `diff=<driver>` + `diff.<driver>.textconv`) | `--textconv` / `--no-textconv` | N/A |
 | Copy detection | Not supported | `-C` / `--find-copies` | N/A |
-| Three-dot diff | Not supported | `<A>...<B>` (merge base) | N/A |
+| Three-dot diff | `<A>...<B>` (from merge base) | `<A>...<B>` (merge base) | N/A |
 
 ## Error Handling
 

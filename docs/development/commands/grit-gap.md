@@ -892,21 +892,19 @@ gantt
 
 **依赖**：GGT-00；`diff A...B` 依赖 `merge-base`。
 
-**验收标准**：
-- [ ] 抽出 `internal/merge_base.rs`，`log.rs`、`rebase.rs` 和新命令复用同一算法。
-- [ ] 新算法实现 LCA（lowest common ancestor），不再返回 first-found；交叉合并（criss-cross）下 `--all` 返回全部 merge base，`merge-base A B`（无 `--all`）返回一个最佳 base。
-- [ ] 修复 `log.rs:752` 文档声明「best merge-base」与实际 first-found 行为的不一致；`log A..B` 在交叉合并历史下的排除点回归测试覆盖。
-- [ ] `merge-base A B` 输出单个 SHA（退出 0）；`--all` 输出所有 merge base SHA（退出 0）；`--is-ancestor A B`：A 是 B 祖先时退出 0，否则退出 1，无共同历史退出 1 并报错。
-- [ ] 无共同祖先时退出码 128 并输出稳定错误码（对齐 Git 行为）。
-- [ ] `diff A...B` 使用 merge base 作为 old side，保留现有 `A..B` 语义。
-- [ ] 阶段 4.1 的 `-w`/`--ignore-all-space` 是新增 clap 字段 + diff 引擎空白归一化，不是仅接线；验收需含空白差异 hunk 的 before/after 测试。
-- [ ] **回滚能力**：`merge-base` LCA 修正可能改变 `log`、`rebase`、`diff A...B` 输出；保留旧算法作为 `--first-found` 内部测试开关或 feature `legacy-merge-base`，直至所有 golden 输出对比通过。
+**验收标准**（Phase A：v0.17.1767 —— merge-base CLI + diff A...B；Phase B 见下「未完成」）：
+- [x] 抽出 `internal/merge_base.rs`（`merge_bases`/`merge_base`/`is_ancestor`，经 `object_ext::CommitExt::try_load` 不依赖 `command::`）。新命令已复用；**`log.rs`/`rebase.rs` 迁移有意延后到 Phase B**（见下）。
+- [x] 新算法实现 LCA（common − dominated；dominated = 是另一 common 的严格祖先），不返回 first-found；交叉合并下 `--all` 返回全部 LCA，`merge-base A B`（无 `--all`）返回一个确定性最佳 base。
+- [ ] （Phase B）修复 `log.rs` first-found 与文档不一致 + `log A..B` 交叉合并排除点回归。**延后**：需 golden 回归 + legacy 开关。
+- [x] `merge-base A B` 输出单 SHA（exit 0）；`--all` 输出全部（exit 0）；`--is-ancestor A B`：A 是 B 祖先 exit 0，否则 exit 1。
+- [x] **无共同祖先（已按 Git 实际行为调和）**：早期写「退出 128」与 Git 不符——`git merge-base A B` 无共同祖先时 **exit 1 无输出**，128 留给坏 rev。本实现：无共同祖先 → `silent_exit(1)`；坏 rev / 参数个数错误 → 128。
+- [x] `diff A...B` 用 merge base 作为 old side（`diff.rs::normalize_diff_range` 先解析 `...`），保留现有 `A..B` 语义；无法解析/无 base 时回落 pathspec。
+- [x] 阶段 4.1 `-w`/`--ignore-all-space` —— **已在更早的 diff 增强中实现**（含空白 hunk 测试），非本任务范围。
+- [ ] **回滚能力 / Phase B**：`log`/`rebase` 迁移到共享 LCA 时保留 `legacy-merge-base` 开关 + golden 对比 —— 随 Phase B 落地。Phase A 不动 `log`/`rebase`，故无回归风险。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_base -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test diff_three_dot -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test log_range -- --nocapture`（回归 `log A..B` 排除点）
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test rebase_ -- --nocapture`（回归 rebase base 选择）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_base`（8 passed：Y 形 base / `--is-ancestor` 双向 / `--all` / `--json` / 坏 rev 128 / 参数个数 128 / `diff_three_dot`）
+- [ ] （Phase B）`log_range` / `rebase_` 回归 —— 随 log/rebase 迁移落地。
 
 ### GGT-10：新增 `apply --check` MVP
 

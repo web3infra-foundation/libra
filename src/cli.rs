@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -430,6 +430,11 @@ enum Commands {
         after_help = command::merge_file::MERGE_FILE_EXAMPLES
     )]
     MergeFile(command::merge_file::MergeFileArgs),
+    #[command(
+        about = "Find the best common ancestor(s) of two commits",
+        after_help = command::merge_base::MERGE_BASE_EXAMPLES
+    )]
+    MergeBase(command::merge_base::MergeBaseArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
     Rebase(command::rebase::RebaseArgs),
     #[command(about = "Reset current HEAD to specified state")]
@@ -1305,6 +1310,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Merge(cmd_args) => command::merge::execute_safe(cmd_args, &output).await?,
         Commands::MergeFile(cmd_args) => {
             command::merge_file::execute_safe(cmd_args, &output).await?
+        }
+        Commands::MergeBase(cmd_args) => {
+            command::merge_base::execute_safe(cmd_args, &output).await?
         }
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
         Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
