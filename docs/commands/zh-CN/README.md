@@ -51,6 +51,7 @@
 | `libra diff-tree` | | 比较两个 tree（git diff-tree） | [diff-tree.md](diff-tree.md) |
 | `libra diff-index` | | 比较一个 tree 与工作树（git diff-index） | [diff-index.md](diff-index.md) |
 | `libra diff-files` | | 比较 index 与工作树（git diff-files） | [diff-files.md](diff-files.md) |
+| `libra fast-export` | | 把历史导出为 git fast-import 流 | [fast-export.md](fast-export.md) |
 | `libra blame` | | 将文件每一行追溯到引入它的提交 | [blame.md](blame.md) |
 | `libra describe` | `desc` | 找到最近的可达标签，并格式化为 `tag-N-g<abbrev>` | [describe.md](describe.md) |
 | `libra grep` | | 在已跟踪文件中搜索模式，支持正则、修订和索引 | [grep.md](grep.md) |

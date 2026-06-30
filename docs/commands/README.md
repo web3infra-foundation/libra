@@ -51,6 +51,7 @@ Every Libra command accepts the following global flags:
 | `libra diff-tree` | | Diff between two trees (git diff-tree) | [diff-tree.md](diff-tree.md) |
 | `libra diff-index` | | Diff a tree against the working tree (git diff-index) | [diff-index.md](diff-index.md) |
 | `libra diff-files` | | Diff the index against the working tree (git diff-files) | [diff-files.md](diff-files.md) |
+| `libra fast-export` | | Emit history as a git fast-import stream | [fast-export.md](fast-export.md) |
 | `libra blame` | | Trace each line of a file to its introducing commit | [blame.md](blame.md) |
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |

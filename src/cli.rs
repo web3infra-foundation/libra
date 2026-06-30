@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -386,6 +386,11 @@ enum Commands {
         after_help = command::check_mailmap::CHECK_MAILMAP_EXAMPLES
     )]
     CheckMailmap(command::check_mailmap::CheckMailmapArgs),
+    #[command(
+        about = "Emit history as a fast-import stream (git fast-export)",
+        after_help = command::fast_export::FAST_EXPORT_EXAMPLES
+    )]
+    FastExport(command::fast_export::FastExportArgs),
     #[command(
         about = "Create an archive of files from a named tree",
         after_help = command::archive::ARCHIVE_EXAMPLES
@@ -1386,6 +1391,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::CheckMailmap(cmd_args) => {
             command::check_mailmap::execute_safe(cmd_args, &output).await?
+        }
+        Commands::FastExport(cmd_args) => {
+            command::fast_export::execute_safe(cmd_args, &output).await?
         }
         Commands::WriteTree(cmd_args) => {
             command::write_tree::execute_safe(cmd_args, &output).await?

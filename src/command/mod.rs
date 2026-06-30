@@ -35,6 +35,7 @@ pub mod describe;
 pub mod diff;
 pub mod diff_plumbing;
 pub mod editor;
+pub mod fast_export;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod format_patch;

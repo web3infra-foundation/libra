@@ -303,6 +303,7 @@ mod describe_long_test;
 mod describe_test;
 mod diff_plumbing_test;
 mod diff_test;
+mod fast_export_test;
 mod fetch_test;
 mod for_each_ref_test;
 mod format_patch_test;

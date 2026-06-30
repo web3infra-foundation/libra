@@ -1000,7 +1000,7 @@ patch 输入
 - bundle 中的 pack 使用 v2 格式；拒绝未知版本。
 - `bundle create` 输出临时文件，完成后再 rename 到目标路径；失败删除临时文件。
 
-**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；⏭️ replace / bundle / fast-export / fast-import 待办。
+**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；✅ fast-export（v0.17.1773，整树重建 deleteall+M，只读，拓扑序）；⏭️ replace / bundle / fast-import 待办。fast-export 部分见下「fast-export / fast-import」验收。
 
 **验收标准**：
 - [ ] `bundle` 使用 reachability + pack 写入，能 clone/fetch 基本 bundle。
