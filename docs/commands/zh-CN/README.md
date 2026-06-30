@@ -78,6 +78,7 @@
 | `libra rebase` | `rb` | 在另一个基底 tip 上重新应用提交，并支持冲突解决 | [rebase.md](rebase.md) |
 | `libra cherry-pick` | `cp` | 将已有提交的更改应用到当前分支 | [cherry-pick.md](cherry-pick.md) |
 | `libra revert` | | 创建新提交以撤销指定提交的更改 | [revert.md](revert.md) |
+| `libra rerere` | | 复用已记录的冲突解决 | [rerere.md](rerere.md) |
 | `libra bisect` | | 用二分搜索找到引入 bug 的提交；支持 `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` | [bisect.md](bisect.md) |
 
 ### 远程操作

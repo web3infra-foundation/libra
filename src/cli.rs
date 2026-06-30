@@ -33,7 +33,7 @@ Command Groups:
   Repository Setup        init, clone, config
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
-  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
+  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
@@ -460,6 +460,11 @@ enum Commands {
         after_help = command::credential::CREDENTIAL_EXAMPLES
     )]
     Credential(command::credential::CredentialArgs),
+    #[command(
+        about = "Reuse recorded conflict resolutions (git rerere)",
+        after_help = command::rerere::RERERE_EXAMPLES
+    )]
+    Rerere(command::rerere::RerereArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
     Rebase(command::rebase::RebaseArgs),
     #[command(about = "Reset current HEAD to specified state")]
@@ -1356,6 +1361,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Credential(cmd_args) => {
             command::credential::execute_safe(cmd_args, &output).await?
         }
+        Commands::Rerere(cmd_args) => command::rerere::execute_safe(cmd_args, &output).await?,
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
         Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
         Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,

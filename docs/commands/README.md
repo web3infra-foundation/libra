@@ -78,6 +78,7 @@ Every Libra command accepts the following global flags:
 | `libra rebase` | `rb` | Reapply commits on top of another base tip with conflict resolution | [rebase.md](rebase.md) |
 | `libra cherry-pick` | `cp` | Apply changes from existing commits onto the current branch | [cherry-pick.md](cherry-pick.md) |
 | `libra revert` | | Create a new commit that undoes changes from a specified commit | [revert.md](revert.md) |
+| `libra rerere` | | Reuse recorded conflict resolutions | [rerere.md](rerere.md) |
 | `libra bisect` | | Binary search to find the commit that introduced a bug; supports `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` | [bisect.md](bisect.md) |
 
 ### Remote Operations

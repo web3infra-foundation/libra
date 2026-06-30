@@ -971,14 +971,16 @@ patch 输入
 
 **范围**：冲突解析记录和复用；接入 merge/rebase/cherry-pick 前先完成存储模型。
 
-**验收标准**：
-- [ ] 建立 `.libra/rerere/` 或 SQLite 表并记录 preimage/postimage。
-- [ ] `libra rerere status|diff|forget|clear|gc` 可用。
-- [ ] merge/rebase/cherry-pick 复用记录时有可审计输出；`--rerere-autoupdate` 的拒绝逻辑同步更新。
+**验收标准**（Phase A：v0.17.1771 —— 独立 rerere；Phase B：自动集成见下）：
+- [x] 建立 `.libra/rerere/`（`<id>/preimage`、`<id>/postimage`、`MERGE_RR`），`<id>`=SHA-256(冲突文件字节)，记录 preimage/postimage。
+- [x] `libra rerere`（默认 update：记录/复用/记录已解决的 postimage）+ `status`/`diff`/`forget`/`clear`/`gc` 可用，输出可审计（"Recorded preimage/resolution for ..."、"Resolved ... using a previously recorded resolution"）。
+- [x] **`--rerere-autoupdate` 拒绝逻辑同步**：merge/rebase/revert 的「Libra has no rerere」注释已改为「rerere 为独立命令、尚未自动集成」；那些命令的 `--rerere-autoupdate` 仍 no-op（实际生效 = Phase B）。
+- [ ] **（Phase B，有意延后）** merge/rebase/cherry-pick 在冲突/解决时**自动** record/replay（`rerere.enabled` + 实际生效的 `--rerere-autoupdate`）。需接入各 sequencer 的冲突处理；当前显式 `libra rerere`。
+- 匹配为**整文件逐字节**（非 Git 逐 hunk 归一化/ours-theirs 顺序无关）—— 记为已知收窄，Phase B 可增强。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test rerere -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test cherry_pick_rerere -- --nocapture`
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test rerere`（10 passed：record→resolve→replay 全循环、status、forget+未知路径 128、clear、diff、gc、仓库外 128）+ `cargo test --lib`（rerere 单测：冲突检测、conflict_id）
+- [ ] （Phase B）`cherry_pick_rerere` 自动集成测试 —— 随 Phase B 落地。
 
 ### GGT-13：互操作命令池
 

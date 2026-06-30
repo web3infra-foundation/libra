@@ -70,6 +70,7 @@ pub mod rebase;
 pub mod reflog;
 pub mod remote;
 pub mod remove;
+pub mod rerere;
 pub mod reset;
 pub mod restore;
 pub mod rev_list;

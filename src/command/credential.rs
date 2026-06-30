@@ -132,10 +132,10 @@ async fn fill(attrs: &CredentialAttrs) -> CliResult<()> {
         return Ok(());
     }
     // If the caller pinned a username, it must match the stored one.
-    if let Some(asked) = &attrs.username {
-        if asked != &stored.username {
-            return Ok(());
-        }
+    if let Some(asked) = &attrs.username
+        && asked != &stored.username
+    {
+        return Ok(());
     }
 
     let mut response = String::new();
