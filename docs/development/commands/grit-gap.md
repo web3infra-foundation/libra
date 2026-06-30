@@ -1000,10 +1000,12 @@ patch 输入
 - bundle 中的 pack 使用 v2 格式；拒绝未知版本。
 - `bundle create` 输出临时文件，完成后再 rename 到目标路径；失败删除临时文件。
 
+**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；⏭️ replace / bundle / fast-export / fast-import 待办。
+
 **验收标准**：
 - [ ] `bundle` 使用 reachability + pack 写入，能 clone/fetch 基本 bundle。
 - [ ] `fast-export` / `fast-import` 事务性处理 object/ref 写入，失败不留下半导入 refs。
-- [ ] `check-mailmap` 先只做解析和查询，再接入 log/blame。
+- [x] `check-mailmap` 先只做解析和查询（v0.17.1772：4 种 `.mailmap` 行形式、`(name,email)` 优先于 email-only、email 大小写不敏感、`--stdin`、`--json`），再接入 log/blame —— 后者（log/blame 集成）+ `mailmap.file`/`.blob` 配置为后续。
 - [ ] `replace` 统一影响 `rev-parse`、`log`、`show` 和 object peel，不只改一个调用点。
 - [ ] `bundle` / `fast-export` 输出可被系统 Git 或 Grit smoke 读取；`fast-import` 对 malformed stream、重复 marks、非法 ref、object format mismatch 和中断输入有失败测试。
 - [ ] **格式版本**：`bundle` 支持 v2 bundle header（`# v2 git bundle`）；pack 使用 v2 格式（`PACK` + version 2）；SHA-1 和 SHA-256 仓库的 bundle/export 必须在 header/prerequisite ref 中使用正确的 hash 长度。`fast-import`/`fast-export` 的 marks 文件格式与 Git 兼容。

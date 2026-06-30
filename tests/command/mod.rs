@@ -281,6 +281,7 @@ mod branch_test;
 mod cat_file_test;
 mod check_attr_test;
 mod check_ignore_test;
+mod check_mailmap_test;
 mod checkout_test;
 mod cherry_pick_test;
 mod clean_test;
