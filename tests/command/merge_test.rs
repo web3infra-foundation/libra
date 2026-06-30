@@ -1140,6 +1140,38 @@ fn test_merge_no_rerere_autoupdate_is_accepted_noop() {
 }
 
 #[test]
+fn test_merge_no_gpg_sign_is_accepted_noop() {
+    // `--no-gpg-sign` skips signing the merge commit. Libra's merge never signs,
+    // so it is an accepted no-op that produces a normal merge.
+    let temp_repo = create_committed_repo_via_cli();
+    let temp_path = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
+    commit_file(temp_path, "feature.txt", "feature\n", "feature change");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
+    commit_file(temp_path, "main.txt", "main\n", "main change");
+
+    let output = run_libra_command(&["merge", "feature", "--no-gpg-sign"], temp_path);
+    assert_cli_success(&output, "merge feature --no-gpg-sign");
+    let log = run_libra_command(&["log", "--oneline", "-n", "1"], temp_path);
+    assert!(
+        String::from_utf8_lossy(&log.stdout)
+            .to_lowercase()
+            .contains("merge"),
+        "merge --no-gpg-sign created a merge commit"
+    );
+}
+
+#[test]
 fn test_merge_stat_prints_diffstat_for_three_way() {
     // `--stat` prints a diffstat of what the merge brought in. Three-way setup:
     // feature.txt on `feature`, main.txt on `main`, so merging `feature` adds

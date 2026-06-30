@@ -1751,6 +1751,48 @@ fn commit_no_status_flag_is_accepted_noop() {
     );
 }
 
+#[test]
+fn commit_no_gpg_sign_produces_unsigned_commit() {
+    let repo = create_committed_repo_via_cli();
+    // `--no-gpg-sign` skips Libra's vault signing path (`gpg_sig = None`) even
+    // with `vault.signing=true`, so the resulting commit carries no `gpgsig`
+    // header. (A full signed-vs-unsigned differential would require a vault
+    // unseal key, which `libra init` does not load in the test harness — a basic
+    // repo's commits are unsigned regardless; this asserts the flag's contract:
+    // the commit is created and is not signed.)
+    assert!(
+        run_libra_command(&["config", "vault.signing", "true"], repo.path())
+            .status
+            .success()
+    );
+    std::fs::write(repo.path().join("gs.txt"), "x\n").unwrap();
+    assert!(
+        run_libra_command(&["add", "gs.txt"], repo.path())
+            .status
+            .success()
+    );
+    let output = run_libra_command(
+        &[
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "with no-gpg-sign",
+            "--no-verify",
+        ],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "commit --no-gpg-sign succeeds: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let show = run_libra_command(&["cat-file", "-p", "HEAD"], repo.path());
+    assert!(
+        !String::from_utf8_lossy(&show.stdout).contains("gpgsig"),
+        "commit --no-gpg-sign produces an unsigned commit (no gpgsig header)"
+    );
+}
+
 /// Regression: `--amend --no-edit` on a *signed* parent must reuse the parent's
 /// real log message, NOT leak the parent's embedded `gpgsig` signature block.
 ///

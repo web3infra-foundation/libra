@@ -194,6 +194,15 @@ pub struct CommitArgs {
     /// one wins.
     #[arg(long = "no-status", overrides_with = "status")]
     pub no_status: bool,
+
+    /// Force an unsigned commit: skip Libra's vault GPG signing
+    /// (`vault_sign_commit`) for this commit, matching `git commit
+    /// --no-gpg-sign`. Vault signing runs when `vault.signing=true` (the `libra
+    /// init` default) and a vault unseal key is available; `--no-gpg-sign`
+    /// suppresses it regardless, so it is a no-op only when signing would not
+    /// have happened anyway. (Git's positive `-S`/`--gpg-sign` is not exposed.)
+    #[arg(long = "no-gpg-sign")]
+    pub no_gpg_sign: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -708,15 +717,19 @@ pub async fn run_commit(
             .await);
         }
 
-        let gpg_sig = vault_sign_commit(
-            &tree.id,
-            &grandpa_commit_id,
-            &author,
-            &committer,
-            &commit_message,
-            false,
-        )
-        .await?;
+        let gpg_sig = if args.no_gpg_sign {
+            None
+        } else {
+            vault_sign_commit(
+                &tree.id,
+                &grandpa_commit_id,
+                &author,
+                &committer,
+                &commit_message,
+                false,
+            )
+            .await?
+        };
 
         let commit = Commit::new(
             author,
@@ -790,15 +803,19 @@ pub async fn run_commit(
         .await);
     }
 
-    let gpg_sig = vault_sign_commit(
-        &tree.id,
-        &parents_commit_ids,
-        &author,
-        &committer,
-        &commit_message,
-        false,
-    )
-    .await?;
+    let gpg_sig = if args.no_gpg_sign {
+        None
+    } else {
+        vault_sign_commit(
+            &tree.id,
+            &parents_commit_ids,
+            &author,
+            &committer,
+            &commit_message,
+            false,
+        )
+        .await?
+    };
 
     let commit = Commit::new(
         author,

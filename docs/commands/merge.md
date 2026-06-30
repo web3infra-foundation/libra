@@ -5,7 +5,7 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] [--no-gpg-sign] <branch>
 libra merge --continue
 libra merge --abort
 ```
@@ -37,6 +37,7 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `--verify-signatures` | Verify the PGP signature on the tip commit of the merged branch and abort the merge if it is unsigned or the signature is bad. Like `tag -v`, only signatures made by this repository's vault PGP key can be validated (no external GPG keyring), so a commit signed elsewhere — or with an SSH signature — is treated as not verifiable. |
 | `--no-verify-signatures` | Do not verify the merged commit's signature (the default). The inverse of `--verify-signatures`; the last one wins. |
 | `--no-rerere-autoupdate` | Do not update the rerere index after the merge. No-op accepted for Git parity: Libra has no rerere. (Git's `--rerere-autoupdate` is not exposed.) |
+| `--no-gpg-sign` | Do not GPG-sign the merge commit. No-op accepted for Git parity: Libra's merge never signs. (Git's `-S`/`--gpg-sign` is not implemented.) |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
 | `--json` | Emit a structured success envelope. |
@@ -139,6 +140,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | No progress meter | `--no-progress` (no-op; never renders one) | `--no-progress` | N/A |
 | Disable signature verification | `--no-verify-signatures` (default; disables `--verify-signatures`) | `--no-verify-signatures` | N/A |
 | No rerere autoupdate | `--no-rerere-autoupdate` (no-op; no rerere) | `--no-rerere-autoupdate` | N/A |
+| No GPG sign | `--no-gpg-sign` (no-op; never signs) | `--no-gpg-sign` | N/A |
 | Custom strategy | Not supported | `--strategy`, `-X` | N/A |
 | Verify signatures | `--verify-signatures` (vault-key PGP only) | `--verify-signatures` | N/A |
 | JSON output | `--json` / `--machine` | Not supported | N/A |

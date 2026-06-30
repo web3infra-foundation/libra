@@ -238,6 +238,19 @@ libra commit --status          # opens the editor with the status commented in
 libra commit --no-status -m "message"
 ```
 
+### `--no-gpg-sign`
+
+Force an unsigned commit: skip Libra's vault GPG signing for this commit,
+matching `git commit --no-gpg-sign`. Vault signing runs when `vault.signing=true`
+(the `libra init` default) and a vault unseal key is available; `--no-gpg-sign`
+suppresses it regardless, so it is a no-op only when signing would not have
+happened anyway. Git's positive `-S`/`--gpg-sign` is not exposed; Libra's commit
+signing is driven by the `vault.signing` config instead.
+
+```bash
+libra commit --no-gpg-sign -m "message"
+```
+
 ### `--fixup <COMMIT>`
 
 Create a fixup commit whose message is `fixup! <target subject>`.

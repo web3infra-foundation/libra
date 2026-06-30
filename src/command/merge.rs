@@ -141,6 +141,12 @@ pub struct MergeArgs {
     /// nothing to update here. (Git's `--rerere-autoupdate` is not exposed.)
     #[arg(long = "no-rerere-autoupdate")]
     pub no_rerere_autoupdate: bool,
+
+    /// Do not GPG-sign the merge commit. Accepted for Git parity and is a no-op:
+    /// Libra's merge never signs, so this already matches the default. (Git's
+    /// opposite `-S`/`--gpg-sign` is not implemented.)
+    #[arg(long = "no-gpg-sign")]
+    pub no_gpg_sign: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
