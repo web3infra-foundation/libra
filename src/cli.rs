@@ -34,7 +34,7 @@ Command Groups:
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, check-mailmap, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
-  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential
+  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
@@ -391,6 +391,11 @@ enum Commands {
         after_help = command::fast_export::FAST_EXPORT_EXAMPLES
     )]
     FastExport(command::fast_export::FastExportArgs),
+    #[command(
+        about = "Create and inspect Git v2 bundle files",
+        after_help = command::bundle::BUNDLE_EXAMPLES
+    )]
+    Bundle(command::bundle::BundleArgs),
     #[command(
         about = "Create an archive of files from a named tree",
         after_help = command::archive::ARCHIVE_EXAMPLES
@@ -1395,6 +1400,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::FastExport(cmd_args) => {
             command::fast_export::execute_safe(cmd_args, &output).await?
         }
+        Commands::Bundle(cmd_args) => command::bundle::execute_safe(cmd_args, &output).await?,
         Commands::WriteTree(cmd_args) => {
             command::write_tree::execute_safe(cmd_args, &output).await?
         }

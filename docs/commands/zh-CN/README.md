@@ -81,6 +81,7 @@
 | `libra revert` | | 创建新提交以撤销指定提交的更改 | [revert.md](revert.md) |
 | `libra rerere` | | 复用已记录的冲突解决 | [rerere.md](rerere.md) |
 | `libra bisect` | | 用二分搜索找到引入 bug 的提交；支持 `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` | [bisect.md](bisect.md) |
+| `libra bundle` | | 创建与检查 Git v2 bundle 文件（`create` / `verify` / `list-heads`） | [bundle.md](bundle.md) |
 
 ### 远程操作
 
