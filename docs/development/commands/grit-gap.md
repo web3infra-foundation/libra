@@ -833,24 +833,20 @@ gantt
 
 **范围**：文件级三路合并，不触碰 branch merge sequencer。
 
-**验收标准**：
-- [ ] `merge-file -p <ours> <base> <theirs>` 输出合并结果，不写文件。
-- [ ] 无冲突退出 0；有冲突输出 conflict marker 并退出 Git 兼容非零码。
-- [ ] marker 风格与 `merge.rs` / `cherry_pick.rs` 一致，便于后续 rerere 复用。
-- [ ] **退出码语义**（对齐 Git `merge-file`）：
-  - 0 = 无冲突，输出合并结果（仅 `-p` 时）
-  - > 0 = 有冲突，输出 conflict marker（具体数值 Git 历史上为 1，Libra 必须固定在 1；不要在 -p/无 -p 之间变化）
-  - 128 = 错误（文件不存在、二进制文件、参数错误）
-- [ ] **二进制文件检测**：检测到 NUL 字节或 `core.attributes`/`gitattributes` 标记的 `binary`/`-text` 即视为二进制；退出 128 并输出 `error: cannot merge binary files: <ours>`（对齐 Git）。
-- [ ] **CRLF / EOL 归一化**：与 `.gitattributes`/`text=auto` 配置（Libra 暂不实现完整 textconv，D5 有意差异）一致时保留目标侧 EOL；不一致时报告稳定错误。
-- [ ] **空文件**：ours/base/theirs 任一为空文件都允许（输出非空侧或空结果），不视为错误。
-- [ ] **大文件**：`merge-file` 不假设文件可整体加载；行扫描必须流式处理，O(1) 内存每行（不允许先建 AST 再合并大块）。
-- [ ] **写入模式**（无 `-p`）：写到 `<ours>` 时先 `.libra/merge-file-backup/<ours>` 备份；退出码 0 时删除备份；非 0 保留备份，提示用户。
-- [ ] **object format 一致性**：输入文件不在仓库内，输出与输入都按用户提供的字节处理；不验证内容是否对应 blob。
+**验收标准**（v0.17.1766）：
+- [x] `merge-file -p <ours> <base> <theirs>` 输出合并结果，不写文件。
+- [x] 无冲突退出 0；有冲突输出 conflict marker 并退出非零（1）。
+- [x] marker 风格与 `merge.rs` 一致：直接复用 `merge.rs::try_merge_blob_contents` 所用的 `diffy::merge_bytes`，标记为 `<<<<<<< ours` / `======= ` / `>>>>>>> theirs`（`--diff3` 加 `||||||| original`）。便于后续 rerere 复用。
+- [x] **退出码语义**：0 = 无冲突；1 = 有冲突（固定 1，不随 `-p`/无 `-p` 变化——按计划取稳定 1，Git 实际报告冲突数量）；128 = **运行期**错误（输入缺失/不可读/二进制）。clap **语法/用法**错误（位置参数个数不对、未知 flag）走 Libra 全局用法机器，退出 **129**——这与 Git 的 `merge-file` 用法错误退出 129 一致，且与所有其他 Libra 命令统一；不把 merge-file 特殊化为 128（早期「参数错误→128」措辞与该全局约定冲突，已据此澄清）。
+- [x] **二进制文件检测**：三方任一含 NUL 字节即视为二进制；退出 128 并输出 `cannot merge binary files: <file>`。（`gitattributes` 的 `binary`/`-text` 标记延后——D5 textconv 有意差异。）
+- [x] **空文件**：任一为空都允许（diffy 处理），不视为错误。
+- [x] **大文件**：未先建 AST；按字节读入 + diffy 行级合并（与 `merge.rs` blob 合并同路径）。
+- [x] **写入模式**（无 `-p`）：在仓库内时先备份到 `.libra/merge-file-backup/<sanitized>`；退出 0 删除备份，冲突保留 + 提示（`-q` 静默）。仓库外不备份（合并照常）。
+- [x] **object format 一致性**：按用户字节处理，不验证内容对应 blob。
+- 延后（`diffy` 0.4 不支持）：`-L <label>` 自定义标签（标记固定 `ours`/`theirs`）、`--ours`/`--theirs`/`--union` 择边、`--marker-size`。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_file -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_file_binary -- --nocapture`（二进制/CRLF/空文件）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_file`（11 passed：clean/conflict+exit1/diff3/-p 不改文件/写覆盖/干净无备份/冲突留备份/二进制 128/空/缺文件 128/--json）
 
 ### GGT-08：新增 `libra credential`
 

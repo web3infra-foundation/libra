@@ -52,6 +52,7 @@ pub mod ls_remote;
 pub mod ls_tree;
 pub mod maintenance;
 pub mod merge;
+pub mod merge_file;
 pub mod mv;
 pub mod notes;
 pub mod op;

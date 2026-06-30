@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -425,6 +425,11 @@ enum Commands {
     Tag(command::tag::TagArgs),
     #[command(about = "Merge changes")]
     Merge(command::merge::MergeArgs),
+    #[command(
+        about = "Three-way merge files (git merge-file)",
+        after_help = command::merge_file::MERGE_FILE_EXAMPLES
+    )]
+    MergeFile(command::merge_file::MergeFileArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
     Rebase(command::rebase::RebaseArgs),
     #[command(about = "Reset current HEAD to specified state")]
@@ -1023,6 +1028,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Open(_)
         | Commands::CodeControl(_)
         | Commands::LsRemote(_)
+        // `merge-file` is a standalone three-way text merge over files on disk;
+        // it touches no objects and works outside a repository, like Git.
+        | Commands::MergeFile(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
@@ -1295,6 +1303,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
         Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,
         Commands::Merge(cmd_args) => command::merge::execute_safe(cmd_args, &output).await?,
+        Commands::MergeFile(cmd_args) => {
+            command::merge_file::execute_safe(cmd_args, &output).await?
+        }
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
         Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
         Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,

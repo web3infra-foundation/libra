@@ -70,6 +70,7 @@
 |------|------|------|------|
 | `libra reset` | | 移动 HEAD，并可选择重置索引或工作目录 | [reset.md](reset.md) |
 | `libra merge` | | 将分支快进合并到当前分支 | [merge.md](merge.md) |
+| `libra merge-file` | | 对三个文件做三路合并（git merge-file） | [merge-file.md](merge-file.md) |
 | `libra rebase` | `rb` | 在另一个基底 tip 上重新应用提交，并支持冲突解决 | [rebase.md](rebase.md) |
 | `libra cherry-pick` | `cp` | 将已有提交的更改应用到当前分支 | [cherry-pick.md](cherry-pick.md) |
 | `libra revert` | | 创建新提交以撤销指定提交的更改 | [revert.md](revert.md) |
