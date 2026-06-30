@@ -34,7 +34,7 @@ Command Groups:
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert
-  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish
+  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
@@ -455,6 +455,11 @@ enum Commands {
         after_help = command::diff_plumbing::DIFF_FILES_EXAMPLES
     )]
     DiffFiles(command::diff_plumbing::DiffFilesArgs),
+    #[command(
+        about = "Vault-backed Git credential helper (fill/store/erase)",
+        after_help = command::credential::CREDENTIAL_EXAMPLES
+    )]
+    Credential(command::credential::CredentialArgs),
     #[command(about = "Reapply commits on top of another base tip", alias = "rb")]
     Rebase(command::rebase::RebaseArgs),
     #[command(about = "Reset current HEAD to specified state")]
@@ -1056,6 +1061,10 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         // `merge-file` is a standalone three-way text merge over files on disk;
         // it touches no objects and works outside a repository, like Git.
         | Commands::MergeFile(_)
+        // `credential` is a Git credential helper: `fill` must be a clean miss
+        // (exit 0, no output) even outside a repository, so it touches no objects
+        // and skips the hash-kind preflight. It resolves the repo vault lazily.
+        | Commands::Credential(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
@@ -1343,6 +1352,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::DiffFiles(cmd_args) => {
             command::diff_plumbing::execute_files_safe(cmd_args, &output).await?
+        }
+        Commands::Credential(cmd_args) => {
+            command::credential::execute_safe(cmd_args, &output).await?
         }
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
         Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,

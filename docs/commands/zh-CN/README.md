@@ -91,6 +91,7 @@
 | `libra pull` | | 获取并快进合并到当前分支 | [pull.md](pull.md) |
 | `libra open` | | 在系统浏览器中打开仓库远程 URL | [open.md](open.md) |
 | `libra lfs` | | 管理 Large File Storage：track、lock、unlock、列出 LFS 文件 | [lfs.md](lfs.md) |
+| `libra credential` | | Vault 支撑的 Git 凭证助手（fill/store/erase） | [credential.md](credential.md) |
 
 ### 云与存储
 

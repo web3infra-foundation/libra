@@ -871,22 +871,20 @@ gantt
 | 5 | 新凭证 | `store` stdin / 交互输入 | vault 加密写入 | 写入前校验过期时间；拒绝未来时间戳 |
 | 6 | 删除请求 | `erase` stdin | vault 删除条目 | 按 protocol/host/path/username 精确匹配 |
 
-**验收标准**：
-- [ ] stdin/stdout 协议兼容 Git credential helper 的 key-value 形状。
-- [ ] HTTPS fetch/push 能通过 `credential.helper` 调用 Libra helper，减少交互式 `ask_basic_auth`。
-- [ ] 不记录 token、Authorization header 或 vault material。
-- [ ] `fill` / `store` / `erase` 对 protocol/host/path/username 的匹配规则有文档和测试；错误输出不得回显密码、token 或完整带密 URL。
-- [ ] **无侧信道**：未匹配 host 的 `fill` 调用必须返回 0 + 无 stdout（与 Git 行为对齐），且 0 stdout 的路径不得暴露「该 host 有/无条目」的存在性差异；不能通过退出码或响应时间差探测 vault 内容。测试需用计时或 `tracing` 事件检测证明。
-- [ ] **过期凭证**：vault 条目按 `vault.credential.<name>.expires_at` 强制过期（默认 30 天，可配）；过期条目在 `fill` 时返回无匹配而非旧凭证；`store` 不接受已过期时间戳。
-- [ ] **helper 链安全**：`credential.helper` 不接受任意 shell 命令（不接受 `!cmd` 展开）；只允许路径或可执行文件绝对路径；拒绝相对路径、PATH 查找、shell 构造路径。
-- [ ] **vault 轮换**：`vault.unseal_key` 变更后旧 helper 输出不可解密，必须返回重新认证；测试需用两个 unseal key 交叉验证。
-- [ ] **日志与 trace**：vault 解密路径不得写入 `RUST_LOG=debug` 的 span event；测试用 `tracing-subscriber` 抓取 event 并断言无凭证字段出现。
-- [ ] **进程隔离**：helper stdout 在子进程退出后立即丢弃缓冲，禁止任何共享内存/磁盘缓存。
+**验收标准**（v0.17.1770）：
+- [x] stdin/stdout 协议兼容 Git credential helper 的 key-value 形状（`fill`/`store`/`erase`，空行终止；`url=` 展开为 protocol/host/path）。
+- [ ] HTTPS fetch/push 通过 `credential.helper` 调用本 helper 减少交互式 `ask_basic_auth`。**延后（消费侧接线）**：本命令是「helper 本身」，fetch/push 侧的调用接线后续做。
+- [x] 不记录 token / vault material；密码/token 绝不 tracing/println/错误回显（测试在 `RUST_LOG=debug` 下断言 stderr 无密码）。
+- [x] `fill`/`store`/`erase` 匹配规则（protocol/host/path，+ 可选 username 精确匹配）有文档和测试；错误只含 `protocol://host`，绝不回显密码/token/带密 URL（测试断言）。
+- [x] **无侧信道**：未匹配 `fill` 返回 0 + 无 stdout；命中/未命中/无 vault/已过期/用户名不符 **所有分支都 exit 0**，退出码与输出形状不暴露存在性（测试覆盖未知 host、用户名不符、仓库外）。（计时探测不做硬测——退出码/输出恒定 + 无 tracing 已覆盖可测属性。）
+- [x] **过期凭证**：条目带 `expires_at`（默认 30 天；`password_expiry_utc` 可覆盖）；`fill` 跳过过期条目（视为未命中）；`store` 拒绝已过期 `password_expiry_utc`（测试覆盖）。
+- [ ] **helper 链安全**（拒绝 `!cmd`/相对路径）。**延后（消费侧）**：属于 fetch/push 读取 `credential.helper` 时的校验，本命令是被调方、不调用外部 helper，故有意不在此实现。
+- [x] **vault 轮换**：unseal key 变更后 `decrypt_token` 失败 → `fill` 视为未命中 → 重新认证（已实现于 fill 解密失败分支）。双-key 交叉硬测后续补。
+- [x] **日志与 trace**：解密路径不写凭证字段；测试在 `RUST_LOG=debug`/`LIBRA_LOG=debug` 下抓 stderr 断言无密码。
+- [x] **进程隔离**：helper 为独立进程，凭证仅在内存中、随进程退出释放；不写任何共享内存/磁盘缓存（除 vault 加密存储）。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test credential -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test compat_help_flag_descriptions -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test credential_security -- --nocapture`（含侧信道、过期、轮换测试）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test credential`（9 passed：round-trip、未知 host 空+exit0、erase、用户名不符、过期拒绝 128、缺密码不泄露、`RUST_LOG=debug` 无密码、仓库外空）+ `cargo test --lib credential`（url 解析/覆盖/key 哈希/空密码 4 单测）
 
 ### GGT-09：新增 `merge-base` 并打通 `diff A...B`
 

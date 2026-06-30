@@ -297,6 +297,7 @@ mod commit_error_test;
 mod commit_json_test;
 mod commit_test;
 mod config_test;
+mod credential_test;
 mod describe_long_test;
 mod describe_test;
 mod diff_plumbing_test;

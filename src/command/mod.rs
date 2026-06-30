@@ -29,6 +29,7 @@ pub mod code_control;
 pub mod code_control_files;
 pub mod commit;
 pub mod config;
+pub mod credential;
 pub mod describe;
 pub mod diff;
 pub mod diff_plumbing;

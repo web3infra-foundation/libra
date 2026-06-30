@@ -91,6 +91,7 @@ Every Libra command accepts the following global flags:
 | `libra pull` | | Fetch and fast-forward merge into the current branch | [pull.md](pull.md) |
 | `libra open` | | Open the repository's remote URL in the system browser | [open.md](open.md) |
 | `libra lfs` | | Manage Large File Storage: track, lock, unlock, list LFS files | [lfs.md](lfs.md) |
+| `libra credential` | | Vault-backed Git credential helper (fill/store/erase) | [credential.md](credential.md) |
 
 ### Cloud & Storage
 
