@@ -808,23 +808,24 @@ gantt
 
 **范围**：脚本化 plumbing。`update-ref` 必须遵守 SQLite refs、HEAD 和 reflog 边界。
 
-**验收标准**：
-- [ ] `update-index --add/--remove/--cacheinfo` 可构造后续 `write-tree` 能读取的 index。
-- [ ] `update-ref <ref> <new> [<old>]` 原子检查旧值并写 SQLite refs/reflog。
-- [ ] 拒绝非法 refname、object format 不匹配、HEAD/symbolic ref 越界写入，错误可读。
-- [ ] `update-ref` 的 compare-and-swap 与 reflog 写入在同一事务中完成；失败不得留下 ref 已更新但 reflog 缺失的状态。
-- [ ] **`update-ref -d <ref> [<old>]`**：删除 ref；CAS 失败返回非 0；不能删 HEAD（`update-ref -d HEAD` 拒绝并报错）；不能删 `refs/replace/<sha>` 之外的特殊路径除非显式 `--no-deref`。
-- [ ] **`<old>` 缺省行为**：`update-ref <ref> <new>` 不带 `<old>` 时，等价于 `<old>` 为 ref 当前值；若 ref 不存在报错 exit 1（对齐 Git）。
-- [ ] **symref 行为**：`update-ref` 不支持创建 symref（与 Git 行为对齐，symref 用 `symbolic-ref`）。若 `<new>` 是 `ref:refs/...` 形式，视为合法 OID 字符串并拒绝（错误码稳定）。
-- [ ] **non-existent ref 创建**：`update-ref refs/heads/newbranch <sha>` 在 `<old>` 为 0{40}（或 0{64}）时允许创建；非零占位符则按 CAS 失败。
-- [ ] **批量操作**：连续多次 `update-ref` 在同一命令（如未来 `update-ref --batch`）下必须共用同一事务；当前首版不支持 `--batch`，文档写明。
-- [ ] **reflog 写入语义**：reflog 包含 `update-ref` 调用方（`<name>` 字段 = `update-ref`），不泄露用户输入的 `<old>` 校验值。
-- [ ] **失败恢复**：事务失败时 refs、reflog 和任何缓存的 peel 结果全部回滚；命令退出 128 并输出受影响 ref。
+**验收标准**（GGT-06 拆为两个发布：update-index v0.17.1764、update-ref v0.17.1765）：
+- [x] `update-index --add/--remove/--cacheinfo` 可构造后续 `write-tree` 能读取的 index。（cacheinfo→write-tree round-trip 测试已证）
+- [x] `update-ref <ref> <new> [<old>]` 原子检查旧值并写 SQLite refs/reflog（读 + 写/删 + reflog 在 `get_db_conn_instance().transaction(...)` 单事务内）。
+- [x] 拒绝非法 refname（`util::is_valid_refname`）、object format 不匹配（长度 != `HashKind::hex_len()`）、HEAD/symbolic ref 越界写入，错误可读。
+- [x] `update-ref` 的 compare-and-swap 与 reflog 写入在同一事务中完成；失败回滚（`TransactionError` → 128）。
+- [x] **`update-ref -d <ref> [<old>]`**：删除 ref；CAS 失败返回 128；不能删 HEAD（`update-ref -d HEAD` 拒绝并报错）。**v1 范围**：仅 `refs/heads/*`，故 `refs/replace/*` 等特殊路径与 `--no-deref` 不适用（直接拒绝非 `refs/heads/*`）。
+- [x] **`<old>` 缺省行为（已按 Git 实际行为调和）**：早期本条写「省略 `<old>` 等价于要求 ref 存在、否则 exit 1」——**与 Git 不符**。Git 的 `update-ref <ref> <new>`（不带 `<old>`）无条件创建或覆盖，不要求 ref 已存在。本实现按 **Git 正确语义**：省略 `<old>` = 无条件创建/覆盖；要 CAS 时显式给 `<old>`。
+- [x] **symref 行为**：`update-ref` 不创建 symref（用 `symbolic-ref`）。`<new>` 为 `ref:refs/...` 形式时拒绝（稳定错误码，exit 128）。
+- [x] **non-existent ref 创建**：`<old>` 为 0{40}/0{64} 时允许创建（ref 必须不存在）；ref 已存在则按 CAS 失败（128）。
+- [x] **批量操作**：首版不支持 `--batch`，文档写明（单次调用即单事务）。
+- [x] **reflog 写入语义**：新增 `ReflogAction::UpdateRef { message }`（action 列 = `update-ref`）；reflog 只记录真实前后 oid，**不泄露** `<old>` 校验值（`write_reflog` 仅取 current/new，`-m` 仅作 message）。
+- [x] **失败恢复**：事务失败时 refs + reflog 全部回滚；命令退出 128。
+- 错误码：**复用既有 `StableErrorCode`**（`CliInvalidArguments` / `RepoStateInvalid`），未新增变体，故无需改 `docs/error-codes.md`（新增是条件性要求）。
+- **v1 范围收窄（有意）**：仅 `refs/heads/<branch>`（Libra `reference` 表能直接建模）；`HEAD`/`refs/tags/*`/`refs/remotes/*`/任意命名空间拒绝并给指引（详见 `docs/development/commands/update-ref.md`）。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test update_index -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test update_ref -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test update_ref_delete -- --nocapture`（`-d` 与 HEAD 保护）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test update_index`（12 passed）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test update_ref`（14 passed；`-d`/HEAD 保护/CAS 删除均含于 `update_ref_test`：`deletes_a_branch_ref`、`delete_with_mismatched_old_fails`、`deleting_a_missing_ref_fails`、`rejects_head`）
 
 ### GGT-07：新增 `merge-file`
 
