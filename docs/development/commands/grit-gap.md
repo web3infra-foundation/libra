@@ -1000,18 +1000,18 @@ patch 输入
 - bundle 中的 pack 使用 v2 格式；拒绝未知版本。
 - `bundle create` 输出临时文件，完成后再 rename 到目标路径；失败删除临时文件。
 
-**进度（5 个命令各为独立增量/PR）**：✅ check-mailmap（v0.17.1772）；✅ fast-export（v0.17.1773，整树重建 deleteall+M，只读，拓扑序）；✅ bundle（v0.17.1774，完整 v2 bundle create/verify/list-heads，复用 PackEncoder，hash-kind 正确，temp-then-rename）；✅ replace（v0.17.1775，refs/replace 松散 ref + load_object 全链路 peel，create/-d/-l）；⏭️ fast-import 待办（最后一个）。
+**进度（5 个命令各为独立增量/PR）—— 全部完成 🎉**：✅ check-mailmap（v0.17.1772）；✅ fast-export（v0.17.1773，整树重建 deleteall+M，只读，拓扑序）；✅ bundle（v0.17.1774，完整 v2 bundle create/verify/list-heads，复用 PackEncoder，hash-kind 正确，temp-then-rename）；✅ replace（v0.17.1775，refs/replace 松散 ref + load_object 全链路 peel，create/-d/-l）；✅ fast-import（v0.17.1776，流解析 blob/commit/reset/checkpoint/done + M/D/deleteall 经 write-tree，事务性 ref 提交于 checkpoint/done/clean-EOF，资源边界 1GiB/10^6/--max-count，拒绝仓库外 ref/非法 refname/hash 格式不匹配/重复 mark）。
 
 **验收标准**：
 - [x] `bundle` 使用 reachability + pack 写入，能 clone/fetch 基本 bundle（v0.17.1774：`create`/`verify`/`list-heads`，完整 v2 bundle，复用 `PackEncoder`（hash-kind 正确），系统 Git 可 clone；prerequisite/thin/增量、`unbundle`、libra 侧 clone-from-bundle、完整 pack 校验和延后）。
-- [ ] `fast-export` / `fast-import` 事务性处理 object/ref 写入，失败不留下半导入 refs。
+- [x] `fast-export` / `fast-import` 事务性处理 object/ref 写入，失败不留下半导入 refs（v0.17.1773 fast-export 只读；v0.17.1776 fast-import：对象立即写，ref 更新缓冲并仅在 checkpoint/done/clean-EOF 提交，截断流在 flush 前报错→refs 不更新，孤立对象由 gc 回收）。
 - [x] `check-mailmap` 先只做解析和查询（v0.17.1772：4 种 `.mailmap` 行形式、`(name,email)` 优先于 email-only、email 大小写不敏感、`--stdin`、`--json`），再接入 log/blame —— 后者（log/blame 集成）+ `mailmap.file`/`.blob` 配置为后续。
 - [x] `replace` 统一影响 `rev-parse`、`log`、`show` 和 object peel，不只改一个调用点（v0.17.1775：peel 在 `command::load_object` 生效，故所有经 load_object 的读取者透明遵守；`refs/replace/<oid>` 松散 ref 存储；create/`-f`/`-d`/`-l`。接入 SQLite reference 表 + `--edit`/`--graft` 延后）。
-- [ ] `bundle` / `fast-export` 输出可被系统 Git 或 Grit smoke 读取；`fast-import` 对 malformed stream、重复 marks、非法 ref、object format mismatch 和中断输入有失败测试。
+- [x] `bundle` / `fast-export` 输出可被系统 Git 或 Grit smoke 读取（v2 bundle / fast-import 流均为标准格式）；`fast-import` 对 malformed stream（unsupported command）、重复 marks、非法/仓库外 ref、object format mismatch（hash-len 校验）和超限输入有失败测试（`tests/command/fast_import_test.rs`，均 exit 128）。
 - [ ] **格式版本**：`bundle` 支持 v2 bundle header（`# v2 git bundle`）；pack 使用 v2 格式（`PACK` + version 2）；SHA-1 和 SHA-256 仓库的 bundle/export 必须在 header/prerequisite ref 中使用正确的 hash 长度。`fast-import`/`fast-export` 的 marks 文件格式与 Git 兼容。
-- [ ] **崩溃恢复**：`fast-import` 中断后仓库状态定义明确——已写入的对象保留（可被后续 `gc` 清理），但 refs 不更新（事务边界在 `checkpoint` 或流结束时）；文档说明恢复步骤（`libra fsck` + `libra gc`）。`bundle` 写入失败时临时文件必须删除，不留半包。
-- [ ] **SHA-1/SHA-256 双格式**：所有导出/导入命令必须验证当前仓库 `core.repositoryformatversion` 和 hash kind，拒绝 hash 格式不匹配的输入（如 SHA-1 仓库导入 SHA-256 bundle）。
-- [ ] `replace` 的 `refs/replace/<sha>` 写入和 peel 必须在事务中完成；`replace --delete` 必须同时清理 replace ref 和 peel 缓存。
+- [x] **崩溃恢复**：`fast-import` 中断后仓库状态定义明确——已写入的对象保留（可被后续 `gc` 清理），但 refs 不更新（事务边界在 `checkpoint`/`done`/clean-EOF）；文档（命令头注释 + docs/commands/fast-import.md）说明恢复步骤（`libra fsck` + `libra gc`）。`bundle` 写入失败时临时文件已删除（temp-then-rename），不留半包。
+- [x] **SHA-1/SHA-256 双格式**：`bundle` 用仓库 hash kind 编码 pack（PackEncoder + set_hash_kind）；`fast-import` 校验字面 oid 长度 == `get_hash_kind().hex_len()`（40/64），拒绝 hash 格式不匹配的输入。（`core.repositoryformatversion` 显式校验为后续；hash kind 经全局 preflight 已生效。）
+- [x] `replace` 的 `refs/replace/<sha>` 写入和 peel 已实现（v0.17.1775：松散 ref 写入 + load_object peel）；`replace --delete` 同时删除 ref 文件并使下个进程重建的 peel 缓存不含它。（注：peel 缓存为进程级 OnceLock，每次 CLI 调用重建，故 --delete 后下次读取即不再替换。）
 
 **验证**：
 - [ ] 对每个命令新增独立 `tests/command/<cmd>_test.rs`

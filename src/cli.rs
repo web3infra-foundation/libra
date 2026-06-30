@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -396,6 +396,11 @@ enum Commands {
         after_help = command::bundle::BUNDLE_EXAMPLES
     )]
     Bundle(command::bundle::BundleArgs),
+    #[command(
+        about = "Import a git fast-import stream",
+        after_help = command::fast_import::FAST_IMPORT_EXAMPLES
+    )]
+    FastImport(command::fast_import::FastImportArgs),
     #[command(
         about = "Create an archive of files from a named tree",
         after_help = command::archive::ARCHIVE_EXAMPLES
@@ -1406,6 +1411,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             command::fast_export::execute_safe(cmd_args, &output).await?
         }
         Commands::Bundle(cmd_args) => command::bundle::execute_safe(cmd_args, &output).await?,
+        Commands::FastImport(cmd_args) => {
+            command::fast_import::execute_safe(cmd_args, &output).await?
+        }
         Commands::WriteTree(cmd_args) => {
             command::write_tree::execute_safe(cmd_args, &output).await?
         }
