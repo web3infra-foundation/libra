@@ -22,6 +22,7 @@
 | 命令 | 兼容级别 | 当前说明 |
 |---|---|---|
 | [`add`](add.md) | `partial` | sparse-checkout flag unsupported |
+| [`apply`](apply.md) | `partial` | `--check` MVP: validate a unified-diff patch (single/multi-file, new/modify/delete) against the worktree via `diffy`, without writing; `-p<n>`, files or stdin, 64 MiB cap, `--json`; unsafe paths (absolute/`..`/NUL/`.libra/`) rejected; exit 0/1/128. Real apply, `--index`/`--3way`/`--reverse`/binary deferred |
 | [`archive`](archive.md) | `partial` | Creates tar/tar.gz/tar.bz2/zip archives from a committed tree; `--format`, `--output`, `--prefix`, `--list`, `-v`/`--verbose`, `--add-file=<file>` (inject an untracked file; repeatable), `--compression-level <0-9>` (Git's `-0`..`-9`), `--mtime <time>` (entry mtime; default = the commit's committer time, not epoch 0), and `TREEISH <path>...` supported |
 | [`agent`](agent.md) | `intentionally-different` | Libra external-agent capture extension, not a Git command |
 | [`automation`](automation.md) | `intentionally-different` | Libra AI automation rules/history extension, not a Git command |

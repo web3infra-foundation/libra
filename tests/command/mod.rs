@@ -272,6 +272,7 @@ mod add_test;
 mod agent_clean_test;
 mod agent_help_test;
 mod agent_push_test;
+mod apply_test;
 mod archive_test;
 mod automation_help_test;
 mod bisect_test;

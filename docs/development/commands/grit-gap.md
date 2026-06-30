@@ -939,18 +939,16 @@ patch 输入
 - 拒绝创建/修改仓库根外路径、`.libra/` 内部路径、特殊设备文件、FIFO、socket。
 - symlink 目标校验：若 patch 操作涉及 symlink，目标必须落在仓库工作树内且不能指向 `.libra/`。
 
-**验收标准**：
-- [ ] `apply --check` 验证单文件和多文件 unified diff，不写工作树。
-- [ ] 支持 `-p<n>` 路径剥离和新增/删除/修改文件。
-- [ ] 错误定位到 patch 文件、hunk、目标 path，并避免部分写入。
-- [ ] 拒绝 absolute path、`..` 越界、NUL path、symlink 越界写入和超大 hunk 非流式内存膨胀；真正写入模式必须先计划后应用，失败可回滚或明确保证无部分写入。
-- [ ] `--check` 退出码：可应用 exit 0；有冲突/不可应用 exit 1；错误 exit 128。
-- [ ] 写入模式（未来扩展）必须实现临时文件 + atomic rename，失败时清理临时文件。
+**验收标准**（v0.17.1768 —— `--check` MVP）：
+- [x] `apply --check` 验证单文件和多文件 unified diff（git-style 与 plain），不写工作树。
+- [x] 支持 `-p<n>` 路径剥离（默认 1）和新增（`--- /dev/null`）/删除（`+++ /dev/null`）/修改文件。补丁来自文件或 stdin。
+- [x] 错误定位到 path/补丁，且 `--check` 从不写入（不可能部分写入）。
+- [x] 拒绝 absolute path、`..` 越界、NUL path、`.libra/` 内部与越出工作树（`resolve_safe` + `util::is_sub_path`）→ 128；补丁总大小上限 64 MiB → 128。（hunk 级 1 MiB 上限与 symlink 目标校验在写入模式落地时补。）
+- [x] `--check` 退出码：可应用 exit 0；不可应用（上下文冲突/目标缺失）exit 1；错误（非仓库/缺 `--check`/格式错误/超大/非 UTF-8/不安全路径）exit 128。
+- [ ] **写入模式（未来扩展，有意延后）**：真正应用 + 临时文件 + atomic rename + 失败清理。本 MVP 仅 `--check`（无 `--check` → 128 提示）；引擎为 `diffy`（与 `merge`/`merge-file` 一致），写入模式落地时复用。
 
 **验证**：
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test apply_check -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --lib patch -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test apply_security -- --nocapture`（路径越界/symlink/大文件）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test apply`（16 passed：含 `apply_check_*` 与 `apply_security_*`：干净/冲突 exit1/新文件/多文件/`-p0`/stdin/越界 128/`.libra` 128/缺 `--check` 128/格式错误 128/`--json`/非仓库）
 
 ### GGT-11：补 `repack` / hidden `pack-objects` / diff plumbing
 

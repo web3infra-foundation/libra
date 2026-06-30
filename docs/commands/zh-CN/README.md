@@ -114,6 +114,7 @@
 
 | 命令 | 别名 | 说明 | 文档 |
 |------|------|------|------|
+| `libra apply` | | 检查 unified-diff 补丁能否应用（`--check`） | [apply.md](apply.md) |
 | `libra cat-file` | | 按类型、大小或漂亮打印内容检查 Git 对象和 AI 对象 | [cat-file.md](cat-file.md) |
 | `libra check-attr` | | 报告路径的 `.libra_attributes` 属性（如 `filter`） | [check-attr.md](check-attr.md) |
 | `libra check-ignore` | | 报告哪些路径被 `.libraignore` 规则忽略 | [check-ignore.md](check-ignore.md) |

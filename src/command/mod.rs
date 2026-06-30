@@ -10,6 +10,7 @@
 
 pub mod add;
 pub mod agent;
+pub mod apply;
 pub mod archive;
 pub mod automation;
 pub mod bisect;
