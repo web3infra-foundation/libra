@@ -264,6 +264,13 @@ struct Cli {
     )]
     progress: String,
 
+    /// fsync object writes (and their parent directories) for power-loss
+    /// durability, at the cost of write throughput. Recovery-critical sequencer
+    /// state is always fsynced regardless of this flag. Also settable via
+    /// `LIBRA_SYNC_DATA=1`.
+    #[arg(long, global = true)]
+    sync_data: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1289,6 +1296,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    // `--sync-data` forces object-write fsync on for this run, layering over the
+    // `LIBRA_SYNC_DATA` env default (lore.md §0.5). The flag can only turn it on;
+    // absence leaves whatever the env initialised.
+    if args.sync_data {
+        utils::atomic_write::set_sync_data(true);
+    }
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
@@ -1705,6 +1718,47 @@ mod tests {
             !output::warning_was_emitted(),
             "top-level CLI dispatch should clear stale warning state before running"
         );
+    }
+
+    /// Scenario: the global `--sync-data` flag (lore.md §0.5) must actually flip
+    /// the process-global durability hook, from either flag placement, and a run
+    /// without it (env disabled) must leave the hook off. Uses `completions bash`
+    /// as a benign, repo-free command that still runs the post-parse flag
+    /// override before dispatch.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn sync_data_flag_enables_durability_hook() {
+        use crate::utils::atomic_write::{set_sync_data, sync_data_enabled};
+
+        // Pin the env baseline off so we measure the flag's effect, not ambient
+        // LIBRA_SYNC_DATA.
+        let _env = test::ScopedEnvVar::set("LIBRA_SYNC_DATA", "0");
+
+        // No flag: `parse_async` re-inits the hook from env (0), leaving it off
+        // even though we seed the opposite here.
+        set_sync_data(true);
+        parse_async(Some(&["libra", "completions", "bash"]))
+            .await
+            .unwrap();
+        assert!(
+            !sync_data_enabled(),
+            "no --sync-data (env 0) should leave object fsync off"
+        );
+
+        // Both global placements enable it.
+        for argv in [
+            &["libra", "--sync-data", "completions", "bash"][..],
+            &["libra", "completions", "bash", "--sync-data"][..],
+        ] {
+            set_sync_data(false);
+            parse_async(Some(argv)).await.unwrap();
+            assert!(
+                sync_data_enabled(),
+                "--sync-data ({argv:?}) should enable object fsync"
+            );
+        }
+
+        set_sync_data(false);
     }
 
     /// Scenario: `libra code --repo <path>` should perform repository preflight

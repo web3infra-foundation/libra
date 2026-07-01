@@ -1296,3 +1296,38 @@ fn tag_help_includes_examples_section() {
         "tag help should include examples, got: {stdout}"
     );
 }
+
+/// The global `--sync-data` flag (lore.md §0.5) is accepted on any command and a
+/// full add/commit round-trip still succeeds with object-write fsync enabled.
+#[test]
+fn sync_data_flag_is_accepted_and_writes_round_trip() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    init_repo_via_cli(repo);
+    configure_identity_via_cli(repo);
+
+    // Accepted on a read command.
+    assert_cli_success(&run(&["--sync-data", "status"], repo), "sync-data status");
+
+    // Accepted on the write path, and the object round-trips (fsync on).
+    fs::write(repo.join("f.txt"), "durable\n").unwrap();
+    assert_cli_success(
+        &run(&["--sync-data", "add", "f.txt"], repo),
+        "sync-data add",
+    );
+    assert_cli_success(
+        &run(
+            &["--sync-data", "commit", "-m", "init", "--no-verify"],
+            repo,
+        ),
+        "sync-data commit",
+    );
+
+    // The committed content is readable back, so the fsynced write is intact.
+    let log = run(&["log", "--pretty=%s"], repo);
+    assert_cli_success(&log, "log");
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("init"),
+        "committed object should be readable back after a --sync-data write"
+    );
+}

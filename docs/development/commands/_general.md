@@ -9,6 +9,7 @@
 - Git 兼容命令以 `COMPATIBILITY.md` 为用户承诺，以 `docs/development/commands/<cmd>.md` 记录实现细节和未完成项，并以 `docs/development/integration-test-plan.md` / `docs/development/integration-scenarios.yaml` 作为集成验证方案的事实源。
 - Libra 扩展命令如 `code`、`agent`、`cloud`、`publish`、`usage`、`sandbox` 不追求 Git 同形，必须解释差异和替代工作流。
 - 全局参数 `--json`、`--machine`、`--no-pager`、`--color`、`--progress`、`--quiet`、`--exit-code-on-warning` 是 Agent 驱动 CLI 的基础契约。
+- 全局耐久性参数 `--sync-data`（`lore.md` §0.5）：对本地对象写强制 fsync（临时文件与父目录）换取抗断电耐久性，代价是写吞吐；recovery-critical 的 sequencer 状态恒 fsync 不受此开关影响。等价于 `LIBRA_SYNC_DATA=1`，经 `utils::atomic_write` 收口。
 
 ## 设计方案
 
