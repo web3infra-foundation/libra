@@ -320,7 +320,9 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 ### Build & Runtime
 - `LIBRA_SKIP_WEB_BUILD=1` — skip the Next.js web build in `build.rs` (set by every CI job except `compat-web-check`)
 - `LIBRA_LOG`, `RUST_LOG` — `tracing-subscriber` env filter
-- `LIBRA_LOG_FILE` — append-mode tracing sink path
+- `LIBRA_LOG_FILE` — tracing sink path (append-mode by default; time-rolled when `LIBRA_LOG_ROTATION` is set)
+- `LIBRA_LOG_ROTATION` — rolling strategy for `LIBRA_LOG_FILE`: `never` (default) / `minutely` / `hourly` / `daily` (`tracing-appender`, time-split only — no old-file pruning); inspect via `libra logfile info`
+- `LIBRA_SYNC_DATA` — set to `1`/`true`/`yes`/`on` to fsync local object writes for power-loss durability (same as the global `--sync-data` flag)
 - `LIBRA_PAGER` — pager override (falls back to system `PAGER` then `less`)
 - `LIBRA_NO_HIDE_PASSWORD` — show password prompts in plain text (debugging)
 - `LIBRA_CONFIG_GLOBAL_DB` — override the global config SQLite path

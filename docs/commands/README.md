@@ -46,6 +46,7 @@ Every Libra command accepts the following global flags:
 |---------|-------|-------------|-----|
 | `libra commit` | `ci` | Record staged changes as a new commit with optional vault signing and conventional format | [commit.md](commit.md) |
 | `libra log` | `hist`, `history` | Show commit history with graph, patch, stat, and custom format support | [log.md](log.md) |
+| `libra logfile` | | Inspect the tracing log-file configuration (path, rotation, filter, size) | [logfile.md](logfile.md) |
 | `libra shortlog` | `slog` | Summarize reachable commits grouped by author | [shortlog.md](shortlog.md) |
 | `libra show` | | Display a commit, tag, tree, blob, or `REV:path` content | [show.md](show.md) |
 | `libra diff` | | Compare differences between HEAD, index, working tree, or two revisions | [diff.md](diff.md) |

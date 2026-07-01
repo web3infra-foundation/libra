@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1792"
+version = "0.17.1793"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -83,6 +83,7 @@ tokio-tungstenite = { version = "0.29.0", features = ["native-tls"] }
 toml = "0.8.23"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.3"
 url = "2.5.8"
 walkdir = "2.5.0"
 wax = "0.7.0"

@@ -9,12 +9,21 @@
 //!    rendering errors through the same [`OutputConfig`] machinery the dispatcher uses
 //!    so that `--json` and friends keep behaving consistently when parsing itself fails.
 
-use std::{fs::OpenOptions, path::PathBuf, sync::Mutex};
+use std::{
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use libra::{
     cli,
-    utils::{error::INTERNAL_ERROR_REPORT_HINT, output::OutputConfig},
+    utils::{
+        error::INTERNAL_ERROR_REPORT_HINT,
+        log_config::{LogRotation, resolve_log_config},
+        output::OutputConfig,
+    },
 };
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 
 /// Process entry point.
@@ -88,16 +97,13 @@ fn main() {
 /// - If `LIBRA_LOG_FILE` cannot be opened, we warn on stderr and leave tracing
 ///   disabled — we never crash the CLI just because logging failed.
 fn init_tracing() {
-    let log_file = std::env::var_os("LIBRA_LOG_FILE");
-    let log_filter = std::env::var_os("LIBRA_LOG")
-        .or_else(|| std::env::var_os("RUST_LOG"))
-        .or_else(|| log_file.as_ref().map(|_| "libra=debug".into()));
-    let Some(log_filter) = log_filter else {
+    let config = resolve_log_config();
+    let Some(filter_directive) = config.filter.as_deref() else {
         return;
     };
 
-    let env_filter = build_env_filter(&log_filter.to_string_lossy());
-    let Some(path) = log_file else {
+    let env_filter = build_env_filter(filter_directive);
+    let Some(path) = config.file.as_deref() else {
         if let Err(err) = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .try_init()
@@ -107,8 +113,20 @@ fn init_tracing() {
         return;
     };
 
-    let path = PathBuf::from(path);
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    match config.rotation {
+        // Default / pre-0.7 behaviour: one append-mode file at exactly `path`.
+        LogRotation::Never => init_appended_log_file(path, env_filter),
+        // lore.md §0.7: roll the file on the requested interval so no single log
+        // file grows without limit. Rotation only SPLITS logs by time; it does
+        // not delete old files, so total disk use needs external retention
+        // (e.g. logrotate) or a dedicated log directory.
+        rotation => init_rolling_log_file(path, rotation, env_filter),
+    }
+}
+
+/// Route tracing to a single append-mode file at `path` (rotation = never).
+fn init_appended_log_file(path: &Path, env_filter: EnvFilter) {
+    match OpenOptions::new().create(true).append(true).open(path) {
         Ok(file) => {
             if let Err(err) = tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
@@ -125,6 +143,71 @@ fn init_tracing() {
         Err(err) => {
             eprintln!(
                 "warning: failed to open LIBRA_LOG_FILE {}; tracing disabled: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Route tracing to a time-rolled file: `<dir>/<name>.<date-suffix>` where the
+/// suffix granularity follows `rotation`. Blocking writer (no worker guard), so
+/// no log lines are lost when the short-lived CLI process exits.
+fn init_rolling_log_file(path: &Path, rotation: LogRotation, env_filter: EnvFilter) {
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        // A bare filename rolls in the current directory.
+        _ => PathBuf::from("."),
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        eprintln!(
+            "warning: LIBRA_LOG_FILE {} has no valid UTF-8 file name; tracing disabled",
+            path.display()
+        );
+        return;
+    };
+
+    // Create the log directory up front; the builder errors (rather than
+    // creating it) if it is missing.
+    if let Err(err) = std::fs::create_dir_all(&directory) {
+        eprintln!(
+            "warning: failed to create log directory {}; tracing disabled: {err}",
+            directory.display()
+        );
+        return;
+    }
+
+    let rotation_kind = match rotation {
+        LogRotation::Minutely => Rotation::MINUTELY,
+        LogRotation::Hourly => Rotation::HOURLY,
+        LogRotation::Daily => Rotation::DAILY,
+        LogRotation::Never => Rotation::NEVER,
+    };
+
+    // Use the fallible builder (not `RollingFileAppender::new`, which panics) so
+    // an init failure only disables logging, never crashes the CLI. We do NOT
+    // enable `max_log_files` pruning: it deletes by filename prefix and would
+    // risk removing unrelated `<file>.*` files in the log directory.
+    match RollingFileAppender::builder()
+        .rotation(rotation_kind)
+        .filename_prefix(file_name)
+        .build(&directory)
+    {
+        Ok(appender) => {
+            if let Err(err) = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_ansi(false)
+                .with_writer(appender)
+                .try_init()
+            {
+                eprintln!(
+                    "warning: failed to initialize rolling tracing subscriber for LIBRA_LOG_FILE {}: {err}",
+                    path.display()
+                );
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: failed to open rolling LIBRA_LOG_FILE {}; tracing disabled: {err}",
                 path.display()
             );
         }
