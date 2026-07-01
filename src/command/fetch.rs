@@ -147,8 +147,34 @@ impl RemoteClient {
                 client.with_timeouts(connect_timeout, idle_timeout)?,
             )),
             Self::Ssh(client) => Ok(Self::Ssh(client.with_idle_timeout(idle_timeout))),
+            Self::Git(client) => Ok(Self::Git(
+                client.with_network_timeouts(connect_timeout, idle_timeout),
+            )),
+            // Local remotes read from disk — no network timeouts apply.
             other => Ok(other),
         }
+    }
+
+    /// Apply the connect/idle timeouts resolved from the environment, config, and
+    /// built-in defaults for this remote. A no-op for local remotes.
+    pub(crate) fn with_resolved_fetch_timeouts(self, remote: Option<&str>) -> Result<Self, String> {
+        let is_local = matches!(self, Self::Local(_));
+        if is_local {
+            return Ok(self);
+        }
+        let connect = resolve_fetch_timeout(
+            remote,
+            "connectTimeout",
+            "LIBRA_FETCH_CONNECT_TIMEOUT_MS",
+            Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS),
+        );
+        let idle = resolve_fetch_timeout(
+            remote,
+            "idleTimeout",
+            "LIBRA_FETCH_IDLE_TIMEOUT_MS",
+            Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+        );
+        self.with_network_timeouts(connect, idle)
     }
 
     pub(crate) async fn discovery_reference(
@@ -472,6 +498,53 @@ fn load_ssh_host_key_checking_mode() -> Option<String> {
         return None;
     }
     load_config_sync("ssh", None, "strictHostKeyChecking")
+}
+
+/// Default connect timeout for a network fetch (seconds).
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Default idle (per-read) timeout for a network fetch (seconds).
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Resolve one fetch timeout, in precedence order:
+///   1. the `LIBRA_FETCH_*_MS` environment variable (milliseconds);
+///   2. the `fetch.<remote>.<key>` then `fetch.<key>` config value (whole seconds);
+///   3. the supplied built-in default.
+///
+/// An unparseable OR non-positive (`0`) value at any source is ignored — it
+/// falls through to the *next* source (not straight to the default) — so a typo
+/// or a `0` can never leave a fetch with a zero-duration timeout, and a bad
+/// remote-scoped value never masks a valid un-scoped `fetch.<key>`.
+fn resolve_fetch_timeout(
+    remote: Option<&str>,
+    config_key: &str,
+    env_var: &str,
+    default: Duration,
+) -> Duration {
+    // A whole-seconds config value is valid only when it parses AND is positive.
+    let parse_secs = |raw: Option<String>| -> Option<Duration> {
+        raw.and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&secs| secs > 0)
+            .map(Duration::from_secs)
+    };
+
+    // 1. env (milliseconds).
+    if let Ok(raw) = std::env::var(env_var)
+        && let Ok(ms) = raw.trim().parse::<u64>()
+        && ms > 0
+    {
+        return Duration::from_millis(ms);
+    }
+    // 2. remote-scoped config `fetch.<remote>.<key>` (seconds), validated on its own.
+    if let Some(remote) = remote
+        && let Some(duration) = parse_secs(load_config_sync("fetch", Some(remote), config_key))
+    {
+        return duration;
+    }
+    // 3. un-scoped config `fetch.<key>` (seconds).
+    if let Some(duration) = parse_secs(load_config_sync("fetch", None, config_key)) {
+        return duration;
+    }
+    default
 }
 
 fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
@@ -1217,8 +1290,9 @@ pub(crate) async fn discover_remote_with_name(
     remote_spec: &str,
     remote_name: Option<&str>,
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
-    let remote_client =
-        RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
+    let remote_client = RemoteClient::from_spec_with_remote(remote_spec, remote_name)
+        .and_then(|client| client.with_resolved_fetch_timeouts(remote_name))
+        .map_err(|message| {
             let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
             FetchError::InvalidRemoteSpec {
                 spec: remote_spec.to_string(),
@@ -2881,6 +2955,52 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use futures_util::{StreamExt, stream};
     use git_internal::hash::ObjectHash;
+
+    #[test]
+    fn resolve_fetch_timeout_env_millis_wins() {
+        // A unique env var name so no concurrent real fetch reads it. The env
+        // branch returns before any config read, keeping this deterministic.
+        let var = "LIBRA_TEST_FETCH_TIMEOUT_ENV_WINS";
+        // SAFETY: single-threaded set/read/remove within this test; the var name
+        // is unique to this test so no other thread observes it.
+        unsafe { std::env::set_var(var, "2500") };
+        let resolved =
+            super::resolve_fetch_timeout(None, "connectTimeout", var, Duration::from_secs(30));
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(resolved, Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn resolve_fetch_timeout_ignores_unparseable_env() {
+        let var = "LIBRA_TEST_FETCH_TIMEOUT_GARBAGE";
+        // SAFETY: as above.
+        unsafe { std::env::set_var(var, "not-a-number") };
+        // Garbage env is ignored; with a config key nothing sets it falls to the
+        // default (the unique key keeps this independent of the repo's config).
+        let resolved = super::resolve_fetch_timeout(
+            None,
+            "connectTimeoutTestUnset",
+            var,
+            Duration::from_secs(9),
+        );
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(resolved, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn resolve_fetch_timeout_ignores_zero_env() {
+        let var = "LIBRA_TEST_FETCH_TIMEOUT_ZERO";
+        // SAFETY: as above. A `0` must not become a zero-duration timeout.
+        unsafe { std::env::set_var(var, "0") };
+        let resolved = super::resolve_fetch_timeout(
+            None,
+            "connectTimeoutTestUnset",
+            var,
+            Duration::from_secs(11),
+        );
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(resolved, Duration::from_secs(11));
+    }
     use tempfile::tempdir;
 
     use super::{

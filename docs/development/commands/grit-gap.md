@@ -1031,11 +1031,11 @@ patch 输入
 - [x] pack 协商（want/have/depth BFS）、sideband progress 和 EOF（flush）处理复用 `internal/protocol` 现有路径（`PackEncoder` + 共享线格式封装）；thin pack 暂不生成（Phase B）。
 - [x] 错误信息说明 remote/path/protocol，不泄露凭据（错误含外部 repo 路径，无凭据）。
 - [ ] **（Phase B）** 保留连接/空闲 timeout、sideband 错误帧、半包/截断 pack 和远端无效能力声明的回归测试；协议错误不能被降级成成功的空 fetch。
-- [ ] **（Phase B）超时配置**（默认值，文档在 `fetch.md` 公开）：
-  - `connect_timeout`：默认 30s；本地 remote 应 ≤ 5s
-  - `idle_timeout`：默认 60s；流式 pack 接收空闲 60s 视为连接死
-  - `first_byte_timeout`：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待
-  - 这些值需有配置项（`fetch.<remote>.connectTimeout` 等），可被环境变量 `LIBRA_FETCH_*_MS` 覆盖
+- [~] **（Phase B，v0.17.1782 —— connect/idle 已落地；first_byte 待续）超时配置**（默认值，文档在 `fetch.md` 公开）：
+  - [x] `connect_timeout`：默认 30s（`fetch.<remote>.connectTimeout` / `LIBRA_FETCH_CONNECT_TIMEOUT_MS`）。**接线修复**：`RemoteClient::with_network_timeouts` 此前是死代码（从未被调用）；新增 `with_resolved_fetch_timeouts(remote)` 在 `from_spec_with_remote` 之后接线，按 env(ms)→`fetch.<remote>.<key>`→`fetch.<key>`(秒)→默认解析。**git:// 补齐**：`git_client.rs` 原无任何超时（裸 `TcpStream::connect`/`read_to_end`），现 `GitClient` 带 connect/idle 字段 + `with_network_timeouts`，`open_stream` 用 `tokio::time::timeout` 包 connect，逐 read + 整包 read 用 idle timeout 包裹。本地 remote 免网络超时（读盘）——以豁免代替「≤5s」。
+  - [x] `idle_timeout`：默认 60s（`fetch.<remote>.idleTimeout` / `LIBRA_FETCH_IDLE_TIMEOUT_MS`）；http/ssh 复用同一解析值（此前各自硬编码 60s）。
+  - [ ] `first_byte_timeout`：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待 —— **待续**（当前由 idle_timeout 覆盖首个 read）。
+  - L1：`resolve_fetch_timeout` env/默认单测 + `git_client` 默认/override/不可路由 connect-超时单测。
 - [ ] **capability 声明**（v1 v2 协商）：
   - 上游 send 时声明 `report-status` / `side-band-64k` / `ofs-delta` / `thin-pack` / `agent=libra/<version>`
   - 解析远端 `cap-list` 时拒绝未知 capability + log + 拒绝非 v2 协议（v0 协议拒绝；不允许 v1 走 v2 通道）
