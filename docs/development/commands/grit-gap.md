@@ -975,12 +975,12 @@ patch 输入
 - [x] 建立 `.libra/rerere/`（`<id>/preimage`、`<id>/postimage`、`MERGE_RR`），`<id>`=SHA-256(冲突文件字节)，记录 preimage/postimage。
 - [x] `libra rerere`（默认 update：记录/复用/记录已解决的 postimage）+ `status`/`diff`/`forget`/`clear`/`gc` 可用，输出可审计（"Recorded preimage/resolution for ..."、"Resolved ... using a previously recorded resolution"）。
 - [x] **`--rerere-autoupdate` 拒绝逻辑同步**：merge/rebase/revert 的「Libra has no rerere」注释已改为「rerere 为独立命令、尚未自动集成」；那些命令的 `--rerere-autoupdate` 仍 no-op（实际生效 = Phase B）。
-- [ ] **（Phase B，有意延后）** merge/rebase/cherry-pick 在冲突/解决时**自动** record/replay（`rerere.enabled` + 实际生效的 `--rerere-autoupdate`）。需接入各 sequencer 的冲突处理；当前显式 `libra rerere`。
+- [x] **（Phase B，v0.17.1781）** merge/rebase/cherry-pick 在冲突/解决时**自动** record/replay，gated on `rerere.enabled`（默认关 → 三命令行为逐字节不变）。新增可复用 `rerere::auto_update(flag)`（内部先判 `is_enabled()`；跑与 `libra rerere` 相同的 record/replay/postimage 逻辑）。接入点：cherry-pick `cherry_pick_single_commit` 冲突写完后 + `run_cherry_pick_continue` 解决后；rebase `replay_commit_with_conflict_detection` 冲突后 + `run_rebase_continue` 解决后；merge `perform_three_way_merge` 冲突后 + `commit::execute_safe`（合并提交即录 postimage）。`--rerere-autoupdate`：cherry-pick 已**取消拒绝**并接入（`rerere.enabled` 下 stage 被 replay 的文件）；merge/rebase 不暴露该正向 flag，staging 走 `rerere.autoUpdate` config。**关键实现修正**：`apply()` 原只遍历 `index.tracked_files()`（stage-0），漏掉真实 sequencer 冲突（文件在 stage 1-3、无 stage-0）→ 改为跨 stage 0..=3 收集不同路径。
 - 匹配为**整文件逐字节**（非 Git 逐 hunk 归一化/ours-theirs 顺序无关）—— 记为已知收窄，Phase B 可增强。
 
 **验证**：
 - [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test rerere`（10 passed：record→resolve→replay 全循环、status、forget+未知路径 128、clear、diff、gc、仓库外 128）+ `cargo test --lib`（rerere 单测：冲突检测、conflict_id）
-- [ ] （Phase B）`cherry_pick_rerere` 自动集成测试 —— 随 Phase B 落地。
+- [x] （Phase B，v0.17.1781）`cargo test --test command_test rerere_test`（9 passed）：新增 `rerere_auto_replays_a_recurring_cherry_pick_conflict`（真实 cherry-pick 冲突 → 解决 → `--continue` → reset → 同一 cherry-pick 被自动 replay 成已记录的解决）+ `rerere_disabled_by_default_does_not_auto_record`（默认关闭时 hook 完全 no-op）。回归：cherry-pick 54、merge 87、commit 32 全绿；rebase 67 通过（唯一失败为既有无关的 exec-mode 测试）。
 
 ### GGT-13：互操作命令池
 

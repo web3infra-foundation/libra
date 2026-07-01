@@ -8,9 +8,14 @@
 //!
 //! `<id>` is the SHA-256 of the conflicted file's bytes. This version matches a
 //! conflict only when the whole conflicted file is byte-identical to a recorded
-//! preimage (Git's per-hunk normalisation / ours-theirs-swap independence and
-//! the automatic merge/rebase/cherry-pick integration are a documented Phase B
-//! follow-up).
+//! preimage (Git's per-hunk normalisation / ours-theirs-swap independence remain
+//! a documented follow-up).
+//!
+//! When `rerere.enabled` is set, [`auto_update`] is invoked automatically by the
+//! merge / rebase / cherry-pick sequencers (at both conflict and resolution
+//! time) so preimages are recorded, known resolutions replayed, and postimages
+//! recorded without a manual `libra rerere`. With `rerere.enabled` unset
+//! (the default) those hooks are complete no-ops.
 
 use std::{
     fs,
@@ -21,10 +26,13 @@ use clap::{Parser, Subcommand};
 use git_internal::internal::index::Index;
 use sha2::{Digest, Sha256};
 
-use crate::utils::{
-    error::{CliError, CliResult, StableErrorCode},
-    output::OutputConfig,
-    path, util,
+use crate::{
+    internal::config::ConfigKv,
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        output::OutputConfig,
+        path, util,
+    },
 };
 
 const CONFLICT_START: &str = "<<<<<<<";
@@ -75,7 +83,10 @@ pub async fn execute(args: RerereArgs) {
 pub async fn execute_safe(args: RerereArgs, _output: &OutputConfig) -> CliResult<()> {
     let rr_dir = rerere_dir()?;
     match args.command {
-        None => update(&rr_dir),
+        // The bare `libra rerere` never auto-stages replayed resolutions — that
+        // is what `rerere.autoUpdate` / `--rerere-autoupdate` control, and they
+        // only apply to the automatic merge/rebase/cherry-pick integration.
+        None => apply(&rr_dir, false).await,
         Some(RerereSubcommand::Status) => status(&rr_dir),
         Some(RerereSubcommand::Diff) => diff(&rr_dir),
         Some(RerereSubcommand::Forget { paths }) => forget(&rr_dir, &paths),
@@ -84,10 +95,60 @@ pub async fn execute_safe(args: RerereArgs, _output: &OutputConfig) -> CliResult
     }
 }
 
+/// Whether reuse-recorded-resolution is turned on for this repository
+/// (`rerere.enabled`, default off). The automatic merge/rebase/cherry-pick
+/// integration is a no-op unless this returns `true`, so leaving the config
+/// unset keeps those commands' behaviour byte-for-byte unchanged.
+pub(crate) async fn is_enabled() -> bool {
+    matches!(
+        ConfigKv::get("rerere.enabled")
+            .await
+            .ok()
+            .flatten()
+            .map(|entry| entry.value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("true" | "1" | "yes" | "on")
+    )
+}
+
+/// Whether replayed resolutions should also be staged (`rerere.autoUpdate`,
+/// default off). The per-command `--rerere-autoupdate` flag ORs with this.
+async fn autoupdate_configured() -> bool {
+    matches!(
+        ConfigKv::get("rerere.autoUpdate")
+            .await
+            .ok()
+            .flatten()
+            .map(|entry| entry.value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("true" | "1" | "yes" | "on")
+    )
+}
+
+/// Automatic hook for the merge/rebase/cherry-pick sequencers.
+///
+/// A no-op unless `rerere.enabled` is set. When enabled it runs the same
+/// record/replay pass as `libra rerere`, so calling it at both the moment a
+/// conflict is written and the moment it is resolved (or `--continue`d)
+/// records preimages, replays known resolutions, and records postimages —
+/// whichever applies to the current working-tree state. `auto_update` (the
+/// command's `--rerere-autoupdate` flag) ORed with `rerere.autoUpdate` decides
+/// whether a replayed file is also staged. Errors are surfaced to the caller,
+/// which should treat them as non-fatal to the underlying operation.
+pub(crate) async fn auto_update(auto_update: bool) -> CliResult<()> {
+    if !is_enabled().await {
+        return Ok(());
+    }
+    let rr_dir = rerere_dir()?;
+    let stage_replayed = auto_update || autoupdate_configured().await;
+    apply(&rr_dir, stage_replayed).await
+}
+
 /// The default action: for every tracked file that currently contains conflict
 /// markers, record its preimage (or replay a known resolution); for every
-/// tracked conflict that has since been resolved, record its postimage.
-fn update(rr_dir: &Path) -> CliResult<()> {
+/// tracked conflict that has since been resolved, record its postimage. When
+/// `stage_replayed` is set, a file resolved by replay is also staged.
+async fn apply(rr_dir: &Path, stage_replayed: bool) -> CliResult<()> {
     let workdir = util::working_dir();
     let index = load_index()?;
     let mut merge_rr = read_merge_rr(rr_dir)?;
@@ -106,11 +167,22 @@ fn update(rr_dir: &Path) -> CliResult<()> {
     }
     merge_rr.retain(|(path, _)| !resolved_paths.contains(path));
 
-    // 2. Visit each tracked file that currently has conflict markers.
-    for tracked in index.tracked_files() {
-        let Some(path) = tracked.to_str() else {
-            continue;
-        };
+    // 2. Visit each tracked file that currently has conflict markers. A conflict
+    // lives at index stages 1-3 (there is no stage-0 entry for it), so gather
+    // distinct paths across every stage — iterating only stage 0 (as
+    // `tracked_files()` does) would miss exactly the conflicted files that the
+    // merge/rebase/cherry-pick sequencers leave behind.
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut candidates: Vec<String> = Vec::new();
+    for stage in 0..=3 {
+        for entry in index.tracked_entries(stage) {
+            if seen_paths.insert(entry.name.clone()) {
+                candidates.push(entry.name.clone());
+            }
+        }
+    }
+    for path in &candidates {
+        let path = path.as_str();
         let absolute = workdir.join(path);
         let Ok(content) = fs::read(&absolute) else {
             continue;
@@ -126,6 +198,9 @@ fn update(rr_dir: &Path) -> CliResult<()> {
             let resolution = fs::read(&postimage).map_err(read_err)?;
             fs::write(&absolute, &resolution).map_err(write_err)?;
             println!("Resolved '{path}' using a previously recorded resolution.");
+            if stage_replayed {
+                stage_path(path).await?;
+            }
         } else {
             write_entry(rr_dir, &id, "preimage", &content)?;
             if !merge_rr.iter().any(|(p, _)| p == path) {
@@ -135,7 +210,61 @@ fn update(rr_dir: &Path) -> CliResult<()> {
         }
     }
 
-    write_merge_rr(rr_dir, &merge_rr)
+    // Only persist MERGE_RR when there is something to track, or a file already
+    // exists that may need updating/clearing. This keeps an ordinary commit in a
+    // `rerere.enabled` repo — where `auto_update` runs after every commit — from
+    // creating a spurious empty MERGE_RR, so it stays a true no-op.
+    if !merge_rr.is_empty() || rr_dir.join("MERGE_RR").exists() {
+        write_merge_rr(rr_dir, &merge_rr)?;
+    }
+    Ok(())
+}
+
+/// Stage a single resolved path (used when `--rerere-autoupdate` /
+/// `rerere.autoUpdate` is in effect): stage the resolved content at stage 0 via
+/// the normal `add` path, then drop any leftover conflict stages 1-3 so the
+/// index reports the path fully resolved (`ls-files -u` empty). `add` alone
+/// writes stage 0 but does not clear the unmerged stages a sequencer left.
+async fn stage_path(path: &str) -> CliResult<()> {
+    let args = crate::command::add::AddArgs {
+        pathspec: vec![path.to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+        chmod: None,
+        renormalize: false,
+        ignore_missing: false,
+    };
+    crate::command::add::run_add(&args).await?;
+
+    let index_path = path::index();
+    let mut index = Index::load(&index_path).map_err(|error| {
+        CliError::fatal(format!("failed to load index: {error}"))
+            .with_exit_code(128)
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    // Remove ALL three conflict stages (do not short-circuit), noting whether
+    // any were present so we only rewrite the index when something changed.
+    let mut cleared = false;
+    for stage in [1u8, 2, 3] {
+        if index.remove(path, stage).is_some() {
+            cleared = true;
+        }
+    }
+    if cleared {
+        index.save(&index_path).map_err(|error| {
+            CliError::fatal(format!("failed to save index: {error}"))
+                .with_exit_code(128)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+        })?;
+    }
+    Ok(())
 }
 
 fn status(rr_dir: &Path) -> CliResult<()> {

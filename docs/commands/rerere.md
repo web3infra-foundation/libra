@@ -61,9 +61,30 @@ libra rerere status
 | Inspect | `libra rerere status` / `diff` | `git rerere status` / `diff` |
 | Drop / reset | `libra rerere forget <p>` / `clear` / `gc` | `git rerere forget <p>` / `clear` / `gc` |
 
+## Automatic integration
+
+When `rerere.enabled` is `true`, `merge`, `rebase`, and `cherry-pick` run rerere
+for you — there is no need to invoke `libra rerere` by hand:
+
+- when a conflict is written, the preimage is recorded and, if the identical
+  conflict was resolved before, the resolution is **replayed** into the working
+  tree;
+- when the conflict is resolved and the operation is committed / `--continue`d,
+  the postimage (your resolution) is recorded.
+
+Enable it with:
+
+```
+libra config rerere.enabled true
+```
+
+With `rerere.enabled` unset (the default) these hooks are complete no-ops, so
+those commands behave exactly as before.
+
+Staging of a replayed file follows `rerere.autoUpdate` (`libra config
+rerere.autoUpdate true`). `cherry-pick --rerere-autoupdate` turns the same
+staging on for a single invocation; `merge` and `rebase` do not expose the
+positive flag, so they rely on `rerere.autoUpdate`.
+
 Differences and deferred features: matching is whole-file byte-identical (Git
-normalises each conflict hunk and is independent of ours/theirs order); and the
-**automatic** integration with `merge` / `rebase` / `cherry-pick` (via
-`rerere.enabled` and `--rerere-autoupdate`) is a documented follow-up — for now
-run `libra rerere` explicitly. The `--rerere-autoupdate` flags on those commands
-are still accepted as no-ops.
+normalises each conflict hunk and is independent of ours/theirs order).

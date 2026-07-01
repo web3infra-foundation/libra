@@ -1514,6 +1514,13 @@ pub async fn execute(args: CommitArgs) {
 /// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
+    // rerere: a commit may have finalized a resolved merge — record the
+    // postimage of any tracked conflict now resolved so an identical conflict is
+    // auto-resolved next time. A no-op unless `rerere.enabled` and there is a
+    // tracked conflict to record (so ordinary commits are unaffected).
+    if let Err(error) = crate::command::rerere::auto_update(false).await {
+        tracing::warn!("rerere auto-update after commit failed: {error}");
+    }
     // `--porcelain` replaces the human commit summary with `status --porcelain`
     // output of the committed state (gathered inside run_commit AFTER any `-a`
     // auto-staging, before the commit write); inert under `--json`.

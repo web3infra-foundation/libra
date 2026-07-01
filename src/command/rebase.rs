@@ -2149,6 +2149,12 @@ async fn run_rebase_continue() -> Result<RebaseOutput, RebaseError> {
             return Err(RebaseError::UnresolvedConflicts);
         }
 
+        // rerere: the conflict is resolved — record its postimage so an identical
+        // conflict is auto-resolved next time. A no-op unless `rerere.enabled`.
+        if let Err(error) = crate::command::rerere::auto_update(false).await {
+            tracing::warn!("rerere auto-update on rebase --continue failed: {error}");
+        }
+
         let new_tree_id =
             create_tree_from_index(&index).map_err(|e| RebaseError::TreeCreate(e.to_string()))?;
 
@@ -3681,6 +3687,13 @@ async fn replay_commit_with_conflict_detection(
             }
         }
 
+        // rerere: record the preimage of each just-written conflict and replay a
+        // recorded resolution if one matches. A no-op unless `rerere.enabled`;
+        // staging of a replayed file follows `rerere.autoUpdate` (rebase does not
+        // expose a per-invocation `--rerere-autoupdate`).
+        if let Err(error) = crate::command::rerere::auto_update(false).await {
+            tracing::warn!("rerere auto-update after rebase conflict failed: {error}");
+        }
         return ReplayResult::conflict(conflicts);
     }
 

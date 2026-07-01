@@ -1382,10 +1382,9 @@ fn cherry_pick_redundant_blocked_then_kept() {
 #[test]
 fn cherry_pick_unsupported_flags_rejected() {
     let (repo, oid) = repo_with_feature_commit("f.txt", "feat\n", "feature work");
-    let cases: Vec<Vec<&str>> = vec![
-        vec!["cherry-pick", "--rerere-autoupdate", &oid],
-        vec!["cherry-pick", "--commit", &oid],
-    ];
+    // `--rerere-autoupdate` is now honoured (it steers the rerere hook), so it is
+    // no longer in this rejection list.
+    let cases: Vec<Vec<&str>> = vec![vec!["cherry-pick", "--commit", &oid]];
     for args in cases {
         let out = run_libra_command(&args, repo.path());
         assert_eq!(

@@ -687,6 +687,13 @@ async fn perform_three_way_merge(
             our_items,
             their_items,
         })?;
+        // rerere: record the preimage of each merge conflict just written and
+        // replay a recorded resolution if one matches. A no-op unless
+        // `rerere.enabled`; staging of a replayed file follows `rerere.autoUpdate`
+        // (merge does not expose a per-invocation `--rerere-autoupdate`).
+        if let Err(error) = crate::command::rerere::auto_update(false).await {
+            tracing::warn!("rerere auto-update after merge conflict failed: {error}");
+        }
         let paths = MergeState::load_required()?.conflicted_paths.join(", ");
         return Err(PullMergeError::Conflicts { paths });
     }
@@ -886,6 +893,14 @@ async fn run_merge_continue(_output: &OutputConfig) -> Result<MergeOutput, Merge
         Index::load(path::index()).map_err(|error| MergeError::IndexLoad(error.to_string()))?;
     if has_unmerged_entries(&index) {
         return Err(MergeError::UnresolvedConflicts);
+    }
+
+    // rerere: the merge conflict is resolved — record its postimage so an
+    // identical conflict is auto-resolved next time. A no-op unless
+    // `rerere.enabled`. (`libra merge --continue` finalizes the merge here
+    // without going through `commit`, so it needs its own hook.)
+    if let Err(error) = crate::command::rerere::auto_update(false).await {
+        tracing::warn!("rerere auto-update on merge --continue failed: {error}");
     }
 
     let orig_head = object_hash_from_state("orig_head", &state.orig_head)?;

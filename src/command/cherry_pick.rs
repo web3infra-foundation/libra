@@ -247,6 +247,10 @@ struct CherryPickOpts {
     keep_redundant_commits: bool,
     #[serde(default)]
     gpg_sign: bool,
+    /// `--rerere-autoupdate`: stage a rerere-replayed resolution. Persisted so a
+    /// later pick in a resumed sequence keeps auto-staging replayed conflicts.
+    #[serde(default)]
+    rerere_autoupdate: bool,
     /// Mainline parent for merge-commit picks; applies to every commit in the
     /// `-m <n>` invocation, so it must survive a conflict + resume.
     #[serde(default)]
@@ -271,6 +275,7 @@ impl CherryPickOpts {
             allow_empty_message: args.allow_empty_message,
             keep_redundant_commits: args.keep_redundant_commits,
             gpg_sign: args.gpg_sign,
+            rerere_autoupdate: args.rerere_autoupdate,
             mainline: args.mainline,
             cleanup: args.cleanup.clone(),
             empty: args.empty.clone(),
@@ -291,6 +296,7 @@ impl CherryPickOpts {
             allow_empty_message: self.allow_empty_message,
             keep_redundant_commits: self.keep_redundant_commits,
             gpg_sign: self.gpg_sign,
+            rerere_autoupdate: self.rerere_autoupdate,
             mainline: self.mainline,
             cleanup: self.cleanup,
             empty: self.empty,
@@ -559,9 +565,9 @@ pub async fn execute_safe(args: CherryPickArgs, output: &OutputConfig) -> CliRes
 /// Reject Git options libra cherry-pick does not implement. Returns the first
 /// offending flag (so the error names a concrete option) or `None`.
 fn reject_unsupported_options(args: &CherryPickArgs) -> Option<&'static str> {
-    if args.rerere_autoupdate {
-        return Some("--rerere-autoupdate");
-    }
+    // `--rerere-autoupdate` is honoured: when `rerere.enabled` is set it makes
+    // the rerere hook stage a replayed resolution. With rerere disabled it is a
+    // harmless no-op, matching Git's behaviour when rerere is off.
     if args.commit {
         return Some("--commit (auto-commit is the default; use -n to stage only)");
     }
@@ -878,6 +884,12 @@ async fn run_cherry_pick_continue(
         .map_err(|e| CherryPickError::LoadObject(format!("failed to read saved options: {e}")))?;
     let opts_args = opts.into_args();
 
+    // rerere: the conflict is resolved — record its postimage so an identical
+    // conflict is auto-resolved next time. A no-op unless `rerere.enabled`.
+    if let Err(error) = crate::command::rerere::auto_update(opts_args.rerere_autoupdate).await {
+        tracing::warn!("rerere auto-update on cherry-pick --continue failed: {error}");
+    }
+
     // Finalize the resolved pick: build a commit from the resolved index tree.
     let original: Commit = load_object(&state.current_oid).map_err(|e| {
         CherryPickError::LoadObject(format!("failed to load conflicted commit: {e}"))
@@ -1172,6 +1184,12 @@ async fn cherry_pick_single_commit(
         let short_src = short_display_hash(&commit_id.to_string()).to_string();
         for (path, ours_hash, their_hash, base_hash) in &conflicts {
             write_conflict_markers_file(path, ours_hash, their_hash, base_hash, &short_src)?;
+        }
+        // rerere: record the preimage of each just-written conflict and replay a
+        // previously recorded resolution if one matches. A no-op unless
+        // `rerere.enabled` is set, so default cherry-pick behaviour is unchanged.
+        if let Err(error) = crate::command::rerere::auto_update(args.rerere_autoupdate).await {
+            tracing::warn!("rerere auto-update after cherry-pick conflict failed: {error}");
         }
         let mut paths: Vec<String> = conflicts
             .iter()
