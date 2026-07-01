@@ -493,6 +493,152 @@ fn test_fsck_corrupted_object() {
     }
 }
 
+/// Delete the loose object backing `commit_hash`, making it referenced-but-missing.
+fn delete_commit_object(repo: &std::path::Path, commit_hash: &str) -> std::path::PathBuf {
+    let object_path = repo
+        .join(".libra")
+        .join("objects")
+        .join(&commit_hash[0..2])
+        .join(&commit_hash[2..]);
+    fs::remove_file(&object_path).expect("delete commit object");
+    object_path
+}
+
+#[test]
+#[serial]
+/// `fsck --heal` on a repository with a missing object but no durable tier
+/// configured must report the object as unrecoverable, must NOT fabricate it,
+/// and must still exit non-zero (the integrity issue persists).
+fn test_fsck_heal_local_only_reports_unrecoverable() {
+    let repo = create_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim().to_string();
+    let object_path = delete_commit_object(repo.path(), &commit_hash);
+
+    let output = run_libra_command(&["fsck", "--heal"], repo.path());
+    assert!(
+        !output.status.success(),
+        "a still-missing object must keep fsck exit non-zero"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("heal:"),
+        "should print a heal summary, got: {combined}"
+    );
+    assert!(
+        combined.contains("unrecoverable"),
+        "should report the object as unrecoverable, got: {combined}"
+    );
+    assert!(
+        !object_path.exists(),
+        "heal must not fabricate the missing object"
+    );
+}
+
+#[test]
+#[serial]
+/// Regression: `fsck --heal` must NOT treat *packed* objects as missing.
+/// `collect_heal_candidates` classifies "missing" via `local.exist` (which
+/// consults pack indexes), not the loose-only object inventory. After packing
+/// all objects and dropping the loose copies, a healthy repo must report nothing
+/// to repair and exit 0 — not falsely flag every packed object unrecoverable.
+fn test_fsck_heal_does_not_flag_packed_objects_as_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    // Pack everything and delete the now-redundant loose objects, so every
+    // object lives only inside a pack.
+    let repack = run_libra_command(&["repack", "-a", "-d"], repo.path());
+    assert!(
+        repack.status.success(),
+        "repack should succeed: {}",
+        String::from_utf8_lossy(&repack.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "fsck", "--heal"], repo.path());
+    let json = parse_json_stdout(&output);
+    assert_eq!(
+        json["data"]["heal"]["unrecoverable"]
+            .as_u64()
+            .expect("heal.unrecoverable"),
+        0,
+        "packed objects must not be reported as unrecoverable"
+    );
+    assert_eq!(
+        json["data"]["heal"]["healed"]
+            .as_u64()
+            .expect("heal.healed"),
+        0,
+        "a healthy packed repo needs no repair"
+    );
+    assert!(
+        output.status.success(),
+        "fsck --heal on a healthy packed repo should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+/// `fsck --heal <OBJECT>` must attempt to heal the explicitly-named object even
+/// when it is not reachable from refs/reflogs/index. With no durable tier the
+/// object is reported unrecoverable (proving it was seeded and attempted, not
+/// silently ignored).
+fn test_fsck_heal_explicit_absent_object_is_attempted() {
+    let repo = create_committed_repo_via_cli();
+
+    // A well-formed SHA-1 OID that is absent from the repo and unreferenced.
+    let absent = "deadbeef".repeat(5); // 40 hex chars
+
+    let output = run_libra_command(&["--json", "fsck", "--heal", &absent], repo.path());
+    let json = parse_json_stdout(&output);
+    assert!(
+        json["data"]["heal"]["unrecoverable"]
+            .as_u64()
+            .expect("heal.unrecoverable")
+            >= 1,
+        "the explicitly-named absent object should be attempted and reported unrecoverable"
+    );
+    assert!(
+        !output.status.success(),
+        "an unrepaired explicit object keeps fsck exit non-zero"
+    );
+}
+
+#[test]
+#[serial]
+/// `--json fsck --heal` embeds a structured heal report.
+fn test_fsck_heal_json_includes_report() {
+    let repo = create_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim().to_string();
+    delete_commit_object(repo.path(), &commit_hash);
+
+    let output = run_libra_command(&["--json", "fsck", "--heal"], repo.path());
+    let json = parse_json_stdout(&output);
+    assert!(
+        json["data"]["heal"]["unrecoverable"]
+            .as_u64()
+            .expect("heal.unrecoverable")
+            >= 1,
+        "expected at least one unrecoverable object"
+    );
+    assert_eq!(
+        json["data"]["heal"]["healed"]
+            .as_u64()
+            .expect("heal.healed"),
+        0,
+        "nothing can be healed without a durable tier"
+    );
+}
+
 #[test]
 #[serial]
 /// Tests fsck rejects annotated tag objects that are syntactically valid UTF-8

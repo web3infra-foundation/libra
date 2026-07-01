@@ -47,7 +47,17 @@ flowchart TD
 - 公开状态：已公开；模块状态：已导出。
 - 用户文档：`docs/commands/fsck.md`。
 - Synopsis：`libra fsck [OPTIONS] [OBJECT]`。
-- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling [<BOOL>]`、`--no-dangling`、`--name-objects`、`--lost-found`、`--root`、`--tags`、`--connectivity-only`、`--strict`。
+- 公开参数/子命令包括：`[OBJECT]`、`-v, --verbose`、`--no-reflogs`、`--unreachable`、`--dangling [<BOOL>]`、`--no-dangling`、`--name-objects`、`--lost-found`、`--root`、`--tags`、`--connectivity-only`、`--strict`、`--full`/`--no-full`、`--heal`。
+- `--heal`（`lore.md` §0.4，Libra 扩展、Git 无对应）：从 durable tier 重取修复缺失/损坏对象。设计要点：
+  - **heal-first + 全程本地读**：`run_fsck` 先 `run_heal_pass` 再跑检查，故退出码反映修复后状态。**关键不变量**：`--heal` 下所有验证读都走本地——`run_fsck` 给检查用 `ClientStorage::init_local`；`walk_object_refs`/`find_and_report_roots` 已改为经**传入的 storage** 读取（`storage.get` + `from_bytes`，不再走全局 `load_object`→`util::objects_storage()` 的缓存分层存储，也不做 `refs/replace` 解析），故检查阶段不会经分层 `get` 从远端拉取。全流程中**唯一**触达 durable tier 的路径就是 `run_heal_pass` 里经 `is_intentionally_absent` 钩子放行后的 `tiered.heal`——保证被 obliterate 的对象既不会在发现也不会在验证阶段被复活（§2.5 tombstone-safe）。非 `--heal` 路径行为不变（检查仍用 `ClientStorage::init` 分层）。
+  - **候选收集** `collect_heal_candidates(local, extra_roots)`：复用 `collect_reachability_context` + `bfs_mark_reachable`（现均本地）；`missing` 用 `local.exist`（同时查 loose 与 pack index）判定，**不**用只含 loose 的 `all_objects`——否则打包对象会被误判缺失、在无 durable tier 时误报 unrecoverable；`corrupt = all_objects`（loose）中经 `stored_object_is_corrupt`（复用 `utils::storage::tiered::verify_fetched_object`）重算 OID 不符者（打包对象完整性由 fsck 的 pack 校验单独覆盖）。带集成 `test_fsck_heal_does_not_flag_packed_objects_as_missing` 回归。
+  - **不动点修复**：`run_heal_pass` 循环——修好一个缺失 commit/tree 会让其引用在本地变得可发现，从而暴露更多缺失后代；每轮本地重新发现并修复，直到某轮未修好任何对象为止。每个 OID 经 `attempted` 集合只尝试一次，故循环受候选总数上界必然终止。
+  - **修复入口**：新增 `Storage::heal(hash)` trait 方法（默认 `Ok(false)`，仅 `TieredStorage` override：`remote.get`→`verify_fetched_object`→`local.put`，绕过 local-first 短路故可覆盖损坏对象；先验证后落盘，绝不伪造；大对象修复后按 `threshold` 插入 LRU，与 `get` 一致受 `LIBRA_STORAGE_CACHE_SIZE` 淘汰约束，避免修复大量大对象撑爆本地缓存）；`ClientStorage::heal` 为同步桥接。远端重取继承 object_store 的 429/`SlowDown` 退避（§0.2），校验复用 §0.3。
+  - **显式对象**：`fsck --heal <OBJECT>` 把该 OID 作为 extra root 注入 `collect_heal_candidates`，故即使它不被 refs/reflog/index 引用也会被尝试修复；若它修复成一个 commit/tree，不动点循环会继续发现并修复其子树。
+  - **有意缺失跳过位**：`is_intentionally_absent(hash)` 前向兼容 §2.5 obliteration tombstone，当前恒 `false`，是 §2.5 唯一扩展点——保证 heal 从第一天起就 tombstone-aware、不会复活被 obliterate 的对象。
+  - **报告与退出码**：`HealReport{ healed, unrecoverable, skipped_intentional_absence, failed, messages }`，human 经 `print_heal_summary` 打印、JSON 作为 `heal` 字段；失败消息经 `redact_url_credentials` 脱敏。无 durable tier 时全部候选 `unrecoverable`（不伪造）。退出码经 `fsck_failed(&result)` 判定：`has_errors || heal.unrecoverable>0 || heal.failed>0`——即使某些模式（`--object` 作用域、`--connectivity-only`）修复后检查未重新暴露该候选，只要仍有不可恢复/失败对象即 exit 1。
+  - 已知边界：shallow clone 的边界父对象也会被当作 missing 候选并尝试重取（不在远端则报 unrecoverable，无害不伪造）；精确排除 shallow 边界留待后续。
+  - 测试：`utils::storage::tiered` 的 `heal_recreates_missing_object_from_remote`/`heal_overwrites_corrupt_local_object`/`heal_returns_false_when_absent_from_remote`/`local_storage_cannot_heal`（storage 层重取-校验-落盘全覆盖，in-memory object_store）；L1 集成 `fsck_test::test_fsck_heal_local_only_reports_unrecoverable`/`test_fsck_heal_json_includes_report`（命令层 wiring：候选收集/钩子/报告/退出码，本地无 durable tier）；L3 集成 `cloud_storage_backup_test::fsck_heal_restores_object_from_durable_tier`（真实 S3/R2 durable tier 端到端，`test-live-cloud` + `LIBRA_STORAGE_*` gated）。
 
 
 ## 还未实现的功能

@@ -161,6 +161,37 @@ libra fsck --full      # default behaviour, stated explicitly
 libra fsck --no-full   # skip packfile verification
 ```
 
+### `--heal`
+
+Repair missing or corrupted objects (a Libra extension; Git's `fsck` has no
+equivalent). For every object that is referenced but absent, or present but
+whose bytes no longer hash to its object ID, `--heal` re-fetches a fresh copy
+from the configured **durable tier** (the `LIBRA_STORAGE_*` remote, e.g. S3/R2),
+verifies that the fetched bytes hash to the requested OID, and writes the object
+into the local store (overwriting a corrupt copy in place).
+
+Safety guarantees:
+
+- **Never fabricates.** Only a payload that verifies against its OID is written;
+  an object absent from the durable tier is reported as *unrecoverable*, not
+  invented.
+- **Respects obliteration.** Objects marked intentionally absent (obliterated)
+  are skipped, never resurrected.
+- **Bounded and redacted.** The durable-tier fetch uses the same bounded
+  429/`Retry-After` backoff as other remote operations, and failure messages are
+  credential-redacted.
+
+Heal runs *before* the integrity checks, so the exit code reflects the
+post-repair state: if every problem object was healed, `fsck` exits `0`; objects
+that could not be recovered keep the exit non-zero. With no durable tier
+configured, every candidate is reported unrecoverable. The repair summary is
+printed to stdout (and included as a `heal` object under `--json`/`--machine`).
+
+```bash
+LIBRA_STORAGE_TYPE=r2 …  libra fsck --heal        # repair from the durable tier
+libra --json fsck --heal                           # structured { …, heal: { healed, unrecoverable, … } }
+```
+
 ## Examples
 
 ```bash

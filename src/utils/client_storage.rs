@@ -506,6 +506,20 @@ impl ClientStorage {
         self.block_on_storage(async move { storage.get(&hash).await.map(|(data, _)| data) })
     }
 
+    /// Attempt to repair a missing or corrupted object from the durable tier
+    /// (`libra fsck --heal`, lore.md §0.4).
+    ///
+    /// Returns `Ok(true)` when the object was fetched, verified, and written
+    /// locally; `Ok(false)` when there is no durable tier (local-only backend)
+    /// or the object is absent from it. Never fabricates an object: only a
+    /// payload that verifies against `object_id` is persisted. See
+    /// [`crate::utils::storage::Storage::heal`].
+    pub fn heal(&self, object_id: &ObjectHash) -> Result<bool, GitError> {
+        let storage = self.storage.clone();
+        let hash = *object_id;
+        self.block_on_storage(async move { storage.heal(&hash).await })
+    }
+
     /// Persist a Git object and queue a background index update.
     ///
     /// Functional scope:

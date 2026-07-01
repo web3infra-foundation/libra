@@ -40,4 +40,22 @@ pub trait Storage: Send + Sync {
     /// Returns a list of object hashes that match the given prefix.
     /// Note: Performance may vary significantly between backends (fast locally, potentially slow remotely).
     async fn search(&self, prefix: &str) -> Vec<ObjectHash>;
+
+    /// Attempt to repair a missing or corrupted local object by re-fetching it
+    /// from a durable tier, verifying that the fetched bytes hash to `hash`, and
+    /// writing the object into the local store (`libra fsck --heal`, lore.md §0.4).
+    ///
+    /// # Returns
+    /// * `Ok(true)` — the object was fetched, verified, and healed.
+    /// * `Ok(false)` — this backend has no durable tier to heal from, or the
+    ///   object is absent from that tier (unrecoverable). Backends MUST NOT
+    ///   fabricate objects; only a payload that verifies against `hash` may be
+    ///   written.
+    ///
+    /// The default implementation cannot heal (backends without a paired durable
+    /// tier — local-only, remote-only, publish — return `Ok(false)`). Only
+    /// [`tiered::TieredStorage`] overrides this.
+    async fn heal(&self, _hash: &ObjectHash) -> Result<bool, GitError> {
+        Ok(false)
+    }
 }

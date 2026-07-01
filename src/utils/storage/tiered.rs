@@ -35,7 +35,7 @@ use super::{Storage, local::LocalStorage, remote::RemoteStorage};
 /// * `expected` - the OID the caller asked for.
 /// * `obj_type` - the object type parsed from the fetched header.
 /// * `data` - the fetched, header-stripped object content.
-fn verify_fetched_object(
+pub(crate) fn verify_fetched_object(
     expected: &ObjectHash,
     obj_type: ObjectType,
     data: &[u8],
@@ -236,6 +236,46 @@ impl Storage for TieredStorage {
 
         results.into_iter().collect()
     }
+
+    /// Re-fetch a missing or corrupted object from the durable (remote) tier,
+    /// verify it, and (over)write it into the local store. lore.md §0.4.
+    ///
+    /// This deliberately bypasses the local-first short-circuit in [`Self::get`]:
+    /// a corrupted local object must be replaced with a fresh, verified copy, so
+    /// the fetch always goes to the durable tier. The local write only happens
+    /// after verification succeeds, so a failed or absent remote never destroys
+    /// the existing (even if corrupt) local object — and a bad payload is never
+    /// persisted (no fabrication). `remote.get` inherits object_store's bounded
+    /// 429/`SlowDown`/5xx backoff (lore.md §0.2); `verify_fetched_object` is the
+    /// same integrity check as verify-on-cache (lore.md §0.3).
+    async fn heal(&self, hash: &ObjectHash) -> Result<bool, GitError> {
+        let (data, obj_type) = match self.remote.get(hash).await {
+            Ok(pair) => pair,
+            // Not present in the durable tier: unrecoverable, but not an error —
+            // the caller reports it rather than fabricating anything.
+            Err(GitError::ObjectNotFound(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        verify_fetched_object(hash, obj_type, &data)?;
+        // LocalStorage::put truncates, so this repairs a corrupt object in place
+        // and creates a missing one.
+        self.local.put(hash, &data, obj_type).await?;
+        // Track a large healed object in the LRU exactly like `get` does, so it
+        // stays subject to `LIBRA_STORAGE_CACHE_SIZE` eviction — otherwise
+        // healing many large objects would grow the local cache unboundedly.
+        if data.len() >= self.threshold {
+            let path = self.local.get_obj_path(hash);
+            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
+            let _ = lru.insert(
+                *hash,
+                CachedFile {
+                    path,
+                    disk_size: data.len(),
+                },
+            );
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +430,115 @@ mod tests {
             !tiered.local.exist(&hash).await,
             "corrupted object must not be cached"
         );
+    }
+
+    /// `heal` fetches a missing object from the durable (remote) tier, verifies
+    /// it, and writes it into the local store.
+    #[tokio::test]
+    async fn heal_recreates_missing_object_from_remote() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"heal me".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote
+            .put(&hash, &data, obj_type)
+            .await
+            .expect("seed remote");
+
+        let local_dir = tempdir().expect("tempdir");
+        let tiered = TieredStorage::new(
+            LocalStorage::new(local_dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        assert!(
+            !tiered.local.exist(&hash).await,
+            "precondition: absent local"
+        );
+        assert!(tiered.heal(&hash).await.expect("heal"), "should heal");
+        assert!(tiered.local.exist(&hash).await, "healed into local store");
+        let (got, _) = tiered.local.get(&hash).await.expect("local get");
+        assert_eq!(got, data);
+    }
+
+    /// `heal` replaces a corrupt local object with a fresh verified copy from the
+    /// durable tier (overwrite, not skip).
+    #[tokio::test]
+    async fn heal_overwrites_corrupt_local_object() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let good = b"the good bytes".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &good);
+
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote
+            .put(&hash, &good, obj_type)
+            .await
+            .expect("seed remote");
+
+        let local_dir = tempdir().expect("tempdir");
+        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        // Corrupt the local copy: wrong bytes stored under the correct OID path.
+        local
+            .put(&hash, b"corrupt bytes", obj_type)
+            .await
+            .expect("seed corrupt local");
+        let tiered = TieredStorage::new(local, remote, 1 << 20, 1 << 20);
+
+        assert!(tiered.heal(&hash).await.expect("heal"), "should heal");
+        let (got, _) = tiered.local.get(&hash).await.expect("local get");
+        assert_eq!(got, good, "corrupt local object replaced with good bytes");
+    }
+
+    /// `heal` returns `Ok(false)` (unrecoverable, no fabrication) when the object
+    /// is absent from the durable tier.
+    #[tokio::test]
+    async fn heal_returns_false_when_absent_from_remote() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"never uploaded".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let local_dir = tempdir().expect("tempdir");
+        let tiered = TieredStorage::new(
+            LocalStorage::new(local_dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        assert!(!tiered.heal(&hash).await.expect("heal"), "unrecoverable");
+        assert!(!tiered.local.exist(&hash).await, "nothing fabricated");
+    }
+
+    /// A local-only backend has no durable tier and uses the default `heal`,
+    /// which cannot repair anything.
+    #[tokio::test]
+    async fn local_storage_cannot_heal() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, b"x");
+        let local_dir = tempdir().expect("tempdir");
+        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        assert!(!local.heal(&hash).await.expect("heal"));
     }
 
     /// `HeapSize::heap_size` MUST report the `disk_size` accounting

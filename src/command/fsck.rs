@@ -30,7 +30,6 @@ use sea_orm::EntityTrait;
 use serde::Serialize;
 
 use crate::{
-    command::load_object,
     internal::{
         branch::Branch,
         db,
@@ -238,6 +237,7 @@ const FSCK_AFTER_HELP: &str = "EXAMPLES:
     libra fsck --tags                   Print tag ids in the report
     libra fsck --connectivity-only      Skip blob content checks; verify graph only
     libra fsck --strict                 Apply stricter commit/tree format checks
+    libra fsck --heal                   Re-fetch missing/corrupt objects from the durable tier
     libra fsck <object-id>              Verify a single object by id";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -307,6 +307,13 @@ pub struct FsckArgs {
     /// Skip the packfile-integrity check.
     #[arg(long = "no-full", overrides_with = "full")]
     pub no_full: bool,
+
+    /// Repair missing or corrupted objects by re-fetching them from the
+    /// configured durable tier (`LIBRA_STORAGE_*` remote), verifying, and
+    /// writing them locally. Never fabricates objects; objects marked as
+    /// intentionally absent (obliterated) are skipped, not resurrected.
+    #[arg(long)]
+    pub heal: bool,
 }
 
 impl FsckArgs {
@@ -351,6 +358,25 @@ pub enum CheckStatus {
     HashMismatch,
 }
 
+/// Outcome of a `libra fsck --heal` repair pass (lore.md §0.4).
+#[derive(Debug, Default, Serialize)]
+pub struct HealReport {
+    /// Objects re-fetched from the durable tier, verified, and written locally.
+    pub healed: usize,
+    /// Objects that could not be recovered: absent from the durable tier, or no
+    /// durable tier is configured. Not fabricated.
+    pub unrecoverable: usize,
+    /// Objects skipped because they are marked intentionally absent
+    /// (obliterated) — heal must not resurrect them (lore.md §2.5).
+    pub skipped_intentional_absence: usize,
+    /// Objects whose heal attempt errored (e.g. a durable-tier transport error
+    /// after retries). Messages are credential-redacted.
+    pub failed: usize,
+    /// Human-readable, credential-redacted notes about unrecoverable/failed
+    /// objects.
+    pub messages: Vec<String>,
+}
+
 /// Result of fsck verification
 #[derive(Debug, Serialize)]
 pub struct FsckResult {
@@ -365,6 +391,9 @@ pub struct FsckResult {
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
     pub has_errors: bool, // Track if any error was printed to stderr
+    /// Repair outcome, present only when `--heal` was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heal: Option<HealReport>,
 }
 
 /// Result of checking the index file
@@ -376,11 +405,22 @@ pub struct IndexCheckResult {
     pub entries_corrupted: usize,
 }
 
+/// Whether fsck should exit non-zero: a normal integrity error, or a `--heal`
+/// pass that left objects unrecoverable/failed (which the post-heal checks may
+/// not re-surface, e.g. under `--object` scoping or `--connectivity-only`).
+fn fsck_failed(result: &FsckResult) -> bool {
+    result.has_errors
+        || result
+            .heal
+            .as_ref()
+            .is_some_and(|heal| heal.unrecoverable > 0 || heal.failed > 0)
+}
+
 pub async fn execute(args: FsckArgs) {
     let exit_code = match run_fsck(&args).await {
         Ok(fsck_result) => {
             // Exit with failure code only for serious issues (not dangling/unreachable).
-            if fsck_result.has_errors { 1 } else { 0 }
+            if fsck_failed(&fsck_result) { 1 } else { 0 }
         }
         Err(error) => {
             error.print_stderr();
@@ -393,13 +433,191 @@ pub async fn execute(args: FsckArgs) {
 }
 
 async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
-    let storage = ClientStorage::init(path::objects());
-
-    if let Some(ref object_id) = args.object {
-        check_single_object(object_id, &storage, args.strict).await
+    // `--heal` repairs FIRST, so the checks below (and therefore the exit code)
+    // observe the post-repair state. The repair itself is reported separately.
+    let heal_report = if args.heal {
+        // A well-formed `--heal <OBJECT>` seeds that OID so it is healed even if
+        // unreachable; a malformed one is left to the single-object check below
+        // to report as invalid.
+        let explicit = args.object.as_deref().and_then(parse_object_hash);
+        Some(run_heal_pass(explicit).await?)
     } else {
-        check_all_objects(args, &storage).await
+        None
+    };
+
+    // Storage for the verification checks. Under `--heal` every read is
+    // local-only, so the hook-gated heal step is the ONLY path that can reach
+    // the durable tier — otherwise a normal verification read (e.g. `check_refs`
+    // → `verify_object` → `storage.get`) on a tiered backend could fetch and
+    // cache an object the intentional-absence hook just skipped, resurrecting it
+    // (lore.md §0.4 / §2.5). Without `--heal`, keep the existing behavior where a
+    // tiered repo's checks may read through to the durable tier.
+    let storage = if args.heal {
+        ClientStorage::init_local(path::objects())
+    } else {
+        ClientStorage::init(path::objects())
+    };
+
+    let mut result = if let Some(ref object_id) = args.object {
+        check_single_object(object_id, &storage, args.strict).await?
+    } else {
+        check_all_objects(args, &storage).await?
+    };
+    result.heal = heal_report;
+    Ok(result)
+}
+
+/// Objects fsck considers candidates for `--heal`: referenced-but-absent
+/// (missing) and present-but-corrupt (bytes do not hash to their OID).
+struct HealTargets {
+    missing: Vec<ObjectHash>,
+    corrupt: Vec<ObjectHash>,
+}
+
+/// Forward-compat hook for lore.md §2.5 obliteration: query the object index for
+/// an intentional-absence (tombstone) marker so `--heal` never resurrects an
+/// object that was deliberately obliterated.
+///
+/// The obliteration state machine (§2.5) is not yet implemented, so no such
+/// markers exist and this always returns `false` today. It is the single point
+/// §2.5 will extend; keeping the call here means heal is tombstone-aware from
+/// day one and cannot regress into resurrecting obliterated payloads.
+fn is_intentionally_absent(_hash: &ObjectHash) -> bool {
+    false
+}
+
+/// Whether a stored object's bytes fail to hash back to its OID (corruption).
+/// Unreadable/undecompressable objects also count as corrupt.
+fn stored_object_is_corrupt(hash: &ObjectHash, storage: &ClientStorage) -> bool {
+    let Ok(obj_type) = storage.get_object_type(hash) else {
+        return true;
+    };
+    match storage.get(hash) {
+        Ok(data) => {
+            crate::utils::storage::tiered::verify_fetched_object(hash, obj_type, &data).is_err()
+        }
+        Err(_) => true,
     }
+}
+
+/// Collect the objects `--heal` should try to repair: referenced objects absent
+/// from storage (missing), and stored objects whose bytes are corrupt.
+///
+/// Discovery uses a strictly **local** read path (`init_local`) via the
+/// storage-bound [`walk_object_refs`]/[`bfs_mark_reachable`]. This is a
+/// correctness requirement, not an optimisation: a tiered read would fetch — and
+/// cache — a missing object from the durable tier *during* discovery, before the
+/// intentional-absence hook in [`run_heal_pass`] runs, which could resurrect a
+/// deliberately obliterated object (lore.md §0.4/§2.5). Only the heal step
+/// itself, after the hook, may reach the durable tier.
+async fn collect_heal_candidates(
+    local: &ClientStorage,
+    extra_roots: &HashSet<ObjectHash>,
+) -> CliResult<HealTargets> {
+    let ctx = collect_reachability_context(local).await?;
+
+    // Roots: refs + reflogs + index, plus any `extra_roots` (e.g. an object
+    // named on `fsck --heal <OBJECT>` that is not reachable from those roots).
+    // Walking the reference closure surfaces every referenced OID, including
+    // ones that are absent from storage.
+    let mut roots: HashSet<ObjectHash> = HashSet::new();
+    roots.extend(ctx.refs_reachable.iter().copied());
+    roots.extend(ctx.reflog_objects.iter().copied());
+    roots.extend(ctx.index_objects.iter().copied());
+    roots.extend(extra_roots.iter().copied());
+    let reachable = bfs_mark_reachable(&roots, local);
+
+    // Missing = referenced but genuinely absent. Classify with `local.exist`,
+    // which consults BOTH loose objects and pack indexes — `ctx.all_objects`
+    // only inventories loose objects, so a packed object would otherwise be
+    // mis-classified as missing and (with no durable tier) falsely reported
+    // unrecoverable.
+    let missing: Vec<ObjectHash> = reachable
+        .iter()
+        .filter(|hash| !local.exist(hash))
+        .copied()
+        .collect();
+
+    // Corrupt = a present loose object whose bytes no longer hash to its OID.
+    // Only loose objects are re-hashed here; packed-object integrity is covered
+    // by fsck's separate pack-checksum verification.
+    let corrupt: Vec<ObjectHash> = ctx
+        .all_objects
+        .iter()
+        .filter(|hash| stored_object_is_corrupt(hash, local))
+        .copied()
+        .collect();
+
+    Ok(HealTargets { missing, corrupt })
+}
+
+/// Run the `--heal` repair pass to a fixed point: for every missing/corrupt
+/// candidate, skip the intentionally-absent ones, otherwise re-fetch from the
+/// durable tier, verify, and write locally. Never fabricates objects (lore.md
+/// §0.4).
+///
+/// Healing a missing commit/tree makes its own references locally discoverable,
+/// which can reveal further missing descendants; the pass therefore re-discovers
+/// (local-only, so it sees the objects just written) and repairs until a round
+/// heals nothing new. Each OID is attempted at most once (`attempted`), so the
+/// loop is bounded by the number of distinct candidates and always terminates.
+async fn run_heal_pass(explicit: Option<ObjectHash>) -> CliResult<HealReport> {
+    // Discovery uses a strictly-local storage; the durable tier is touched ONLY
+    // through the hook-gated `heal` calls below, so no discovery or verification
+    // read can resurrect an obliterated object.
+    let local = ClientStorage::init_local(path::objects());
+    let tiered = ClientStorage::init(path::objects());
+    let mut report = HealReport::default();
+    let mut attempted: HashSet<ObjectHash> = HashSet::new();
+    // An explicit `fsck --heal <OBJECT>` target is seeded as an extra root, so it
+    // is healed even when unreachable from refs/reflogs/index — and, once healed
+    // to a commit/tree, the fixed-point loop discovers and heals its subtree.
+    let extra_roots: HashSet<ObjectHash> = explicit.into_iter().collect();
+
+    loop {
+        let targets = collect_heal_candidates(&local, &extra_roots).await?;
+        let mut healed_this_round = 0usize;
+
+        for hash in targets.missing.iter().chain(targets.corrupt.iter()) {
+            // Attempt each OID only once across rounds (dedupes re-discovered
+            // still-unrecoverable objects and bounds the loop).
+            if !attempted.insert(*hash) {
+                continue;
+            }
+            // Tombstone check BEFORE any remote action (lore.md §0.4 / §2.5).
+            if is_intentionally_absent(hash) {
+                report.skipped_intentional_absence += 1;
+                continue;
+            }
+            match tiered.heal(hash) {
+                Ok(true) => {
+                    report.healed += 1;
+                    healed_this_round += 1;
+                }
+                Ok(false) => {
+                    report.unrecoverable += 1;
+                    report.messages.push(format!(
+                        "unrecoverable: {hash} not available in durable tier"
+                    ));
+                }
+                Err(err) => {
+                    report.failed += 1;
+                    report.messages.push(format!(
+                        "heal failed for {hash}: {}",
+                        crate::utils::redact::redact_url_credentials(&err.to_string())
+                    ));
+                }
+            }
+        }
+
+        // Only a successful heal can make new objects reachable; if this round
+        // healed nothing, further rounds cannot discover anything new.
+        if healed_this_round == 0 {
+            break;
+        }
+    }
+
+    Ok(report)
 }
 
 pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()> {
@@ -414,11 +632,34 @@ pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()
     let fsck_result = fsck_result?;
     if json_mode {
         emit_json_data("fsck", &fsck_result, output)?;
+    } else if let Some(heal) = &fsck_result.heal {
+        print_heal_summary(heal);
     }
-    if fsck_result.has_errors {
+    if fsck_failed(&fsck_result) {
         return Err(CliError::failure("fsck found repository integrity issues").with_exit_code(1));
     }
     Ok(())
+}
+
+/// Print the `--heal` repair summary in human mode (fsck diagnostics go to
+/// stdout). Silent under `--json` (the report is in the JSON envelope) and when
+/// stdout is suppressed.
+fn print_heal_summary(heal: &HealReport) {
+    if stdout_suppressed() {
+        return;
+    }
+    let total = heal.healed + heal.unrecoverable + heal.skipped_intentional_absence + heal.failed;
+    if total == 0 {
+        println!("heal: no missing or corrupted objects to repair");
+        return;
+    }
+    println!(
+        "heal: {} repaired, {} unrecoverable, {} skipped (intentional absence), {} failed",
+        heal.healed, heal.unrecoverable, heal.skipped_intentional_absence, heal.failed
+    );
+    for message in &heal.messages {
+        println!("  {message}");
+    }
 }
 
 /// Parse hex string to ObjectHash
@@ -515,6 +756,7 @@ async fn check_single_object(
         cross_ref_issues: 0,
         overall_status,
         has_errors,
+        heal: None,
     })
 }
 
@@ -531,6 +773,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
         has_errors: false,
+        heal: None,
     };
 
     // Get all object hashes
@@ -1227,25 +1470,36 @@ async fn collect_reachability_context(storage: &ClientStorage) -> CliResult<Reac
     Ok(ctx)
 }
 
-/// Walk object references: returns objects referenced by the given object
-/// For commits: returns tree and parent commits
-/// For trees: returns child blobs and subtrees
+/// Walk object references: returns objects referenced by the given object.
+/// For commits: returns tree and parent commits. For trees: child blobs/subtrees.
+///
+/// Reads exclusively through the passed `storage` (never the global
+/// `load_object`, which resolves through the cached tiered
+/// `util::objects_storage()`). This keeps the walk honest about which backend it
+/// touches: under `libra fsck --heal` the caller passes a strictly-local
+/// storage, so discovery and verification cannot fetch — or, once §2.5 lands,
+/// resurrect an obliterated — object from the durable tier. It also skips
+/// `refs/replace` resolution, so a replacement ref cannot redirect the walk to a
+/// remote-only object.
 fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> Vec<ObjectHash> {
     let mut refs = Vec::new();
 
     let Ok(obj_type) = storage.get_object_type(hash) else {
         return refs;
     };
+    let Ok(data) = storage.get(hash) else {
+        return refs;
+    };
 
     match obj_type {
         ObjectType::Commit => {
-            if let Ok(commit) = load_object::<Commit>(hash) {
+            if let Ok(commit) = Commit::from_bytes(&data, *hash) {
                 refs.push(commit.tree_id);
                 refs.extend(commit.parent_commit_ids.iter().copied());
             }
         }
         ObjectType::Tree => {
-            if let Ok(tree) = load_object::<Tree>(hash) {
+            if let Ok(tree) = Tree::from_bytes(&data, *hash) {
                 for item in &tree.tree_items {
                     refs.push(item.id);
                 }
@@ -1375,8 +1629,12 @@ async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
             continue;
         }
 
-        // Load the commit and check if it has no parents
-        let Ok(commit) = load_object::<Commit>(&hash) else {
+        // Load the commit through the passed storage (not the global
+        // `load_object`) so the walk honours the caller's backend choice.
+        let Ok(data) = storage.get(&hash) else {
+            continue;
+        };
+        let Ok(commit) = Commit::from_bytes(&data, hash) else {
             continue;
         };
 

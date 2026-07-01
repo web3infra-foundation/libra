@@ -856,3 +856,143 @@ fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 
     cmd.output().expect("Failed to execute libra")
 }
+
+/// **Layer:** L3 — live S3/R2. Skipped without `--features test-live-cloud` and
+/// `LIBRA_STORAGE_*`.
+///
+/// End-to-end `libra fsck --heal` against a real durable tier: with
+/// `LIBRA_STORAGE_*` configured, commits write objects through to the remote, so
+/// deleting a local object and running `fsck --heal` must re-fetch it from the
+/// durable tier, verify it, restore it locally, and exit 0 (lore.md §0.4). This
+/// is the durable-tier-backed complement to the L1 local-only heal tests in
+/// `tests/command/fsck_test.rs` and the storage-layer heal unit tests.
+#[tokio::test]
+#[serial(cloud_live)]
+async fn fsck_heal_restores_object_from_durable_tier() {
+    if !live_r2_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_STORAGE_*)");
+        return;
+    }
+
+    let repo_dir = tempdir().unwrap();
+    let repo = repo_dir.path();
+    let home = repo.join(".home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+
+    // Objects are content-addressed and puts are idempotent; the root commit's
+    // hash also varies by timestamp, so concurrent/repeat runs sharing a bucket
+    // cannot corrupt each other.
+    let storage_type = std::env::var("LIBRA_STORAGE_TYPE").unwrap_or_else(|_| "s3".to_string());
+    let region = std::env::var("LIBRA_STORAGE_REGION").unwrap_or_else(|_| "auto".to_string());
+    let envs = [
+        ("LIBRA_STORAGE_TYPE", storage_type),
+        ("LIBRA_STORAGE_BUCKET", required_env("LIBRA_STORAGE_BUCKET")),
+        (
+            "LIBRA_STORAGE_ENDPOINT",
+            required_env("LIBRA_STORAGE_ENDPOINT"),
+        ),
+        (
+            "LIBRA_STORAGE_ACCESS_KEY",
+            required_env("LIBRA_STORAGE_ACCESS_KEY"),
+        ),
+        (
+            "LIBRA_STORAGE_SECRET_KEY",
+            required_env("LIBRA_STORAGE_SECRET_KEY"),
+        ),
+        ("LIBRA_STORAGE_REGION", region),
+    ];
+
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+        cmd.current_dir(repo)
+            .args(args)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("USERPROFILE", &home);
+        for (key, value) in &envs {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("failed to execute libra")
+    };
+
+    assert!(run(&["init"]).status.success(), "init");
+    assert!(
+        run(&["config", "--local", "user.name", "Libra Test"])
+            .status
+            .success(),
+        "config name"
+    );
+    assert!(
+        run(&["config", "--local", "user.email", "libra@example.com"])
+            .status
+            .success(),
+        "config email"
+    );
+    std::fs::write(repo.join("f.txt"), "durable heal\n").unwrap();
+    assert!(run(&["add", "f.txt"]).status.success(), "add");
+    assert!(
+        run(&["commit", "-m", "seed", "--no-verify"])
+            .status
+            .success(),
+        "commit"
+    );
+
+    // Note the commit OID so we can assert it is restored later.
+    let log = run(&["log", "--pretty=%H"]);
+    let stdout = String::from_utf8_lossy(&log.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim().to_string();
+    let commit_obj_path = repo
+        .join(".libra")
+        .join("objects")
+        .join(&commit_hash[0..2])
+        .join(&commit_hash[2..]);
+
+    // Delete ALL local loose objects (commit + tree + blob) so they remain only
+    // in R2. `fsck --heal` must then re-fetch the whole reachable graph across
+    // MULTIPLE discovery rounds (healing the commit reveals its tree, which
+    // reveals its blob) — exercising the fixed-point heal loop.
+    let objects_dir = repo.join(".libra").join("objects");
+    for entry in std::fs::read_dir(&objects_dir).expect("read objects dir") {
+        let path = entry.expect("dir entry").path();
+        let is_loose_dir = path.is_dir()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.len() == 2);
+        if is_loose_dir {
+            std::fs::remove_dir_all(&path).expect("delete loose object dir");
+        }
+    }
+    assert!(
+        !commit_obj_path.exists(),
+        "precondition: local objects removed"
+    );
+
+    // `fsck --heal` must re-fetch every reachable object from the durable tier
+    // and restore them, exiting 0 once the graph is whole again.
+    let heal = run(&["--json", "fsck", "--heal"]);
+    let json: serde_json::Value =
+        serde_json::from_slice(&heal.stdout).expect("fsck --json output should be JSON");
+    assert!(
+        json["data"]["heal"]["healed"]
+            .as_u64()
+            .expect("heal.healed")
+            >= 2,
+        "the commit and at least its tree should be healed across rounds"
+    );
+    assert_eq!(
+        json["data"]["heal"]["unrecoverable"]
+            .as_u64()
+            .expect("heal.unrecoverable"),
+        0,
+        "every object is present in the durable tier, so nothing is unrecoverable"
+    );
+    assert!(
+        commit_obj_path.exists(),
+        "healed commit restored to the local store"
+    );
+    assert!(
+        heal.status.success(),
+        "fsck --heal exits 0 once every object is repaired"
+    );
+}
