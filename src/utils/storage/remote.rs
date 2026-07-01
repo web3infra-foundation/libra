@@ -216,4 +216,19 @@ impl Storage for RemoteStorage {
         }
         results
     }
+
+    /// Bounded-concurrency batch existence probe (`lore.md` §0.6): fire up to
+    /// `MAX_CONCURRENT_PROBES` HEAD requests at once instead of `N` sequential
+    /// round trips, preserving input order. Each probe inherits object_store's
+    /// 429/`SlowDown`/5xx backoff (lore.md §0.2). The concurrency cap bounds open
+    /// connections (a fixed conservative default; a future `--max-connections`
+    /// knob, lore.md §0.9, will make it configurable).
+    async fn exist_batch(&self, hashes: &[ObjectHash]) -> Vec<bool> {
+        const MAX_CONCURRENT_PROBES: usize = 16;
+        futures::stream::iter(hashes.iter().copied())
+            .map(|hash| async move { self.exist(&hash).await })
+            .buffered(MAX_CONCURRENT_PROBES)
+            .collect()
+            .await
+    }
 }

@@ -41,6 +41,23 @@ pub trait Storage: Send + Sync {
     /// Note: Performance may vary significantly between backends (fast locally, potentially slow remotely).
     async fn search(&self, prefix: &str) -> Vec<ObjectHash>;
 
+    /// Batch existence check — returns one `bool` per input hash, in the same
+    /// order (`lore.md` §0.6). Used as a dedup pre-check (e.g. "which of these
+    /// objects does the remote already have before I upload?").
+    ///
+    /// The default runs `exist` sequentially: a correctness fallback with no
+    /// speedup. The value is in backend overrides that probe in parallel —
+    /// [`remote::RemoteStorage`] fires bounded-concurrency HEAD requests and
+    /// [`tiered::TieredStorage`] answers local hits without any round trip and
+    /// batches only the remote misses.
+    async fn exist_batch(&self, hashes: &[ObjectHash]) -> Vec<bool> {
+        let mut results = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            results.push(self.exist(hash).await);
+        }
+        results
+    }
+
     /// Attempt to repair a missing or corrupted local object by re-fetching it
     /// from a durable tier, verifying that the fetched bytes hash to `hash`, and
     /// writing the object into the local store (`libra fsck --heal`, lore.md §0.4).

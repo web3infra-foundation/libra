@@ -226,6 +226,30 @@ impl Storage for TieredStorage {
         self.remote.exist(hash).await
     }
 
+    /// Answer local hits without any round trip, then batch-probe the remote
+    /// for the misses in a single bounded-concurrency call (`lore.md` §0.6).
+    async fn exist_batch(&self, hashes: &[ObjectHash]) -> Vec<bool> {
+        let mut results = vec![false; hashes.len()];
+        // Indices (and hashes) that missed locally and need a remote probe.
+        let mut remote_indices = Vec::new();
+        let mut remote_hashes = Vec::new();
+        for (idx, hash) in hashes.iter().enumerate() {
+            if self.local.exist(hash).await {
+                results[idx] = true;
+            } else {
+                remote_indices.push(idx);
+                remote_hashes.push(*hash);
+            }
+        }
+        if !remote_hashes.is_empty() {
+            let remote_results = self.remote.exist_batch(&remote_hashes).await;
+            for (idx, exists) in remote_indices.into_iter().zip(remote_results) {
+                results[idx] = exists;
+            }
+        }
+        results
+    }
+
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
         let (local_res, remote_res) =
             futures::future::join(self.local.search(prefix), self.remote.search(prefix)).await;
@@ -539,6 +563,62 @@ mod tests {
         let local_dir = tempdir().expect("tempdir");
         let local = LocalStorage::new(local_dir.path().to_path_buf());
         assert!(!local.heal(&hash).await.expect("heal"));
+    }
+
+    /// `RemoteStorage::exist_batch` reports presence per input hash, in order,
+    /// and handles an empty batch.
+    #[tokio::test]
+    async fn remote_exist_batch_preserves_order() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let present = ObjectHash::from_type_and_data(ObjectType::Blob, b"present");
+        let absent = ObjectHash::from_type_and_data(ObjectType::Blob, b"absent");
+        remote
+            .put(&present, b"present", ObjectType::Blob)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remote.exist_batch(&[absent, present, absent]).await,
+            vec![false, true, false]
+        );
+        assert!(remote.exist_batch(&[]).await.is_empty());
+    }
+
+    /// `TieredStorage::exist_batch` answers local hits and batches the remote
+    /// misses, preserving order.
+    #[tokio::test]
+    async fn tiered_exist_batch_mixes_local_and_remote() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let in_remote = ObjectHash::from_type_and_data(ObjectType::Blob, b"remote");
+        let in_local = ObjectHash::from_type_and_data(ObjectType::Blob, b"local");
+        let nowhere = ObjectHash::from_type_and_data(ObjectType::Blob, b"nowhere");
+        remote
+            .put(&in_remote, b"remote", ObjectType::Blob)
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_path_buf());
+        local
+            .put(&in_local, b"local", ObjectType::Blob)
+            .await
+            .unwrap();
+        let tiered = TieredStorage::new(local, remote, 1 << 20, 1 << 20);
+
+        assert_eq!(
+            tiered.exist_batch(&[in_local, in_remote, nowhere]).await,
+            vec![true, true, false]
+        );
     }
 
     /// `HeapSize::heap_size` MUST report the `disk_size` accounting

@@ -1009,8 +1009,41 @@ pub(crate) async fn run_cloud_sync(
 
     // Process in batches.
     for batch in unsynced_objects.chunks(ctx.batch_size) {
-        for obj in batch {
-            let result = sync_single_object(obj, &local_storage, &r2_storage, &d1_client).await;
+        // Parse the batch's hashes once, then run ONE bounded-concurrency dedup
+        // pre-check (`exist_batch`, lore.md §0.6) instead of a HEAD per object, so
+        // objects already in R2 are skipped without a serial round-trip each.
+        let parsed: Vec<CloudResult<ObjectHash>> =
+            batch.iter().map(parse_object_index_hash).collect();
+        let probe_hashes: Vec<ObjectHash> = parsed
+            .iter()
+            .filter_map(|r| r.as_ref().ok().copied())
+            .collect();
+        let already_in_remote: std::collections::HashSet<ObjectHash> = {
+            let flags = r2_storage.exist_batch(&probe_hashes).await;
+            probe_hashes
+                .iter()
+                .copied()
+                .zip(flags)
+                .filter_map(|(hash, exists)| exists.then_some(hash))
+                .collect()
+        };
+
+        for (obj, hash_result) in batch.iter().zip(parsed) {
+            let result = match hash_result {
+                Ok(hash) => {
+                    let remote_has = already_in_remote.contains(&hash);
+                    sync_single_object(
+                        obj,
+                        &local_storage,
+                        &r2_storage,
+                        &d1_client,
+                        hash,
+                        remote_has,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            };
 
             match result {
                 Ok(_) => {
@@ -1072,28 +1105,35 @@ pub(crate) async fn run_cloud_sync(
     })
 }
 
-/// Sync a single object: R2 first (idempotent), then D1
+/// Parse an `object_index` model's hex `o_id` into an `ObjectHash`.
+fn parse_object_index_hash(obj: &object_index::Model) -> CloudResult<ObjectHash> {
+    let bytes =
+        hex::decode(&obj.o_id).map_err(|e| CloudError::Generic(format!("Invalid hash: {}", e)))?;
+    ObjectHash::from_bytes(&bytes)
+        .map_err(|e| CloudError::Generic(format!("Invalid object hash: {}", e)))
+}
+
+/// Sync a single object: R2 first (idempotent), then D1.
+///
+/// `remote_has` is the result of the batch dedup pre-check (`exist_batch`,
+/// lore.md §0.6), so this no longer issues a per-object HEAD — the whole batch's
+/// existence is probed up front in one bounded-concurrency call.
 async fn sync_single_object(
     obj: &object_index::Model,
     local_storage: &LocalStorage,
     r2_storage: &RemoteStorage,
     d1_client: &D1Client,
+    hash: ObjectHash,
+    remote_has: bool,
 ) -> CloudResult<()> {
-    let hash = ObjectHash::from_bytes(
-        &hex::decode(&obj.o_id).map_err(|e| CloudError::Generic(format!("Invalid hash: {}", e)))?,
-    )
-    .map_err(|e| CloudError::Generic(format!("Invalid object hash: {}", e)))?;
-
-    // Phase 1: Upload to R2 (idempotent - same hash will just overwrite)
-    // Check if already exists in R2 to avoid unnecessary upload
-    if !r2_storage.exist(&hash).await {
-        // Read from local storage
+    // Phase 1: Upload to R2 only if the dedup pre-check says it is absent
+    // (idempotent - same hash would just overwrite).
+    if !remote_has {
         let (data, obj_type) = local_storage
             .get(&hash)
             .await
             .map_err(|e| CloudError::Generic(format!("Failed to read local object: {}", e)))?;
 
-        // Upload to R2
         r2_storage
             .put(&hash, &data, obj_type)
             .await
