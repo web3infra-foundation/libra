@@ -67,21 +67,22 @@ libra --json fetch origin --progress none
 
 ## Network timeouts
 
-A network fetch (`http(s)://`, `git://`, `ssh://`) is bounded by two timeouts so
-a dead or black-holed remote cannot hang the command forever:
+A network fetch (`http(s)://`, `git://`, `ssh://`) is bounded by these timeouts
+so a dead or black-holed remote cannot hang the command forever:
 
 | Timeout | Default | What it bounds |
 |---------|---------|----------------|
 | connect | 30s | the TCP (+ TLS) handshake when opening the connection |
 | idle    | 60s | the longest gap with no bytes arriving during ref advertisement or pack streaming (it resets whenever data arrives, so a slow-but-steady transfer is not cut off) |
+| first-byte | 30s | the wait from sending the `want` list to the first response byte (`NAK` / pack header) — catches a server that accepts the negotiation but never starts streaming, sooner than the idle timeout would. Applied to `git://`; `http(s)`/`ssh` bound the first response through their own read timeouts |
 
 Each is resolved in this precedence order:
 
 1. an environment variable in milliseconds — `LIBRA_FETCH_CONNECT_TIMEOUT_MS`,
-   `LIBRA_FETCH_IDLE_TIMEOUT_MS`;
+   `LIBRA_FETCH_IDLE_TIMEOUT_MS`, `LIBRA_FETCH_FIRST_BYTE_TIMEOUT_MS`;
 2. a config value in whole seconds — `fetch.<remote>.connectTimeout` /
-   `fetch.<remote>.idleTimeout`, then the un-scoped `fetch.connectTimeout` /
-   `fetch.idleTimeout`;
+   `fetch.<remote>.idleTimeout` / `fetch.<remote>.firstByteTimeout`, then the
+   un-scoped `fetch.connectTimeout` / `fetch.idleTimeout` / `fetch.firstByteTimeout`;
 3. the built-in default above.
 
 ```
@@ -93,9 +94,9 @@ LIBRA_FETCH_IDLE_TIMEOUT_MS=120000 libra fetch origin
 ```
 
 Local (`file://` / path) remotes read from disk and are not subject to network
-timeouts. `git://` connections are now bounded by both timeouts (previously they
-had none). An unparseable env/config value is ignored rather than applied, so a
-typo never leaves a fetch with a zero or nonsensical timeout.
+timeouts. `git://` connections are now bounded by all three timeouts (previously
+they had none). An unparseable env/config value is ignored rather than applied,
+so a typo never leaves a fetch with a zero or nonsensical timeout.
 
 ## FETCH_HEAD
 

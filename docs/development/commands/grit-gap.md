@@ -1034,7 +1034,7 @@ patch 输入
 - [~] **（Phase B，v0.17.1782 —— connect/idle 已落地；first_byte 待续）超时配置**（默认值，文档在 `fetch.md` 公开）：
   - [x] `connect_timeout`：默认 30s（`fetch.<remote>.connectTimeout` / `LIBRA_FETCH_CONNECT_TIMEOUT_MS`）。**接线修复**：`RemoteClient::with_network_timeouts` 此前是死代码（从未被调用）；新增 `with_resolved_fetch_timeouts(remote)` 在 `from_spec_with_remote` 之后接线，按 env(ms)→`fetch.<remote>.<key>`→`fetch.<key>`(秒)→默认解析。**git:// 补齐**：`git_client.rs` 原无任何超时（裸 `TcpStream::connect`/`read_to_end`），现 `GitClient` 带 connect/idle 字段 + `with_network_timeouts`，`open_stream` 用 `tokio::time::timeout` 包 connect，逐 read + 整包 read 用 idle timeout 包裹。本地 remote 免网络超时（读盘）——以豁免代替「≤5s」。
   - [x] `idle_timeout`：默认 60s（`fetch.<remote>.idleTimeout` / `LIBRA_FETCH_IDLE_TIMEOUT_MS`）；http/ssh 复用同一解析值（此前各自硬编码 60s）。
-  - [ ] `first_byte_timeout`：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待 —— **待续**（当前由 idle_timeout 覆盖首个 read）。
+  - [x] `first_byte_timeout`（v0.17.1785）：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待（`fetch.<remote>.firstByteTimeout` / `LIBRA_FETCH_FIRST_BYTE_TIMEOUT_MS`）。git:// 的 fetch_objects pack-读循环首个 read 用 first_byte（后续用 idle）；http/ssh 由各自 read timeout 覆盖首字节。L1：`git_client` first_byte 默认/override 单测 + `resolve_fetch_timeout` 复用。
   - L1：`resolve_fetch_timeout` env/默认单测 + `git_client` 默认/override/不可路由 connect-超时单测。
 - [x/~] **capability 声明（v0.17.1784 —— 安全子集已落地；不安全/不适用项有意不采纳）**：
   - [x] upload-pack want 行声明 `side-band-64k` / `multi_ack_detailed` / **`ofs-delta`（新增）** / `include-tag` / `agent=libra/<version>`（+ SHA-256 时 `object-format=sha256`）。`ofs-delta` 安全，因 git-internal 的 pack decoder（`decode.rs:336` `ObjectType::OffsetDelta`）能解析 in-pack 偏移增量。

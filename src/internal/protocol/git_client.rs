@@ -29,12 +29,19 @@ pub struct GitClient {
     /// Idle read timeout — bounds each read so a stalled peer (no bytes for this
     /// long) is treated as a dead connection rather than an infinite wait.
     idle_timeout: Duration,
+    /// First-byte timeout — bounds the wait from sending the `want` list to the
+    /// first byte of the response (`NAK` / pack header), so a server that
+    /// accepts the negotiation but never starts streaming is caught sooner than
+    /// the (longer) idle timeout would.
+    first_byte_timeout: Duration,
 }
 
 /// Default `git://` connect timeout when nothing overrides it.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default `git://` idle (per-read) timeout when nothing overrides it.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default `git://` first-byte timeout when nothing overrides it.
+const DEFAULT_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ProtocolClient for GitClient {
     fn from_url(url: &Url) -> Self {
@@ -50,6 +57,7 @@ impl ProtocolClient for GitClient {
             repo_path,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            first_byte_timeout: DEFAULT_FIRST_BYTE_TIMEOUT,
         }
     }
 }
@@ -71,6 +79,13 @@ impl GitClient {
     ) -> Self {
         self.connect_timeout = connect_timeout;
         self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Override the first-byte timeout (the wait for the first response byte
+    /// after the `want` list is sent).
+    pub fn with_first_byte_timeout(mut self, first_byte_timeout: Duration) -> Self {
+        self.first_byte_timeout = first_byte_timeout;
         self
     }
 
@@ -177,20 +192,35 @@ impl GitClient {
         // Read the pack with a per-read IDLE bound (the timer resets whenever
         // bytes arrive), NOT a single total deadline — so a large but healthy
         // pack over a slow link is never cut off, while a peer that stalls for
-        // longer than `idle_timeout` is treated as dead.
+        // longer than `idle_timeout` is treated as dead. The FIRST read uses the
+        // (typically shorter) first-byte timeout: the wait from sending the
+        // `want` list to the first `NAK` / pack byte.
         let mut response = Vec::new();
         let mut chunk = [0u8; 64 * 1024];
+        let mut first_read = true;
         loop {
-            let read = match tokio::time::timeout(self.idle_timeout, stream.read(&mut chunk)).await
-            {
+            let bound = if first_read {
+                self.first_byte_timeout
+            } else {
+                self.idle_timeout
+            };
+            let read = match tokio::time::timeout(bound, stream.read(&mut chunk)).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    return Err(IoError::other(format!(
-                        "git:// pack read idle for more than {}s",
-                        self.idle_timeout.as_secs()
-                    )));
+                    return Err(IoError::other(if first_read {
+                        format!(
+                            "git:// no response within {}s of sending the request (first byte)",
+                            self.first_byte_timeout.as_secs()
+                        )
+                    } else {
+                        format!(
+                            "git:// pack read idle for more than {}s",
+                            self.idle_timeout.as_secs()
+                        )
+                    }));
                 }
             };
+            first_read = false;
             if read == 0 {
                 break; // EOF — the peer closed the stream.
             }
@@ -219,6 +249,15 @@ mod tests {
             .with_network_timeouts(Duration::from_secs(3), Duration::from_secs(7));
         assert_eq!(client.connect_timeout, Duration::from_secs(3));
         assert_eq!(client.idle_timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn first_byte_timeout_defaults_and_overrides() {
+        let url = Url::parse("git://example.com/repo.git").unwrap();
+        let client = GitClient::from_url(&url);
+        assert_eq!(client.first_byte_timeout, DEFAULT_FIRST_BYTE_TIMEOUT);
+        let client = client.with_first_byte_timeout(Duration::from_secs(4));
+        assert_eq!(client.first_byte_timeout, Duration::from_secs(4));
     }
 
     #[tokio::test]

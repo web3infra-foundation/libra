@@ -174,7 +174,19 @@ impl RemoteClient {
             "LIBRA_FETCH_IDLE_TIMEOUT_MS",
             Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
         );
-        self.with_network_timeouts(connect, idle)
+        let first_byte = resolve_fetch_timeout(
+            remote,
+            "firstByteTimeout",
+            "LIBRA_FETCH_FIRST_BYTE_TIMEOUT_MS",
+            Duration::from_secs(DEFAULT_FIRST_BYTE_TIMEOUT_SECS),
+        );
+        let client = self.with_network_timeouts(connect, idle)?;
+        // The first-byte timeout only applies to the git:// path today; http/ssh
+        // bound the first response through their own read timeouts.
+        Ok(match client {
+            Self::Git(git) => Self::Git(git.with_first_byte_timeout(first_byte)),
+            other => other,
+        })
     }
 
     pub(crate) async fn discovery_reference(
@@ -504,6 +516,9 @@ fn load_ssh_host_key_checking_mode() -> Option<String> {
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default idle (per-read) timeout for a network fetch (seconds).
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
+/// Default first-byte timeout for a network fetch (seconds) — the wait from
+/// sending the `want` list to the first `NAK` / pack byte.
+const DEFAULT_FIRST_BYTE_TIMEOUT_SECS: u64 = 30;
 
 /// Resolve one fetch timeout, in precedence order:
 ///   1. the `LIBRA_FETCH_*_MS` environment variable (milliseconds);
