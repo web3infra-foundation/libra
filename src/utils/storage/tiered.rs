@@ -14,6 +14,7 @@ use git_internal::{
 use lru_mem::{HeapSize, LruCache};
 
 use super::{Storage, local::LocalStorage, remote::RemoteStorage};
+use crate::utils::read_policy::{ReadPolicy, read_policy};
 
 /// Verify that a fetched object's bytes hash back to their claimed OID, before
 /// the object is cached locally or returned.
@@ -134,49 +135,97 @@ impl TieredStorage {
             lru: Arc::new(Mutex::new(LruCache::new(disk_usage_limit))),
         }
     }
+
+    /// Write a freshly-fetched (already-verified) object into the local cache,
+    /// tracking large objects in the LRU so they remain subject to
+    /// `LIBRA_STORAGE_CACHE_SIZE` eviction. Small objects are stored permanently
+    /// (untracked). Shared by the `get` fetch paths.
+    async fn cache_fetched_object(
+        &self,
+        hash: &ObjectHash,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> Result<(), GitError> {
+        self.local.put(hash, data, obj_type).await?;
+        if data.len() >= self.threshold {
+            // Recover from a poisoned lock rather than panicking during
+            // get/put/heal: the LRU only guards cache bookkeeping (never the
+            // object bytes, which are already written), so its contents stay
+            // valid even if another thread panicked while holding the lock.
+            let mut lru = self
+                .lru
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // If this object is already tracked (e.g. a `--remote` refresh or a
+            // heal of a corrupt cached object), the file was just rewritten in
+            // place at the same content-addressed path. Only touch recency —
+            // re-inserting a new `CachedFile` would evict the old entry, whose
+            // `Drop` deletes that very path, removing the object we just wrote.
+            if lru.get(hash).is_none() {
+                let path = self.local.get_obj_path(hash);
+                let _ = lru.insert(
+                    *hash,
+                    CachedFile {
+                        path,
+                        disk_size: data.len(),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Storage for TieredStorage {
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
-        // 1. Check local (Permanent or Cached)
+        let policy = read_policy();
+
+        // `--remote`: refresh from the durable tier even on a local hit. Fall
+        // back to the local copy only when the object is absent remotely.
+        if policy == ReadPolicy::Remote {
+            match self.remote.get(hash).await {
+                Ok((data, obj_type)) => {
+                    verify_fetched_object(hash, obj_type, &data)?;
+                    self.cache_fetched_object(hash, &data, obj_type).await?;
+                    return Ok((data, obj_type));
+                }
+                Err(GitError::ObjectNotFound(_)) => { /* fall back to local below */ }
+                Err(err) => return Err(err),
+            }
+        }
+
+        // Local first (Auto and LocalOnly).
         if self.local.exist(hash).await {
-            // If it's in LRU, access it to update recency
+            // If it's in LRU, access it to update recency. Recover from a
+            // poisoned lock rather than crashing a read (the LRU guards only
+            // bookkeeping, not the object bytes).
             {
-                let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
+                let mut lru = self
+                    .lru
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let _ = lru.get(hash);
             }
             return self.local.get(hash).await;
         }
 
-        // 2. Fetch from remote
-        let (data, obj_type) = self.remote.get(hash).await?;
-
-        // 2b. Verify-on-cache: reject a payload that does not hash to the
-        // requested OID before it can poison the local cache (lore.md §0.3).
-        verify_fetched_object(hash, obj_type, &data)?;
-
-        // 3. Store locally based on size
-        if data.len() < self.threshold {
-            // Small: Permanent local store
-            // We don't track it in LRU
-            self.local.put(hash, &data, obj_type).await?;
-        } else {
-            // Large: Cache locally
-            self.local.put(hash, &data, obj_type).await?;
-            let path = self.local.get_obj_path(hash);
-
-            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
-            // insert returns the evicted value (if any). The CachedFile drop impl will delete the file.
-            let _ = lru.insert(
-                *hash,
-                CachedFile {
-                    path,
-                    disk_size: data.len(),
-                },
-            );
+        // Not local. Under `--offline`/`--local`, never reach for the durable
+        // tier — surface a clear, actionable error instead (lore.md §0.8).
+        if policy == ReadPolicy::LocalOnly {
+            return Err(GitError::ObjectNotFound(format!(
+                "object {hash} is not in the local store; the offline/local read \
+                 policy forbids fetching it from the durable tier (drop --offline/--local \
+                 or run without it to fetch)"
+            )));
         }
 
+        // Auto (or `--remote` remote-miss fallthrough): fetch from the durable tier.
+        let (data, obj_type) = self.remote.get(hash).await?;
+        // Verify-on-cache: reject a payload that does not hash to the requested
+        // OID before it can poison the local cache (lore.md §0.3).
+        verify_fetched_object(hash, obj_type, &data)?;
+        self.cache_fetched_object(hash, &data, obj_type).await?;
         Ok((data, obj_type))
     }
 
@@ -186,33 +235,14 @@ impl Storage for TieredStorage {
         data: &[u8],
         obj_type: ObjectType,
     ) -> Result<String, GitError> {
-        let size = data.len();
-
-        // Always write to remote (Persistence)
+        // Always write to remote (Persistence).
         let remote_res = self.remote.put(hash, data, obj_type).await?;
 
-        if size < self.threshold {
-            // Small object: Write to local (Permanent)
-            self.local.put(hash, data, obj_type).await?;
-        } else {
-            // Large object: Write to remote only (initially)
-            // But if we want to cache it, we can write to local too.
-            // Prompt says: "For > threshold: only store to remote, local uses LRU".
-            // If we are writing, we probably have the data in memory anyway.
-            // But if we don't write to local, subsequent reads will need to fetch.
-            // Let's write to local as cache.
-            self.local.put(hash, data, obj_type).await?;
-            let path = self.local.get_obj_path(hash);
-
-            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
-            let _ = lru.insert(
-                *hash,
-                CachedFile {
-                    path,
-                    disk_size: size,
-                },
-            );
-        }
+        // Cache locally (small = permanent, large = LRU-tracked) through the same
+        // helper as the fetch paths, which touches-don't-reinserts an already-
+        // tracked object so re-putting a large object cannot drop its `CachedFile`
+        // and delete the file it just wrote.
+        self.cache_fetched_object(hash, data, obj_type).await?;
 
         Ok(remote_res)
     }
@@ -281,23 +311,10 @@ impl Storage for TieredStorage {
             Err(err) => return Err(err),
         };
         verify_fetched_object(hash, obj_type, &data)?;
-        // LocalStorage::put truncates, so this repairs a corrupt object in place
-        // and creates a missing one.
-        self.local.put(hash, &data, obj_type).await?;
-        // Track a large healed object in the LRU exactly like `get` does, so it
-        // stays subject to `LIBRA_STORAGE_CACHE_SIZE` eviction — otherwise
-        // healing many large objects would grow the local cache unboundedly.
-        if data.len() >= self.threshold {
-            let path = self.local.get_obj_path(hash);
-            let mut lru = self.lru.lock().expect("TieredStorage LRU mutex poisoned");
-            let _ = lru.insert(
-                *hash,
-                CachedFile {
-                    path,
-                    disk_size: data.len(),
-                },
-            );
-        }
+        // Overwrite/create the local object (LocalStorage::put truncates) and
+        // track a large one in the LRU — shared with `get`, including the
+        // touch-don't-reinsert handling for an already-cached object.
+        self.cache_fetched_object(hash, &data, obj_type).await?;
         Ok(true)
     }
 }
@@ -306,6 +323,7 @@ impl Storage for TieredStorage {
 mod tests {
     use std::io::Write;
 
+    use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
@@ -385,7 +403,10 @@ mod tests {
 
     /// End-to-end through `TieredStorage::get`: an object present only in the
     /// remote tier is fetched, verified, cached, and returned unchanged.
+    // Serialised with the read-policy tests: `get` reads the process-global
+    // read policy, so a concurrent policy test must not change it mid-run.
     #[tokio::test]
+    #[serial]
     async fn tiered_get_verifies_and_caches_valid_remote_object() {
         use std::sync::Arc;
 
@@ -421,6 +442,7 @@ mod tests {
     /// (corruption/tampering in the durable tier) is rejected by `get`, and is
     /// NOT written into the local cache.
     #[tokio::test]
+    #[serial]
     async fn tiered_get_rejects_and_does_not_cache_corrupted_remote_object() {
         use std::sync::Arc;
 
@@ -453,6 +475,192 @@ mod tests {
         assert!(
             !tiered.local.exist(&hash).await,
             "corrupted object must not be cached"
+        );
+    }
+
+    /// `--offline`/`--local` (ReadPolicy::LocalOnly): a remote-only object is a
+    /// clear error and is NOT fetched or cached.
+    #[tokio::test]
+    #[serial]
+    async fn get_local_only_policy_forbids_remote_fetch() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::read_policy::{ReadPolicy, read_policy, set_read_policy};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"remote only".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote.put(&hash, &data, obj_type).await.unwrap();
+        let dir = tempdir().unwrap();
+        let tiered = TieredStorage::new(
+            LocalStorage::new(dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        let previous = read_policy();
+        set_read_policy(ReadPolicy::LocalOnly);
+        let result = tiered.get(&hash).await;
+        set_read_policy(previous);
+
+        assert!(result.is_err(), "local-only must not fetch a remote object");
+        assert!(
+            !tiered.local.exist(&hash).await,
+            "local-only must not cache the remote object"
+        );
+    }
+
+    /// `--remote` (ReadPolicy::Remote): fetch/refresh from the durable tier and
+    /// cache locally, even though the object was not present locally.
+    #[tokio::test]
+    #[serial]
+    async fn get_remote_policy_fetches_and_caches() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::read_policy::{ReadPolicy, read_policy, set_read_policy};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"refresh me".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote.put(&hash, &data, obj_type).await.unwrap();
+        let dir = tempdir().unwrap();
+        let tiered = TieredStorage::new(
+            LocalStorage::new(dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        let previous = read_policy();
+        set_read_policy(ReadPolicy::Remote);
+        let got = tiered.get(&hash).await;
+        set_read_policy(previous);
+
+        let (bytes, _) = got.expect("remote policy should fetch from the durable tier");
+        assert_eq!(bytes, data);
+        assert!(
+            tiered.local.exist(&hash).await,
+            "remote-fetched object should be cached locally"
+        );
+    }
+
+    /// `--remote` falls back to the local copy when the object is absent from the
+    /// durable tier.
+    #[tokio::test]
+    #[serial]
+    async fn get_remote_policy_falls_back_to_local_on_remote_miss() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::read_policy::{ReadPolicy, read_policy, set_read_policy};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"local only".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+        // Empty remote; the object lives only locally.
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let dir = tempdir().unwrap();
+        let local = LocalStorage::new(dir.path().to_path_buf());
+        local.put(&hash, &data, obj_type).await.unwrap();
+        let tiered = TieredStorage::new(local, remote, 1 << 20, 1 << 20);
+
+        let previous = read_policy();
+        set_read_policy(ReadPolicy::Remote);
+        let got = tiered.get(&hash).await;
+        set_read_policy(previous);
+
+        let (bytes, _) = got.expect("remote-miss should fall back to the local copy");
+        assert_eq!(bytes, data);
+    }
+
+    /// Regression: a `--remote` refresh of a LARGE object already tracked in the
+    /// LRU must not delete it. Re-inserting a fresh `CachedFile` would drop the
+    /// old entry, whose `Drop` deletes the just-rewritten file at the same path.
+    #[tokio::test]
+    #[serial]
+    async fn get_remote_refresh_of_large_cached_object_survives() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::read_policy::{ReadPolicy, read_policy, set_read_policy};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = vec![7u8; 128]; // "large" relative to the threshold below
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote.put(&hash, &data, obj_type).await.unwrap();
+        let dir = tempdir().unwrap();
+        // threshold=16 so the 128-byte object is LRU-tracked; cap generous.
+        let tiered = TieredStorage::new(
+            LocalStorage::new(dir.path().to_path_buf()),
+            remote,
+            16,
+            1 << 20,
+        );
+
+        let previous = read_policy();
+
+        // Auto fetch first: caches the large object into local + LRU.
+        set_read_policy(ReadPolicy::Auto);
+        let _ = tiered.get(&hash).await.expect("auto fetch");
+        assert!(tiered.local.exist(&hash).await, "cached after auto get");
+
+        // `--remote` refresh must keep the cached object, not delete it.
+        set_read_policy(ReadPolicy::Remote);
+        let (bytes, _) = tiered.get(&hash).await.expect("remote refresh");
+        set_read_policy(previous);
+
+        assert_eq!(bytes, data);
+        assert!(
+            tiered.local.exist(&hash).await,
+            "large cached object must survive a --remote refresh"
+        );
+    }
+
+    /// Regression: putting a LARGE object twice must not delete it. The second
+    /// `put` re-caches an already-LRU-tracked object; re-inserting would drop the
+    /// old `CachedFile`, deleting the just-written file.
+    #[tokio::test]
+    async fn put_large_object_twice_keeps_it_cached() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = vec![9u8; 128]; // "large" relative to the threshold below
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let dir = tempdir().unwrap();
+        let tiered = TieredStorage::new(
+            LocalStorage::new(dir.path().to_path_buf()),
+            remote,
+            16,
+            1 << 20,
+        );
+
+        tiered.put(&hash, &data, obj_type).await.expect("first put");
+        assert!(tiered.local.exist(&hash).await, "cached after first put");
+        tiered
+            .put(&hash, &data, obj_type)
+            .await
+            .expect("second put");
+        assert!(
+            tiered.local.exist(&hash).await,
+            "large object must survive a second put"
         );
     }
 

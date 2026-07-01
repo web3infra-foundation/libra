@@ -271,6 +271,15 @@ struct Cli {
     #[arg(long, global = true)]
     sync_data: bool,
 
+    /// Read objects from the local store only; never fetch from the configured
+    /// durable tier (a needed remote object becomes a clear error). This is
+    /// Libra's spelling of Lore's `--offline`/`--local` read policy as a single
+    /// collision-free global flag (a global `--local`/`--remote` would clash with
+    /// `config`/`clone`/`agent` options). For the `remote`-refresh policy use
+    /// `LIBRA_READ_POLICY=remote`. No-op for local-only repositories.
+    #[arg(long, global = true)]
+    offline: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1309,6 +1318,23 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if args.sync_data {
         utils::atomic_write::set_sync_data(true);
     }
+
+    // Object read policy (lore.md §0.8): the `LIBRA_READ_POLICY` env var is the
+    // baseline (auto/offline/local/remote); the `--offline` flag overrides it to
+    // local-only. ALWAYS set it (resolving to Auto when nothing is requested) so
+    // a reused process — TUI, tests — never inherits a stale policy. An
+    // unrecognized env value is a hard error rather than a silent Auto fallback,
+    // so a typo cannot quietly re-enable durable-tier reads.
+    let read_policy = if args.offline {
+        utils::read_policy::ReadPolicy::LocalOnly
+    } else {
+        utils::read_policy::read_policy_from_env().map_err(|message| {
+            CliError::command_usage(format!("invalid LIBRA_READ_POLICY: {message}"))
+                .with_stable_code(utils::error::StableErrorCode::CliInvalidArguments)
+                .with_exit_code(128)
+        })?
+    };
+    utils::read_policy::set_read_policy(read_policy);
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
@@ -1767,6 +1793,76 @@ mod tests {
         }
 
         set_sync_data(false);
+    }
+
+    /// Scenario: the read policy (lore.md §0.8) resolves from `--offline` (→
+    /// LocalOnly, overriding env) and `LIBRA_READ_POLICY` (baseline), and a run
+    /// with neither resets to Auto.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn read_policy_resolves_from_flag_and_env() {
+        use crate::utils::read_policy::{ReadPolicy, read_policy, set_read_policy};
+
+        // No meaningful env (auto), no flag → Auto (also proves reset from a
+        // stale value).
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_READ_POLICY", "auto");
+            set_read_policy(ReadPolicy::LocalOnly);
+            parse_async(Some(&["libra", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(
+                read_policy(),
+                ReadPolicy::Auto,
+                "no flag/env resets to Auto"
+            );
+
+            // `--offline` → LocalOnly.
+            set_read_policy(ReadPolicy::Auto);
+            parse_async(Some(&["libra", "--offline", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(
+                read_policy(),
+                ReadPolicy::LocalOnly,
+                "--offline → LocalOnly"
+            );
+        }
+
+        // `LIBRA_READ_POLICY=remote` (no flag) → Remote.
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_READ_POLICY", "remote");
+            set_read_policy(ReadPolicy::Auto);
+            parse_async(Some(&["libra", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(read_policy(), ReadPolicy::Remote, "env remote → Remote");
+
+            // `--offline` overrides the env baseline.
+            set_read_policy(ReadPolicy::Auto);
+            parse_async(Some(&["libra", "--offline", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(
+                read_policy(),
+                ReadPolicy::LocalOnly,
+                "--offline overrides env remote"
+            );
+        }
+
+        // A typo'd LIBRA_READ_POLICY is a hard error (must not silently be Auto).
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_READ_POLICY", "offilne");
+            set_read_policy(ReadPolicy::Auto);
+            assert!(
+                parse_async(Some(&["libra", "completions", "bash"]))
+                    .await
+                    .is_err(),
+                "an invalid LIBRA_READ_POLICY must be a usage error"
+            );
+        }
+
+        set_read_policy(ReadPolicy::Auto);
     }
 
     /// Scenario: `libra code --repo <path>` should perform repository preflight

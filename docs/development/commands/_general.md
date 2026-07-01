@@ -10,6 +10,7 @@
 - Libra 扩展命令如 `code`、`agent`、`cloud`、`publish`、`usage`、`sandbox` 不追求 Git 同形，必须解释差异和替代工作流。
 - 全局参数 `--json`、`--machine`、`--no-pager`、`--color`、`--progress`、`--quiet`、`--exit-code-on-warning` 是 Agent 驱动 CLI 的基础契约。
 - 全局耐久性参数 `--sync-data`（`lore.md` §0.5）：对本地对象写强制 fsync（临时文件与父目录）换取抗断电耐久性，代价是写吞吐；recovery-critical 的 sequencer 状态恒 fsync 不受此开关影响。等价于 `LIBRA_SYNC_DATA=1`，经 `utils::atomic_write` 收口。
+- 全局取数策略（`lore.md` §0.8）：控制分层对象存储的取数来源。`--offline` 全局 flag（唯一 collision-free 的名字——`--local`/`--remote` 会与 `config --local`/`clone --local`/`config generate-ssh-key --remote`/`agent push --remote` 撞名）→ 只读本地、缺对象即明确报错不触远端（即 Lore 的 `--offline`/`--local` 读语义）。完整三态经 env `LIBRA_READ_POLICY`（`auto`/`offline`/`local`/`remote`）：`remote` 强制从 durable tier 刷新（本地命中也重取，远端缺失才回退本地）。优先级：`--offline` flag > `LIBRA_READ_POLICY` env > `Auto` 缺省（本地优先、miss 再取远端）。无法识别的 `LIBRA_READ_POLICY` 值直接报 usage 错误（退出 128），不静默回落 Auto——防止 typo 悄悄重新开启远端读。`cli.rs` 无论有无 flag/env 都显式 `set_read_policy`（含 Auto），故复用进程不会残留旧策略。经 `utils::read_policy` 全局收口，被 `TieredStorage::get` 消费；对无远端的纯本地仓库为 no-op。
 
 ## 设计方案
 
