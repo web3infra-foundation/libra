@@ -1040,8 +1040,8 @@ patch 输入
   - 上游 send 时声明 `report-status` / `side-band-64k` / `ofs-delta` / `thin-pack` / `agent=libra/<version>`
   - 解析远端 `cap-list` 时拒绝未知 capability + log + 拒绝非 v2 协议（v0 协议拒绝；不允许 v1 走 v2 通道）
   - 测试需覆盖「远端不发 v2 → 客户端拒绝」、「远端缺 `side-band-64k` → 降级但要求 side-band 至少 16k」两条路径
-- [ ] **half pack 恢复**：远端在 pack 中途断开时，已接收对象保留（后续可被 `gc` 清理），但必须发出 `warning: incomplete pack received; ...` 且不更新 refs；测试需人为杀死一半 pack。
-- [ ] **sideband 错误帧**：sideband channel 2 的 `ERR` / `FATAL` 文本必须解析为 fetch 错误输出（包含远端路径/对象名），不得忽略；测试需 mock 远端发 ERR 后 fetch 必须非 0。
+- [x] **half pack 恢复（v0.17.1783）**：`read_fetch_stream` 循环结束后，若 `reach_pack && !pack_completion.complete`（pack 已开始但流在完成前结束），发 `tracing::warn!("incomplete pack received: N bytes ...; discarding — references were not updated")` 并返回新 `FetchError::IncompletePack{received}`（映射 `NetworkProtocol` + 「connection dropped mid-transfer — retry」提示），而非把半包交给下游靠 index-pack 崩。refs 本就在成功后才更新，故半包 → 明确错误 + 不更新 refs + 已收对象留待 `gc`。L1：`read_fetch_stream_rejects_a_truncated_pack`（截断 empty pack → IncompletePack）。
+- [x] **sideband 错误帧（v0.17.1783）**：channel 3 的 `ERR`/`FATAL` 帧本就解析为 `FetchError::RemoteSideband`（fetch 非 0）；新增 `clean_sideband_message` 去除 `ERR `/`FATAL `/`ERR: `/`FATAL: ` 前缀，使错误读作远端原文。L1：`clean_sideband_message_strips_err_and_fatal_markers`。（远端路径/对象名由远端文本自身携带。）
 - [x] **协议升级不改变 wire 格式**：未引入 v3 pack；进程内路径复用 v2 pack + 既有 NAK/sideband/flush 线格式。
 - **（Phase B）capability/half-pack/sideband-ERR/timeout** 标为延后：local 进程内路径目前 `capabilities: vec![]`（不与外部 git-upload-pack 协商 cap，因不再 spawn 它），thin-pack 不生成，超时/半包/ERR 帧硬化随 L2 `--features test-network` 测试一起在后续会话落地。
 

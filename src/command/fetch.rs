@@ -762,6 +762,10 @@ pub enum FetchError {
     InvalidPktHeader { header: String },
     #[error("remote reported an error: {message}")]
     RemoteSideband { message: String },
+    #[error(
+        "incomplete pack received: the stream ended after {received} bytes before the pack was complete"
+    )]
+    IncompletePack { received: usize },
     #[error("pack checksum mismatch")]
     ChecksumMismatch,
     #[error("failed to locate objects directory: {source}")]
@@ -815,6 +819,9 @@ impl From<FetchError> for CliError {
                 .with_hint("verify the remote branch name and try again"),
             FetchError::ObjectFormatMismatch { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
+            FetchError::IncompletePack { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol)
+                .with_hint("the connection dropped mid-transfer — retry the fetch"),
             FetchError::InvalidPktHeader { .. }
             | FetchError::RemoteSideband { .. }
             | FetchError::ChecksumMismatch
@@ -1900,7 +1907,7 @@ async fn read_fetch_stream(
                             bar.finish_and_clear();
                         }
                         return Err(FetchError::RemoteSideband {
-                            message: String::from_utf8_lossy(payload).trim().to_string(),
+                            message: clean_sideband_message(payload),
                         });
                     }
                     _ => {
@@ -1927,7 +1934,7 @@ async fn read_fetch_stream(
                         bar.finish_and_clear();
                     }
                     return Err(FetchError::RemoteSideband {
-                        message: String::from_utf8_lossy(payload).trim().to_string(),
+                        message: clean_sideband_message(payload),
                     });
                 }
                 _ => {
@@ -1947,7 +1954,37 @@ async fn read_fetch_stream(
         progress.finish();
     }
 
+    // The pack started but the stream ended before it was complete (a truncated
+    // or half-delivered pack). Fail loudly with a clear protocol error rather
+    // than handing a partial pack downstream — references are never updated on
+    // this path, so the already-received objects are simply left for `gc`.
+    if reach_pack && !pack_completion.complete {
+        tracing::warn!(
+            "incomplete pack received: {} bytes before the stream ended; \
+             discarding — references were not updated",
+            data_out.pack_data.len()
+        );
+        return Err(FetchError::IncompletePack {
+            received: data_out.pack_data.len(),
+        });
+    }
+
     Ok(data_out)
+}
+
+/// Strip a leading `ERR ` / `FATAL ` marker from a side-band channel-3 message so
+/// the surfaced fetch error reads as the remote's own text rather than repeating
+/// the wire marker (`remote reported an error: ERR access denied` → `… access
+/// denied`).
+fn clean_sideband_message(payload: &[u8]) -> String {
+    let text = String::from_utf8_lossy(payload);
+    let trimmed = text.trim();
+    for marker in ["ERR ", "FATAL ", "ERR: ", "FATAL: "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
@@ -3355,6 +3392,51 @@ mod tests {
             .expect("EOF after a complete pack should finish the fetch stream");
 
         assert_eq!(data.pack_data, pack);
+    }
+
+    #[tokio::test]
+    async fn read_fetch_stream_rejects_a_truncated_pack() {
+        // A valid pack with its trailing checksum chopped off: the stream reaches
+        // the pack but it never completes, so it must surface as an explicit
+        // `IncompletePack` error rather than being handed downstream as success.
+        let mut pack = empty_pack_bytes();
+        pack.truncate(pack.len() - 5);
+        let mut response = BytesMut::new();
+        append_pkt_line(&mut response, b"NAK\n");
+        let mut sideband = vec![1u8];
+        sideband.extend_from_slice(&pack);
+        append_pkt_line(&mut response, &sideband);
+
+        let mut stream: FetchStream =
+            stream::iter(vec![Ok::<Bytes, std::io::Error>(response.freeze())]).boxed();
+        let output = OutputConfig::default();
+
+        let result = read_fetch_stream(&mut stream, &output, "fetch origin").await;
+        let is_incomplete = matches!(&result, Err(super::FetchError::IncompletePack { .. }));
+        assert!(
+            is_incomplete,
+            "a truncated pack must surface as IncompletePack, got: {}",
+            result
+                .err()
+                .map_or_else(|| "Ok(..)".to_string(), |e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn clean_sideband_message_strips_err_and_fatal_markers() {
+        assert_eq!(
+            super::clean_sideband_message(b"ERR access denied"),
+            "access denied"
+        );
+        assert_eq!(
+            super::clean_sideband_message(b"FATAL: repository not found"),
+            "repository not found"
+        );
+        // A message without a marker is passed through (trimmed) unchanged.
+        assert_eq!(
+            super::clean_sideband_message(b"  upload-pack: not our ref  "),
+            "upload-pack: not our ref"
+        );
     }
 
     #[tokio::test]

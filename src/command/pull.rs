@@ -647,6 +647,9 @@ fn map_fetch_error_to_cli(error: &fetch::FetchError) -> CliError {
         fetch::FetchError::ObjectFormatMismatch { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
+        fetch::FetchError::IncompletePack { .. } => CliError::fatal(error.to_string())
+            .with_stable_code(StableErrorCode::NetworkProtocol)
+            .with_hint("the connection dropped mid-transfer — retry the pull"),
         fetch::FetchError::InvalidPktHeader { .. }
         | fetch::FetchError::RemoteSideband { .. }
         | fetch::FetchError::ChecksumMismatch
