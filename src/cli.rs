@@ -12,7 +12,7 @@
 use std::{env, io::Write, path::Path};
 
 use clap::{
-    Parser, Subcommand,
+    CommandFactory, Parser, Subcommand,
     error::{ContextKind, ContextValue, ErrorKind},
 };
 use git_internal::hash::{HashKind, set_hash_kind};
@@ -30,7 +30,7 @@ use crate::{
 
 const ROOT_AFTER_HELP: &str = "\
 Command Groups:
-  Repository Setup        init, clone, config
+  Repository Setup        init, clone, config, completions
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, check-mailmap, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
@@ -401,6 +401,11 @@ enum Commands {
         after_help = command::fast_import::FAST_IMPORT_EXAMPLES
     )]
     FastImport(command::fast_import::FastImportArgs),
+    #[command(
+        about = "Generate a shell completion script",
+        after_help = command::completions::COMPLETIONS_EXAMPLES
+    )]
+    Completions(command::completions::CompletionsArgs),
     #[command(
         about = "Create an archive of files from a named tree",
         after_help = command::archive::ARCHIVE_EXAMPLES
@@ -1106,6 +1111,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         // (exit 0, no output) even outside a repository, so it touches no objects
         // and skips the hash-kind preflight. It resolves the repo vault lazily.
         | Commands::Credential(_)
+        // `completions` renders a shell script from the clap command tree; it
+        // reads no objects and works outside a repository.
+        | Commands::Completions(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
@@ -1424,6 +1432,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Bundle(cmd_args) => command::bundle::execute_safe(cmd_args, &output).await?,
         Commands::FastImport(cmd_args) => {
             command::fast_import::execute_safe(cmd_args, &output).await?
+        }
+        Commands::Completions(cmd_args) => {
+            command::completions::execute_safe(cmd_args, Cli::command(), &output)?
         }
         Commands::WriteTree(cmd_args) => {
             command::write_tree::execute_safe(cmd_args, &output).await?

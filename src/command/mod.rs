@@ -30,6 +30,7 @@ pub mod code;
 pub mod code_control;
 pub mod code_control_files;
 pub mod commit;
+pub mod completions;
 pub mod config;
 pub mod credential;
 pub mod describe;

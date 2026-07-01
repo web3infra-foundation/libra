@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.1785"
+version = "0.17.1786"
 edition = "2024"
 license = "MIT"
 description = "AI agent-native version control system with Git on-disk compatibility, SQLite-backed metadata, and tiered cloud storage"
@@ -31,6 +31,7 @@ object_store = { version = "0.13.2", features = ["aws", "azure", "gcp", "http"] 
 async-trait = "0.1.89"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = "4.6.6"
 colored = "3.1.1"
 flate2 = "1.1.9"  # add features = ["zlib"] if slow
 tar = "0.4"

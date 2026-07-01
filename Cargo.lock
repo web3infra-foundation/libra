@@ -1084,6 +1084,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97bf4965940c2382204c0ded6dd3dd48c0c4e872f1e76fb1bf94f45991a2cb6a"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,7 +3370,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libra"
-version = "0.17.1785"
+version = "0.17.1786"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3375,6 +3384,7 @@ dependencies = [
  "bzip2 0.6.1",
  "chrono",
  "clap",
+ "clap_complete",
  "colored",
  "crc32fast",
  "crossterm",

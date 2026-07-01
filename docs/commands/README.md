@@ -26,6 +26,7 @@ Every Libra command accepts the following global flags:
 | `libra init` | | Create a new Libra repository with SQLite-backed metadata, vault signing, and optional Git import | [init.md](init.md) |
 | `libra clone` | | Clone a remote repository with vault bootstrapping, shallow clone, and single-branch support | [clone.md](clone.md) |
 | `libra config` | `cfg` | Manage repository-local and user-global configuration with vault-backed secret encryption | [config.md](config.md) |
+| `libra completions` | | Generate a shell completion script (`bash`/`zsh`/`fish`/`powershell`/`elvish`) from the live CLI | [completions.md](completions.md) |
 
 ### Staging & Working Tree
 
