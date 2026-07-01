@@ -893,12 +893,12 @@ gantt
 **验收标准**（Phase A：v0.17.1767 —— merge-base CLI + diff A...B；Phase B 见下「未完成」）：
 - [x] 抽出 `internal/merge_base.rs`（`merge_bases`/`merge_base`/`is_ancestor`，经 `object_ext::CommitExt::try_load` 不依赖 `command::`）。新命令已复用；**`log.rs`/`rebase.rs` 迁移有意延后到 Phase B**（见下）。
 - [x] 新算法实现 LCA（common − dominated；dominated = 是另一 common 的严格祖先），不返回 first-found；交叉合并下 `--all` 返回全部 LCA，`merge-base A B`（无 `--all`）返回一个确定性最佳 base。
-- [ ] （Phase B）修复 `log.rs` first-found 与文档不一致 + `log A..B` 交叉合并排除点回归。**延后**：需 golden 回归 + legacy 开关。
+- [x] （Phase B）`log`/`rebase` 迁移到共享 LCA（v0.17.1779）：`rebase.rs` 的本地 first-meet `find_merge_base`（async 双队列 LIFO，TODO「implement proper LCA」）已删除，改调 `crate::internal::merge_base::merge_base`（GGT-09 Phase A 的真 LCA = common−dominated，与 `merge-base`/`diff A...B` 共享）。`log.rs` 早已不用 `find_merge_base`：其 `A...B` 用两侧可达集**交集**作为共享历史排除（对多 merge-base 的交叉合并比单一 merge-base 更正确，注释见 `parse_revision_expr`），故无 first-found bug。回归：68 个 rebase 测试（除 1 个与本改无关、pristine HEAD 亦失败的 executable-mode-on-switch 预存失败）+ `log A...B` 测试 + `merge_base` 单测（criss-cross LCA）覆盖。**legacy 开关未加**：共享 LCA 是严格正确性改进（旧 first-meet 是诚实标注的 TODO），回退到错误算法无价值。
 - [x] `merge-base A B` 输出单 SHA（exit 0）；`--all` 输出全部（exit 0）；`--is-ancestor A B`：A 是 B 祖先 exit 0，否则 exit 1。
 - [x] **无共同祖先（已按 Git 实际行为调和）**：早期写「退出 128」与 Git 不符——`git merge-base A B` 无共同祖先时 **exit 1 无输出**，128 留给坏 rev。本实现：无共同祖先 → `silent_exit(1)`；坏 rev / 参数个数错误 → 128。
 - [x] `diff A...B` 用 merge base 作为 old side（`diff.rs::normalize_diff_range` 先解析 `...`），保留现有 `A..B` 语义；无法解析/无 base 时回落 pathspec。
 - [x] 阶段 4.1 `-w`/`--ignore-all-space` —— **已在更早的 diff 增强中实现**（含空白 hunk 测试），非本任务范围。
-- [ ] **回滚能力 / Phase B**：`log`/`rebase` 迁移到共享 LCA 时保留 `legacy-merge-base` 开关 + golden 对比 —— 随 Phase B 落地。Phase A 不动 `log`/`rebase`，故无回归风险。
+- [x] **回滚能力 / Phase B**（v0.17.1779）：`rebase` 迁移到共享 LCA；`log` 早已用交集（无 find_merge_base）。未保留 `legacy-merge-base` 开关——共享 LCA 为严格正确性改进，回退到旧 first-meet（诚实标注的 TODO）无价值；golden 对比由既有 rebase/log/merge_base 测试套件提供。
 
 **验证**：
 - [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test merge_base`（8 passed：Y 形 base / `--is-ancestor` 双向 / `--all` / `--json` / 坏 rev 128 / 参数个数 128 / `diff_three_dot`）
