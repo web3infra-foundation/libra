@@ -49,6 +49,7 @@ flowchart TD
 - 用户文档：`docs/commands/cloud.md`。
 - Synopsis：`libra cloud sync [--force] [--batch-size <N>]`。
 - 公开参数/子命令包括：`sync [--force] [--batch-size <N>]`、`restore [--repo-id <UUID>] [--name <NAME>] [--metadata-only]`、`status [--verbose]`。
+- 云端退避与脱敏（`lore.md` §0.2）：`D1Client::execute` 的远端调用经 `utils::backoff::RetryPolicy`（默认 5 次重试、200ms 基延迟、10s 单次上限、60s 总预算、全抖动）对 `429`/`503` 与连接级失败自动退避重试，并解析/钳制 `Retry-After`；D1 错误消息不再回显响应体或 reqwest `Debug`（仅报失败类别与主机名）。`RemoteStorage`（object_store S3/R2）已内建对 `429`/`SlowDown`/5xx 的退避（含 `Retry-After`），此处显式将其重试上限对齐到同一组参数（`with_retry`）。D1 UPSERT/SELECT 天然幂等，仅对「服务端未执行」的场景（连接失败、429/503）重试，不会重复写入。
 
 
 ## 还未实现的功能

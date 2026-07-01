@@ -19,7 +19,10 @@
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
-use crate::internal::config::resolve_env;
+use crate::{
+    internal::config::resolve_env,
+    utils::backoff::{RetryOutcome, RetryPolicy, parse_retry_after, retry_idempotent},
+};
 
 const DEFAULT_D1_API_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
@@ -45,6 +48,25 @@ pub struct D1Error {
     pub code: i32,
     /// Human-readable failure message.
     pub message: String,
+}
+
+/// Build a redacted, human-readable message from a reqwest transport error.
+///
+/// Deliberately avoids the reqwest `Debug` output (which is verbose and can
+/// embed request internals) and never includes the full URL — only the failure
+/// class and the host, which is safe to log.
+fn redact_request_error(err: &reqwest::Error) -> String {
+    let host = err
+        .url()
+        .and_then(|url| url.host_str())
+        .unwrap_or("<unknown host>");
+    if err.is_timeout() {
+        format!("HTTP request to D1 host {host} timed out")
+    } else if err.is_connect() {
+        format!("failed to connect to D1 host {host}")
+    } else {
+        format!("HTTP request to D1 host {host} failed")
+    }
 }
 
 /// Informational message returned by Cloudflare alongside `result` (e.g. retry hints).
@@ -286,57 +308,127 @@ impl D1Client {
 
         let url = self.api_url()?;
 
-        let response = self
-            .client
-            .post(url)
-            .header("Authorization", format!("Bearer {}", self.api_token))
-            .header("Content-Type", "application/json")
-            .json(&statement)
-            .send()
-            .await
-            .map_err(|e| D1Error {
-                code: 2001,
-                message: format!("HTTP request failed: {:?}", e),
-            })?;
+        // D1 writes here are all UPSERTs (`INSERT OR REPLACE` / `ON CONFLICT DO
+        // UPDATE`) and reads are pure `SELECT`s, so replaying a statement the
+        // server never executed is safe. We therefore retry only when the
+        // request provably did not mutate state: a connection that never
+        // completed, or an `HTTP 429`/`503` rejection. `Retry-After` is honoured
+        // and clamped by the policy. See `docs/development/gap/lore.md` §0.2.
+        let policy = RetryPolicy::default();
+        let client = &self.client;
+        let token = &self.api_token;
+        let url_ref = &url;
+        let statement_ref = &statement;
 
-        let status = response.status();
-        let body = response.text().await.map_err(|e| D1Error {
-            code: 2002,
-            message: format!("Failed to read response body: {}", e),
-        })?;
+        retry_idempotent(&policy, move |_attempt| async move {
+            let send_result = client
+                .post(url_ref.clone())
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json")
+                .json(statement_ref)
+                .send()
+                .await;
 
-        if !status.is_success() {
-            return Err(D1Error {
-                code: status.as_u16() as i32,
-                message: format!("D1 API error: {}", body),
-            });
-        }
+            let response = match send_result {
+                Ok(response) => response,
+                Err(err) => {
+                    // Never surface the reqwest `Debug`/full URL (which can leak
+                    // request internals); report the failure class and host only.
+                    let message = redact_request_error(&err);
+                    // A connection-level failure means the request never reached
+                    // the server, so retrying cannot double-apply a write.
+                    if err.is_connect() {
+                        return RetryOutcome::Retry {
+                            retry_after: None,
+                            last_err: D1Error {
+                                code: 2001,
+                                message,
+                            },
+                        };
+                    }
+                    return RetryOutcome::Done(Err(D1Error {
+                        code: 2001,
+                        message,
+                    }));
+                }
+            };
 
-        let d1_response: D1Response<serde_json::Value> =
-            serde_json::from_str(&body).map_err(|e| D1Error {
-                code: 2003,
-                message: format!("Failed to parse D1 response: {} - body: {}", e, body),
-            })?;
+            let status = response.status();
+            // 429/503 mean the server rate-limited or was unavailable and did
+            // NOT execute the statement, so retrying is safe.
+            if matches!(status.as_u16(), 429 | 503) {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after);
+                return RetryOutcome::Retry {
+                    retry_after,
+                    last_err: D1Error {
+                        code: i32::from(status.as_u16()),
+                        message: format!(
+                            "D1 API rate-limited or unavailable (HTTP {})",
+                            status.as_u16()
+                        ),
+                    },
+                };
+            }
 
-        if !d1_response.success {
-            let error_msg = d1_response
-                .errors
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "Unknown D1 error".to_string());
-            return Err(D1Error {
-                code: d1_response.errors.first().map(|e| e.code).unwrap_or(3000),
-                message: error_msg,
-            });
-        }
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(err) => {
+                    // reqwest's Display can embed the full request URL; route it
+                    // through the same host-only redactor as the send path.
+                    return RetryOutcome::Done(Err(D1Error {
+                        code: 2002,
+                        message: redact_request_error(&err),
+                    }));
+                }
+            };
 
-        d1_response
-            .result
-            .and_then(|r| r.into_iter().next())
-            .ok_or_else(|| D1Error {
-                code: 3001,
-                message: "Empty result from D1".to_string(),
-            })
+            if !status.is_success() {
+                // Do NOT echo the response body: it can carry SQL fragments,
+                // identifiers, or backend detail that must not reach logs/errors.
+                return RetryOutcome::Done(Err(D1Error {
+                    code: i32::from(status.as_u16()),
+                    message: format!("D1 API error (HTTP {})", status.as_u16()),
+                }));
+            }
+
+            let d1_response: D1Response<serde_json::Value> = match serde_json::from_str(&body) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    // Report the parse error only, not the raw body.
+                    return RetryOutcome::Done(Err(D1Error {
+                        code: 2003,
+                        message: format!("Failed to parse D1 response: {}", err),
+                    }));
+                }
+            };
+
+            if !d1_response.success {
+                let error_msg = d1_response
+                    .errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "Unknown D1 error".to_string());
+                return RetryOutcome::Done(Err(D1Error {
+                    code: d1_response.errors.first().map(|e| e.code).unwrap_or(3000),
+                    message: error_msg,
+                }));
+            }
+
+            RetryOutcome::Done(
+                d1_response
+                    .result
+                    .and_then(|r| r.into_iter().next())
+                    .ok_or_else(|| D1Error {
+                        code: 3001,
+                        message: "Empty result from D1".to_string(),
+                    }),
+            )
+        })
+        .await
     }
 
     /// Query D1 and deserialise each row into `T`.

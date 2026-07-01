@@ -11,7 +11,15 @@ use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
 };
-use crate::{command::ask_basic_auth, git_protocol::ServiceType, utils::error::emit_warning};
+use crate::{
+    command::ask_basic_auth,
+    git_protocol::ServiceType,
+    utils::{
+        backoff::{RetryOutcome, RetryPolicy, parse_retry_after, retry_idempotent},
+        error::emit_warning,
+        redact::redact_url_credentials,
+    },
+};
 
 /// A Git protocol client that communicates with a Git server over HTTPS.
 /// Only support `SmartProtocol` now, see [http-protocol](https://www.git-scm.com/docs/http-protocol) for protocol details.
@@ -129,10 +137,59 @@ impl HttpsClient {
             .url
             .join(&format!("info/refs?service={service_name}"))
             .expect("info/refs?service=... is a valid relative URL");
-        let res = BasicAuth::send(|| async { self.client.get(url.clone()) })
-            .await
-            .map_err(|e| GitError::NetworkError(format!("Failed to send request: {}", e)))?;
-        tracing::debug!("{:?}", res);
+
+        // The info/refs discovery is a pure GET, so it is safe to retry with
+        // bounded backoff when the server rate-limits (`429`) or is temporarily
+        // unavailable (`503`), honouring `Retry-After`. Error messages are
+        // credential-redacted so a `user:token@host` URL never reaches logs.
+        let policy = RetryPolicy::default();
+        let client = &self.client;
+        let url_ref = &url;
+        let res = retry_idempotent(&policy, move |_attempt| async move {
+            let send_result = BasicAuth::send(|| async { client.get(url_ref.clone()) }).await;
+            let res = match send_result {
+                Ok(res) => res,
+                Err(err) => {
+                    let message = format!(
+                        "Failed to send request: {}",
+                        redact_url_credentials(&err.to_string())
+                    );
+                    // A connection-level failure never reached the server, so a
+                    // retry cannot duplicate any effect.
+                    if err.is_connect() {
+                        return RetryOutcome::Retry {
+                            retry_after: None,
+                            last_err: GitError::NetworkError(message),
+                        };
+                    }
+                    return RetryOutcome::Done(Err(GitError::NetworkError(message)));
+                }
+            };
+            if matches!(res.status().as_u16(), 429 | 503) {
+                let retry_after = res
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after);
+                return RetryOutcome::Retry {
+                    retry_after,
+                    last_err: GitError::NetworkError(format!(
+                        "server rate-limited or unavailable (HTTP {})",
+                        res.status().as_u16()
+                    )),
+                };
+            }
+            RetryOutcome::Done(Ok(res))
+        })
+        .await?;
+        // Do NOT log the `Response` via `Debug`: it embeds the request URL,
+        // which can carry `user:token@host` credentials. Log status + a
+        // credential-redacted URL instead.
+        tracing::debug!(
+            "discovery response: status={}, url={}",
+            res.status(),
+            redact_url_credentials(res.url().as_str())
+        );
 
         if res.status() == 401 {
             return Err(GitError::UnAuthorized(
@@ -166,11 +223,15 @@ impl HttpsClient {
             )));
         }
 
-        let response_content = res
-            .bytes()
-            .await
-            .map_err(|e| GitError::NetworkError(format!("Failed to read response body: {}", e)))?;
-        tracing::debug!("{:?}", response_content);
+        let response_content = res.bytes().await.map_err(|e| {
+            GitError::NetworkError(format!(
+                "Failed to read response body: {}",
+                redact_url_credentials(&e.to_string())
+            ))
+        })?;
+        // Log only the size, never the full body bytes (lore.md §0.2: do not
+        // echo complete response bodies).
+        tracing::debug!("discovery response body: {} bytes", response_content.len());
 
         parse_discovered_references(response_content, service)
     }
@@ -204,11 +265,26 @@ impl HttpsClient {
                 .body(body.clone())
         })
         .await
-        .map_err(|e| IoError::other(format!("Failed to send request: {}", e)))?;
-        tracing::debug!("request: {:?}", res);
+        .map_err(|e| {
+            IoError::other(format!(
+                "Failed to send request: {}",
+                redact_url_credentials(&e.to_string())
+            ))
+        })?;
+        // Never log the `Response` via `Debug` (embeds a possibly credentialed
+        // URL); log status + a redacted URL instead.
+        tracing::debug!(
+            "upload-pack response: status={}, url={}",
+            res.status(),
+            redact_url_credentials(res.url().as_str())
+        );
 
         if res.status() != 200 && res.status() != 304 {
-            tracing::error!("request failed: {:?}", res);
+            tracing::error!(
+                "upload-pack request failed: status={}, url={}",
+                res.status(),
+                redact_url_credentials(res.url().as_str())
+            );
             return Err(IoError::other(format!(
                 "Error Response format, status code: {}",
                 res.status()

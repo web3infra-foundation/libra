@@ -5,6 +5,7 @@ pub mod error;
 pub mod fuse;
 pub mod output;
 
+pub mod backoff;
 pub mod client_storage;
 pub mod convert;
 pub mod d1_client;
@@ -15,6 +16,7 @@ pub mod object_ext;
 pub mod pager;
 pub mod path;
 pub mod path_ext;
+pub mod redact;
 pub mod storage;
 pub mod storage_ext;
 pub mod test;

@@ -1189,7 +1189,14 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         }
         RemoteClient::Http(http_client) => {
             let res = http_client.send_pack(data.freeze()).await.map_err(|e| {
-                classify_transport_error("send-pack", std::io::Error::other(e.to_string()))
+                // reqwest's Display can embed the credentialed remote URL; redact
+                // before it reaches an error surfaced to the user (lore.md §0.2).
+                classify_transport_error(
+                    "send-pack",
+                    std::io::Error::other(crate::utils::redact::redact_url_credentials(
+                        &e.to_string(),
+                    )),
+                )
             })?;
             if res.status() != 200 {
                 return Err(PushError::Network(format!(
@@ -1198,7 +1205,12 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 )));
             }
             let data = res.bytes().await.map_err(|e| {
-                classify_transport_error("receive-pack", std::io::Error::other(e.to_string()))
+                classify_transport_error(
+                    "receive-pack",
+                    std::io::Error::other(crate::utils::redact::redact_url_credentials(
+                        &e.to_string(),
+                    )),
+                )
             })?;
             validate_receive_pack_response(data, &plans)?;
         }

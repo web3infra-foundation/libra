@@ -252,6 +252,21 @@ impl ClientStorage {
                 let mut builder =
                     object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
 
+                // Bound object_store's built-in retry (which already backs off on
+                // 429/`SlowDown`/5xx and honours `Retry-After`) to the same caps
+                // as `utils::backoff::RetryPolicy`, so no remote path can hammer
+                // the backend or hang unbounded. See `docs/development/gap/lore.md`
+                // §0.2 / §7.6.
+                builder = builder.with_retry(object_store::RetryConfig {
+                    backoff: object_store::BackoffConfig {
+                        init_backoff: Duration::from_millis(200),
+                        max_backoff: Duration::from_secs(10),
+                        base: 2.0,
+                    },
+                    max_retries: 5,
+                    retry_timeout: Duration::from_secs(60),
+                });
+
                 let endpoint = match resolve_env_sync("LIBRA_STORAGE_ENDPOINT") {
                     Ok(endpoint) => endpoint,
                     Err(err) => {
