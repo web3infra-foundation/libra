@@ -280,6 +280,13 @@ struct Cli {
     #[arg(long, global = true)]
     offline: bool,
 
+    /// Maximum number of concurrent remote connections/requests (bounds fan-out
+    /// on large repos / CI so connections are not exhausted). A positive integer;
+    /// `0` is treated as `1`. Also settable via `LIBRA_MAX_CONNECTIONS`
+    /// (flag wins). Default 16. No-op for purely local operations.
+    #[arg(long, global = true, value_name = "N")]
+    max_connections: Option<usize>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1335,6 +1342,21 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         })?
     };
     utils::read_policy::set_read_policy(read_policy);
+
+    // Resource limits (lore.md §0.9): `--max-connections` flag wins over the
+    // `LIBRA_MAX_CONNECTIONS` env baseline, else the default. Always set so a
+    // reused process never inherits a stale limit; an invalid env value errors.
+    let max_connections = match args.max_connections {
+        Some(limit) => limit,
+        None => utils::resource_limits::max_connections_from_env()
+            .map_err(|message| {
+                CliError::command_usage(format!("invalid LIBRA_MAX_CONNECTIONS: {message}"))
+                    .with_stable_code(utils::error::StableErrorCode::CliInvalidArguments)
+                    .with_exit_code(128)
+            })?
+            .unwrap_or(utils::resource_limits::DEFAULT_MAX_CONNECTIONS),
+    };
+    utils::resource_limits::set_max_connections(max_connections);
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
@@ -1863,6 +1885,76 @@ mod tests {
         }
 
         set_read_policy(ReadPolicy::Auto);
+    }
+
+    /// Scenario: `--max-connections` (lore.md §0.9) resolves flag > env >
+    /// default, always resets, and rejects an invalid env value.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn max_connections_resolves_from_flag_and_env() {
+        use crate::utils::resource_limits::{
+            DEFAULT_MAX_CONNECTIONS, max_connections, set_max_connections,
+        };
+
+        // No flag / no env → default (also proves reset from a stale value).
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_MAX_CONNECTIONS", "");
+            set_max_connections(3);
+            parse_async(Some(&["libra", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(
+                max_connections(),
+                DEFAULT_MAX_CONNECTIONS,
+                "reset to default"
+            );
+
+            // Flag wins.
+            parse_async(Some(&[
+                "libra",
+                "--max-connections",
+                "5",
+                "completions",
+                "bash",
+            ]))
+            .await
+            .unwrap();
+            assert_eq!(max_connections(), 5, "--max-connections wins");
+        }
+
+        // Env baseline (no flag).
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_MAX_CONNECTIONS", "9");
+            parse_async(Some(&["libra", "completions", "bash"]))
+                .await
+                .unwrap();
+            assert_eq!(max_connections(), 9, "env baseline");
+
+            // Flag overrides env.
+            parse_async(Some(&[
+                "libra",
+                "--max-connections",
+                "2",
+                "completions",
+                "bash",
+            ]))
+            .await
+            .unwrap();
+            assert_eq!(max_connections(), 2, "flag overrides env");
+        }
+
+        // Invalid env → usage error.
+        {
+            let _env = test::ScopedEnvVar::set("LIBRA_MAX_CONNECTIONS", "bogus");
+            assert!(
+                parse_async(Some(&["libra", "completions", "bash"]))
+                    .await
+                    .is_err(),
+                "invalid LIBRA_MAX_CONNECTIONS must error"
+            );
+        }
+
+        set_max_connections(DEFAULT_MAX_CONNECTIONS);
     }
 
     /// Scenario: `libra code --repo <path>` should perform repository preflight

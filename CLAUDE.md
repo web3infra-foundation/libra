@@ -324,6 +324,7 @@ The publish Worker uses its own D1 schema in `sql/publish/` (`0001_publish.sql`,
 - `LIBRA_LOG_ROTATION` — rolling strategy for `LIBRA_LOG_FILE`: `never` (default) / `minutely` / `hourly` / `daily` (`tracing-appender`, time-split only — no old-file pruning); inspect via `libra logfile info`
 - `LIBRA_SYNC_DATA` — set to `1`/`true`/`yes`/`on` to fsync local object writes for power-loss durability (same as the global `--sync-data` flag)
 - `LIBRA_READ_POLICY` — tiered-storage object read source: `auto` (default, local-first then remote) / `offline` / `local` (local-only) / `remote` (refresh from durable tier). An unrecognized value is a hard error (a typo must not silently re-enable remote reads). The global `--offline` flag overrides this to local-only. No-op for local-only repos
+- `LIBRA_MAX_CONNECTIONS` — max concurrent remote connections/requests (positive integer; default 16), bounding remote fan-out (e.g. `exist_batch`) on large repos/CI. The global `--max-connections` flag overrides it; an invalid value is a hard error. No-op for local-only operations
 - `LIBRA_PAGER` — pager override (falls back to system `PAGER` then `less`)
 - `LIBRA_NO_HIDE_PASSWORD` — show password prompts in plain text (debugging)
 - `LIBRA_CONFIG_GLOBAL_DB` — override the global config SQLite path

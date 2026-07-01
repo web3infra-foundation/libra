@@ -797,6 +797,35 @@ mod tests {
         assert!(remote.exist_batch(&[]).await.is_empty());
     }
 
+    /// `exist_batch` respects the global `--max-connections` limit (lore.md §0.9)
+    /// — even at a cap of 1 (fully sequential) the results are correct and
+    /// ordered.
+    #[tokio::test]
+    #[serial]
+    async fn remote_exist_batch_respects_max_connections() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::resource_limits::{max_connections, set_max_connections};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let present = ObjectHash::from_type_and_data(ObjectType::Blob, b"present");
+        let absent = ObjectHash::from_type_and_data(ObjectType::Blob, b"absent");
+        remote
+            .put(&present, b"present", ObjectType::Blob)
+            .await
+            .unwrap();
+
+        let previous = max_connections();
+        set_max_connections(1);
+        let flags = remote.exist_batch(&[present, absent, present]).await;
+        set_max_connections(previous);
+
+        assert_eq!(flags, vec![true, false, true]);
+    }
+
     /// `TieredStorage::exist_batch` answers local hits and batches the remote
     /// misses, preserving order.
     #[tokio::test]
