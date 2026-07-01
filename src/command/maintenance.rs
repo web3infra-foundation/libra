@@ -29,7 +29,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use git_internal::{
-    hash::{HashKind, ObjectHash},
+    hash::{HashKind, ObjectHash, get_hash_kind},
     internal::object::{commit::Commit, tree::Tree, types::ObjectType},
 };
 use sea_orm::EntityTrait;
@@ -46,6 +46,7 @@ use crate::{
         config::ConfigKv,
         db,
         model::{reference, reflog},
+        pack_writer,
     },
     utils::{
         client_storage::ClientStorage,
@@ -424,40 +425,50 @@ async fn run_loose_objects(
         });
     }
 
-    // Create a new pack file from old loose objects
+    // Encode the old loose objects into one valid pack via the shared writer.
     let pack_dir = repo_path.join("objects").join("pack");
-    if let Err(e) = fs::create_dir_all(&pack_dir) {
-        return Err(CliError::fatal(format!(
-            "failed to create pack directory: {e}"
-        )));
-    }
+    let storage = ClientStorage::init(path::objects());
+    let hashes: Vec<ObjectHash> = old_loose
+        .iter()
+        .filter_map(|(hash_str, _)| parse_object_hash(hash_str))
+        .collect();
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let pack_name = format!("pack-maintenance-{timestamp}");
-    let pack_path = pack_dir.join(&pack_name);
-
-    let packed = match create_pack_from_loose_objects(&old_loose, &pack_path).await {
-        Ok(count) => {
-            let packed = count;
-            // Remove successfully packed loose objects
-            for (hash_str, obj_path) in &old_loose {
-                if let Err(e) = fs::remove_file(obj_path) {
-                    return Err(CliError::fatal(format!(
-                        "failed to remove packed loose object {}: {e}",
-                        hash_str
-                    )));
-                }
+    let pack_path =
+        match pack_writer::write_pack_with_index(&storage, &hashes, &pack_dir, get_hash_kind())
+            .await
+        {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return Ok(TaskResult {
+                    task: "loose-objects".to_string(),
+                    success: true,
+                    objects_removed: 0,
+                    objects_packed: 0,
+                    refs_packed: 0,
+                    packs_repacked: 0,
+                    message: "no old loose objects to pack".to_string(),
+                });
             }
-            let _ = cleanup_empty_dirs(&path::objects());
-            packed
+            Err(e) => {
+                return Err(CliError::fatal(format!("failed to create pack file: {e}")));
+            }
+        };
+
+    // Remove the loose objects now that they live in the pack.
+    for (hash_str, obj_path) in &old_loose {
+        if let Err(e) = fs::remove_file(obj_path) {
+            return Err(CliError::fatal(format!(
+                "failed to remove packed loose object {}: {e}",
+                hash_str
+            )));
         }
-        Err(e) => {
-            return Err(CliError::fatal(format!("failed to create pack file: {e}")));
-        }
-    };
+    }
+    let _ = cleanup_empty_dirs(&path::objects());
+    let packed = hashes.len();
+    let pack_name = pack_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "the new pack".to_string());
 
     if !quiet {
         info_println(
@@ -643,34 +654,53 @@ async fn run_incremental_repack(
         });
     }
 
-    // For incremental repack, we combine all existing pack files into one new pack.
+    // Consolidate into a single new pack. The set MUST include objects that
+    // currently live only inside the existing packs — `list_all_objects_in_storage`
+    // scans only loose shards, so packing that alone and then deleting the old
+    // packs would drop every packed-only object. `collect_reachable_objects`
+    // walks refs/reflogs/index through storage (which reads the packs too), so
+    // the new pack contains all reachable objects before the old packs go.
     let storage = ClientStorage::init(path::objects());
-    let all_hashes = list_all_objects_in_storage(&storage)
-        .map_err(|e| CliError::fatal(format!("failed to list objects: {e}")))?;
+    let all_hashes: Vec<ObjectHash> = collect_reachable_objects(&storage)
+        .await?
+        .into_iter()
+        .collect();
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let new_pack_name = format!("pack-consolidated-{timestamp}");
-    let new_pack_path = pack_dir.join(&new_pack_name);
-
-    let repacked = match create_pack_from_hashes(&all_hashes, &new_pack_path).await {
-        Ok(count) => {
-            // Remove old pack and idx files
-            for old_pack in &packs {
-                let _ = fs::remove_file(old_pack);
-                let idx_path = old_pack.with_extension("idx");
-                let _ = fs::remove_file(idx_path);
+    let new_pack_path =
+        match pack_writer::write_pack_with_index(&storage, &all_hashes, &pack_dir, get_hash_kind())
+            .await
+        {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return Ok(TaskResult {
+                    task: "incremental-repack".to_string(),
+                    success: true,
+                    objects_removed: 0,
+                    objects_packed: 0,
+                    refs_packed: 0,
+                    packs_repacked: 0,
+                    message: "no objects to repack".to_string(),
+                });
             }
-            count
-        }
-        Err(e) => {
-            return Err(CliError::fatal(format!(
-                "failed to create consolidated pack: {e}"
-            )));
-        }
-    };
+            Err(e) => {
+                return Err(CliError::fatal(format!(
+                    "failed to create consolidated pack: {e}"
+                )));
+            }
+        };
+
+    // Remove the old packs (their objects now live in the consolidated pack).
+    // `packs` was captured before the new pack was written, so it never names it.
+    for old_pack in &packs {
+        let _ = fs::remove_file(old_pack);
+        let idx_path = old_pack.with_extension("idx");
+        let _ = fs::remove_file(idx_path);
+    }
+    let repacked = all_hashes.len();
+    let new_pack_name = new_pack_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "the consolidated pack".to_string());
 
     if !quiet {
         info_println(
@@ -1274,7 +1304,9 @@ async fn stop(output: &OutputConfig) -> CliResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Collect all reachable objects from refs, index, and reflogs.
-async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet<ObjectHash>> {
+pub(crate) async fn collect_reachable_objects(
+    storage: &ClientStorage,
+) -> CliResult<HashSet<ObjectHash>> {
     let mut reachable: HashSet<ObjectHash> = HashSet::new();
     let db_conn = db::get_db_conn_instance().await;
 
@@ -1288,7 +1320,10 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
         if let Some(commit_hash_str) = &ref_entry.commit
             && let Some(hash) = parse_object_hash(commit_hash_str)
         {
-            reachable.insert(hash);
+            // Do NOT pre-insert `hash`: `walk_reachable` returns early when the
+            // hash is already in the set, so pre-inserting would stop it from
+            // descending into the commit's tree — leaving reachable trees/blobs
+            // looking unreachable (gc could then prune live objects).
             walk_reachable(&hash, storage, &mut reachable)?;
         }
     }
@@ -1304,18 +1339,22 @@ async fn collect_reachable_objects(storage: &ClientStorage) -> CliResult<HashSet
         if !is_null_oid(&entry.new_oid)
             && let Some(hash) = parse_object_hash(&entry.new_oid)
         {
-            reachable.insert(hash);
+            // As above: let `walk_reachable` perform the insert so it descends
+            // into the commit's tree instead of returning early.
             walk_reachable(&hash, storage, &mut reachable)?;
         }
     }
 
-    // Collect from index
+    // Collect from index — every stage, not just stage 0, so a blob referenced
+    // only by an unmerged conflict stage (1/2/3) is not treated as garbage.
     let index_path = path::index();
     if index_path.exists()
         && let Ok(index) = git_internal::internal::index::Index::load(&index_path)
     {
-        for entry in index.tracked_entries(0) {
-            reachable.insert(entry.hash);
+        for stage in 0..=3 {
+            for entry in index.tracked_entries(stage) {
+                reachable.insert(entry.hash);
+            }
         }
     }
 
@@ -1359,7 +1398,7 @@ fn walk_reachable(
 }
 
 /// List all loose objects in the repository, returning (hash, path) pairs.
-fn list_loose_objects(repo_path: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+pub(crate) fn list_loose_objects(repo_path: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let objects_dir = repo_path.join("objects");
     let mut result = Vec::new();
 
@@ -1392,49 +1431,19 @@ fn list_loose_objects(repo_path: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     Ok(result)
 }
 
-/// List all objects in storage (both loose and packed).
-fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<ObjectHash>> {
-    let objects_dir = storage.base_path();
-    let mut hashes = Vec::new();
-
-    for entry in fs::read_dir(objects_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if dir_name.len() != 2 {
-            continue;
-        }
-
-        for sub in fs::read_dir(&path)? {
-            let sub = sub?;
-            let sub_path = sub.path();
-            if sub_path.is_file() {
-                let Some(file_name) = sub_path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                let full_hash = format!("{dir_name}{file_name}");
-                if let Some(hash) = parse_object_hash(&full_hash) {
-                    hashes.push(hash);
-                }
-            }
-        }
-    }
-
-    Ok(hashes)
-}
-
 /// Parse a hex string into an ObjectHash.
-fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
+///
+/// The hash kind is inferred from the decoded byte length (20 → SHA-1, 32 →
+/// SHA-256) rather than from `ObjectHash::from_bytes`, which reads the
+/// thread-local hash kind and would reject a SHA-256 id (or misread it) if this
+/// runs on a Tokio worker thread that never had the repository's kind set.
+pub(crate) fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
     let bytes = hex::decode(hex_str).ok()?;
-    if bytes.is_empty() {
-        return None;
+    match bytes.len() {
+        20 => Some(ObjectHash::Sha1(bytes.try_into().ok()?)),
+        32 => Some(ObjectHash::Sha256(bytes.try_into().ok()?)),
+        _ => None,
     }
-    ObjectHash::from_bytes(&bytes).ok()
 }
 
 /// Remove empty directories under the given path.
@@ -1495,203 +1504,6 @@ fn remove_packed_refs(base: &Path, current: &Path, count: &mut usize) -> io::Res
     Ok(())
 }
 
-/// Create a pack file from loose objects. Returns the number of objects packed.
-///
-/// This is a simplified pack creation that writes each object as an undeltified
-/// entry. A production implementation would use delta compression.
-async fn create_pack_from_loose_objects(
-    objects: &[(String, PathBuf)],
-    pack_path: &Path,
-) -> io::Result<usize> {
-    let pack_file = fs::File::create(pack_path)?;
-    let mut writer = io::BufWriter::new(pack_file);
-
-    // Write pack header: "PACK" + version(2) + object count
-    writer.write_all(b"PACK")?;
-    writer.write_all(&2_u32.to_be_bytes())?;
-    writer.write_all(&(objects.len() as u32).to_be_bytes())?;
-
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(b"PACK");
-    hasher.update(2_u32.to_be_bytes());
-    hasher.update((objects.len() as u32).to_be_bytes());
-
-    for (hash_str, obj_path) in objects {
-        let data = fs::read(obj_path)?;
-        let decompressed = ClientStorage::decompress_zlib(&data)?;
-
-        // Parse header to get type and size
-        let (otype, _size) = parse_loose_object_header(&decompressed)?;
-        let header_end = decompressed.iter().position(|&b| b == 0).unwrap_or(0);
-        let body = &decompressed[header_end + 1..];
-
-        // Write object entry header (size-encoded)
-        let type_num = match otype {
-            ObjectType::Commit => 1,
-            ObjectType::Tree => 2,
-            ObjectType::Blob => 3,
-            ObjectType::Tag => 4,
-            _ => 0,
-        };
-        write_size_encoded(&mut writer, body.len(), type_num)?;
-
-        // Write deflated body
-        let compressed = ClientStorage::compress_zlib(body)?;
-        writer.write_all(&compressed)?;
-
-        // Update hash
-        let mut entry_hasher = sha1::Sha1::new();
-        let header = format!("{} {}\0", otype, body.len());
-        entry_hasher.update(header.as_bytes());
-        entry_hasher.update(body);
-        let entry_hash = entry_hasher.finalize();
-        hasher.update(entry_hash);
-
-        let _ = hash_str; // hash_str used for iteration but not needed for pack format
-    }
-
-    // Write trailing hash
-    let final_hash = hasher.finalize();
-    writer.write_all(&final_hash)?;
-    writer.flush()?;
-
-    // Create index file
-    build_index_for_pack(pack_path, objects.len()).await?;
-
-    Ok(objects.len())
-}
-
-/// Create a pack file from a list of object hashes.
-async fn create_pack_from_hashes(hashes: &[ObjectHash], pack_path: &Path) -> io::Result<usize> {
-    let storage = ClientStorage::init(path::objects());
-    let mut objects = Vec::with_capacity(hashes.len());
-
-    for hash in hashes {
-        let hash_str = hash.to_string();
-        let data = match storage.get(hash) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        objects.push((hash_str, data));
-    }
-
-    let pack_file = fs::File::create(pack_path)?;
-    let mut writer = io::BufWriter::new(pack_file);
-
-    writer.write_all(b"PACK")?;
-    writer.write_all(&2_u32.to_be_bytes())?;
-    writer.write_all(&(objects.len() as u32).to_be_bytes())?;
-
-    let mut hasher = sha1::Sha1::new();
-    hasher.update(b"PACK");
-    hasher.update(2_u32.to_be_bytes());
-    hasher.update((objects.len() as u32).to_be_bytes());
-
-    for (hash_str, data) in &objects {
-        let obj_type =
-            match storage.get_object_type(&parse_object_hash(hash_str).unwrap_or_default()) {
-                Ok(t) => t,
-                Err(_) => ObjectType::Blob,
-            };
-
-        let body = data.clone();
-        let type_num = match obj_type {
-            ObjectType::Commit => 1,
-            ObjectType::Tree => 2,
-            ObjectType::Blob => 3,
-            ObjectType::Tag => 4,
-            _ => 0,
-        };
-
-        write_size_encoded(&mut writer, body.len(), type_num)?;
-        let compressed = ClientStorage::compress_zlib(&body)?;
-        writer.write_all(&compressed)?;
-
-        let mut entry_hasher = sha1::Sha1::new();
-        let header = format!("{} {}\0", obj_type, body.len());
-        entry_hasher.update(header.as_bytes());
-        entry_hasher.update(&body);
-        let entry_hash = entry_hasher.finalize();
-        hasher.update(entry_hash);
-    }
-
-    let final_hash = hasher.finalize();
-    writer.write_all(&final_hash)?;
-    writer.flush()?;
-
-    build_index_for_pack(pack_path, objects.len()).await?;
-
-    Ok(objects.len())
-}
-
-/// Parse the header of a decompressed loose object, returning (type, size).
-fn parse_loose_object_header(data: &[u8]) -> io::Result<(ObjectType, usize)> {
-    let header_end = data.iter().position(|&b| b == 0).unwrap_or(0);
-    let header = std::str::from_utf8(&data[..header_end])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let Some((type_str, size_str)) = header.split_once(' ') else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid loose object header",
-        ));
-    };
-    let size = size_str
-        .parse::<usize>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let obj_type = match type_str {
-        "commit" => ObjectType::Commit,
-        "tree" => ObjectType::Tree,
-        "blob" => ObjectType::Blob,
-        "tag" => ObjectType::Tag,
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown object type: {type_str}"),
-            ));
-        }
-    };
-    Ok((obj_type, size))
-}
-
-/// Write a size-encoded integer as used in pack file object headers.
-fn write_size_encoded<W: Write>(writer: &mut W, size: usize, type_num: u8) -> io::Result<()> {
-    let mut byte = (type_num & 0x7) << 4;
-    let mut remaining = size;
-    byte |= (remaining & 0x0F) as u8;
-    remaining >>= 4;
-    while remaining > 0 {
-        writer.write_all(&[byte | 0x80])?;
-        byte = (remaining & 0x7F) as u8;
-        remaining >>= 7;
-    }
-    writer.write_all(&[byte])?;
-    Ok(())
-}
-
-/// Build a minimal version-1 index file for a pack.
-async fn build_index_for_pack(pack_path: &Path, object_count: usize) -> io::Result<()> {
-    let idx_path = pack_path.with_extension("idx");
-    let mut file = fs::File::create(idx_path)?;
-
-    // Version 1 index: 256 fanout entries + object_count * (20 bytes hash + 4 bytes offset)
-    // This is a minimal implementation that stores objects in insertion order.
-    let mut fanout = vec![0u32; 256];
-    for item in fanout.iter_mut() {
-        *item = object_count as u32;
-    }
-    for value in fanout {
-        file.write_all(&value.to_be_bytes())?;
-    }
-
-    // For a minimal index we don't store actual hash-to-offset mappings.
-    // A real implementation would parse the pack and build the full index.
-    // This is sufficient for Libra's storage layer to recognize the pack exists.
-    let _ = object_count;
-
-    file.flush()?;
-    Ok(())
-}
-
 /// Print an informational message unless output is quiet or JSON mode.
 fn info_println(output: &OutputConfig, message: &str) {
     if !output.quiet && !output.is_json() {
@@ -1741,47 +1553,11 @@ mod tests {
     }
 
     #[test]
-    fn test_size_encoding_basic() {
-        let mut buf = Vec::new();
-        write_size_encoded(&mut buf, 10, 1).unwrap();
-        assert!(!buf.is_empty());
-    }
-
-    #[test]
-    fn test_size_encoding_large() {
-        let mut buf = Vec::new();
-        write_size_encoded(&mut buf, 10000, 2).unwrap();
-        assert!(!buf.is_empty());
-    }
-
-    #[test]
     fn test_cleanup_empty_dirs_nonexistent() {
         // Should not panic on non-existent directory
         let temp = tempfile::tempdir().unwrap();
         let result = cleanup_empty_dirs(temp.path());
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_parse_loose_object_header_commit() {
-        let data = b"commit 123\0content";
-        let (obj_type, size) = parse_loose_object_header(data).unwrap();
-        assert_eq!(obj_type, ObjectType::Commit);
-        assert_eq!(size, 123);
-    }
-
-    #[test]
-    fn test_parse_loose_object_header_tree() {
-        let data = b"tree 456\0content";
-        let (obj_type, size) = parse_loose_object_header(data).unwrap();
-        assert_eq!(obj_type, ObjectType::Tree);
-        assert_eq!(size, 456);
-    }
-
-    #[test]
-    fn test_parse_loose_object_header_invalid() {
-        let data = b"invalid";
-        assert!(parse_loose_object_header(data).is_err());
     }
 
     #[test]

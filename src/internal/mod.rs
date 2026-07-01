@@ -31,6 +31,7 @@ pub mod model;
 pub mod notes;
 pub mod operation;
 pub mod operation_wrapper;
+pub mod pack_writer;
 pub mod protocol;
 pub mod publish;
 pub mod reflog;

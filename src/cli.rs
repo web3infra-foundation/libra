@@ -36,7 +36,7 @@ Command Groups:
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
   Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
-  Maintenance And Plumbing fsck, maintenance, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
+  Maintenance And Plumbing fsck, maintenance, repack, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -507,6 +507,11 @@ enum Commands {
         after_help = command::maintenance::MAINTENANCE_EXAMPLES
     )]
     Maintenance(command::maintenance::MaintenanceArgs),
+    #[command(
+        about = "Combine repository objects into a single pack",
+        after_help = command::repack::REPACK_EXAMPLES
+    )]
+    Repack(command::repack::RepackArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(
@@ -557,6 +562,12 @@ enum Commands {
         hide = true
     )]
     IndexPack(command::index_pack::IndexPackArgs),
+    #[command(
+        about = "Create a pack from object ids read on stdin (internal plumbing)",
+        after_help = command::pack_objects::PACK_OBJECTS_EXAMPLES,
+        hide = true
+    )]
+    PackObjects(command::pack_objects::PackObjectsArgs),
     #[command(
         about = "Compatibility entry for hook configurations installed by `libra agent enable`",
         hide = true
@@ -1432,11 +1443,15 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             command::verify_pack::execute_safe(cmd_args, &output).await?
         }
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
+        Commands::PackObjects(cmd_args) => {
+            command::pack_objects::execute_safe(cmd_args, &output).await?
+        }
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Fsck(cmd_args) => command::fsck::execute_safe(cmd_args, &output).await?,
         Commands::Maintenance(cmd_args) => {
             command::maintenance::execute_safe(cmd_args, &output).await?
         }
+        Commands::Repack(cmd_args) => command::repack::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
         Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
@@ -1621,7 +1636,7 @@ mod tests {
 
         // Curated allowlist of hidden commands (mirrors `hide = true`
         // attributes on `Commands::*` variants in this file).
-        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks"];
+        const HIDDEN_COMMANDS: &[&str] = &["index-pack", "hooks", "pack-objects"];
 
         let cli = Cli::command();
         for subcommand in cli.get_subcommands() {

@@ -958,12 +958,12 @@ patch 输入
   - `diff-index --cached`（tree 对 index）暂不支持 → 退出 128 指引 `diff --staged`（Libra diff 引擎暂无任意-tree-对-index 模式）。
   - **退出码（Git 底层语义，与 porcelain `diff` 不同）**：三命令 argv 恒带 `--exit-code` → **有差异 exit 1 / 无差异 exit 0 / 错误 128**（codex 指出 porcelain `diff` 默认 exit 0，底层 diff-* 必须 1）。
   - **有意 stricter-than-Git 差异**：路径限定需 `--` 分隔（clap `last=true`），Git 允许裸路径；记此为已知收窄（可后续放宽）。
-- [ ] （Phase B）`repack` 复用 maintenance pack 编码，不复制 pack writer。**有意延后**（pack writer territory；与 diff plumbing 解耦，计划亦标注「repack 可独立于 diff plumbing」）。
-- [ ] （Phase B）hidden `pack-objects` 只为内部/integration 使用，不进 README 公共承诺。**随 Phase B 落地。**
+- [x] （Phase B，v0.17.1780）`repack` 复用**单一**共享 pack writer，不复制 pack writer。新建 `internal/pack_writer.rs`（`encode_hashes_to_pack` / `write_pack_with_index`，基于 `git-internal` 的 `PackEncoder`，pack 以自身 trailer checksum 命名 `pack-<sha>.{pack,idx}`，`build_index_v2` 生成索引）。`repack` 命令：默认打包 reachable-loose 对象、`-a` 打包全部 reachable、`-d` 删除已入包的 loose 对象（绝不删已有 pack，故不会遗留悬挂对象）、`-q`、`--json`。可达性同 gc（refs/reflogs/index）。**并修复既有 bug**：`maintenance` 原 `create_pack_from_hashes`/`create_pack_from_loose_objects` 写的是 sha1 硬编码、且 trailer 哈希的是各对象 id 而非 pack 字节 → 产出的包 `index-pack` 校验失败；两处 gc/incremental-repack 已改调 `pack_writer::write_pack_with_index`，删除坏 writer + 死 helper（`write_size_encoded`/`parse_loose_object_header`/`build_index_for_pack`）及其单测。
+- [x] （Phase B，v0.17.1780）hidden `pack-objects`：从 stdin 读对象 id（每行一个，容忍 `rev-list --objects` 的 `<id> <path>`），复用 `pack_writer` 写包；默认写入 `objects/pack` 并打印 `pack-<sha>`，`--stdout` 输出裸 pack 字节以便 pipe 到 `index-pack`。`hide = true`，不进 README 公共承诺，已入 `HIDDEN_COMMANDS` 白名单。
 
 **验证**：
 - [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test diff_plumbing`（6 passed：diff-tree 两 tree、pathspec 限定、diff-files 未暂存、diff-index tree 对工作树、`--cached` → 128、非仓库 128）
-- [ ] （Phase B）`repack` 测试 —— 随 repack 落地。
+- [x] （Phase B）`LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test repack`：`repack -a -d` 产出的包经 `index-pack` 校验通过（关键：证明新 writer 产出合法包，旧 writer 在此失败）、loose 被清且 log/cat-file 仍可读、幂等「Nothing new to pack」、`--json`、仓库外失败；`pack-objects` 从 stdin 打包并经 index-pack 校验、空 stdin → 失败。
 
 ### GGT-12：新增 `rerere`
 
