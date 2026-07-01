@@ -6,10 +6,70 @@ use std::{
 };
 
 use async_trait::async_trait;
-use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
+use git_internal::{
+    errors::GitError,
+    hash::{HashKind, ObjectHash},
+    internal::object::types::ObjectType,
+};
 use lru_mem::{HeapSize, LruCache};
 
 use super::{Storage, local::LocalStorage, remote::RemoteStorage};
+
+/// Verify that a fetched object's bytes hash back to their claimed OID, before
+/// the object is cached locally or returned.
+///
+/// lore.md §0.3 (取数即校验): a remote/durable-tier object must never be blindly
+/// trusted — a corrupted or tampered payload must not poison the local cache or
+/// reach the caller. The payload is reframed as a git object
+/// `"<type> <len>\0<content>"` and hashed.
+///
+/// The hash algorithm is chosen from **`expected.kind()`**, NOT the ambient
+/// thread-local `HashKind`. `ClientStorage::get` runs storage futures on a
+/// spawned static-runtime worker thread (`client_storage.rs`) whose thread-local
+/// `HashKind` is never set and defaults to SHA-1; hashing there via the
+/// thread-local would recompute a SHA-1 OID and falsely reject a valid SHA-256
+/// object. Deriving the algorithm from the requested OID is correct for both
+/// SHA-1 and SHA-256 repositories regardless of which thread runs the check.
+///
+/// # Arguments
+/// * `expected` - the OID the caller asked for.
+/// * `obj_type` - the object type parsed from the fetched header.
+/// * `data` - the fetched, header-stripped object content.
+fn verify_fetched_object(
+    expected: &ObjectHash,
+    obj_type: ObjectType,
+    data: &[u8],
+) -> Result<(), GitError> {
+    let type_bytes = obj_type.to_data().map_err(|e| {
+        GitError::InvalidObjectInfo(format!("unknown object type for fetched object: {e}"))
+    })?;
+    // Reframe as a git object: "<type> <len>\0<content>".
+    let mut framed = Vec::with_capacity(type_bytes.len() + data.len() + 24);
+    framed.extend_from_slice(&type_bytes);
+    framed.push(b' ');
+    framed.extend_from_slice(data.len().to_string().as_bytes());
+    framed.push(0);
+    framed.extend_from_slice(data);
+
+    let computed = match expected.kind() {
+        HashKind::Sha1 => {
+            use sha1::{Digest, Sha1};
+            ObjectHash::Sha1(Sha1::digest(&framed).into())
+        }
+        HashKind::Sha256 => {
+            use sha2::{Digest, Sha256};
+            ObjectHash::Sha256(Sha256::digest(&framed).into())
+        }
+    };
+
+    if &computed == expected {
+        Ok(())
+    } else {
+        Err(GitError::InvalidObjectInfo(format!(
+            "remote object {expected} failed integrity check: {obj_type} payload hashes to {computed}"
+        )))
+    }
+}
 
 /// Wrapper for cached file to handle deletion on eviction
 #[derive(Debug)]
@@ -91,6 +151,10 @@ impl Storage for TieredStorage {
 
         // 2. Fetch from remote
         let (data, obj_type) = self.remote.get(hash).await?;
+
+        // 2b. Verify-on-cache: reject a payload that does not hash to the
+        // requested OID before it can poison the local cache (lore.md §0.3).
+        verify_fetched_object(hash, obj_type, &data)?;
 
         // 3. Store locally based on size
         if data.len() < self.threshold {
@@ -196,6 +260,136 @@ mod tests {
                 disk_size: size,
             },
         )
+    }
+
+    /// Verify-on-cache accepts a payload that hashes to the requested OID and
+    /// rejects any mismatch, under SHA-1. Covers the lore.md §0.3 requirement
+    /// that both hash formats be exercised.
+    #[test]
+    fn verify_fetched_object_matches_and_mismatches_sha1() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let data = b"hello libra";
+        let expected = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+
+        assert!(verify_fetched_object(&expected, ObjectType::Blob, data).is_ok());
+        // Tampered content no longer hashes to the requested OID.
+        assert!(verify_fetched_object(&expected, ObjectType::Blob, b"HELLO libra").is_err());
+        // Wrong object type changes the `<type> <len>\0` framing → mismatch.
+        assert!(verify_fetched_object(&expected, ObjectType::Commit, data).is_err());
+    }
+
+    /// Same contract under SHA-256, so an object-format-256 repository is also
+    /// protected against a poisoned cache write.
+    #[test]
+    fn verify_fetched_object_matches_and_mismatches_sha256() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
+        let data = b"hello libra";
+        let expected = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+
+        assert!(verify_fetched_object(&expected, ObjectType::Blob, data).is_ok());
+        assert!(verify_fetched_object(&expected, ObjectType::Blob, b"tampered").is_err());
+    }
+
+    /// Regression: `ClientStorage::get` runs the tiered fetch on a spawned
+    /// static-runtime worker thread whose thread-local `HashKind` defaults to
+    /// SHA-1. Verification MUST derive the algorithm from the requested OID, not
+    /// the ambient thread-local — otherwise a valid SHA-256 object would be
+    /// hashed as SHA-1 and falsely rejected. This test forces exactly that
+    /// mismatch (ambient SHA-1, SHA-256 OID) and asserts the object still passes.
+    #[test]
+    fn verify_uses_requested_oid_kind_not_ambient_hash_kind() {
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let data = b"hello libra";
+        // Compute the SHA-256 OID under a scoped SHA-256 ambient kind.
+        let expected_sha256 = {
+            let _sha256 = set_hash_kind_for_test(HashKind::Sha256);
+            ObjectHash::from_type_and_data(ObjectType::Blob, data)
+        };
+        assert!(matches!(expected_sha256, ObjectHash::Sha256(_)));
+
+        // Now pin the ambient kind to SHA-1 (the spawned-worker default) and
+        // confirm the SHA-256 object still verifies, and a tamper still fails.
+        let _ambient_sha1 = set_hash_kind_for_test(HashKind::Sha1);
+        assert!(verify_fetched_object(&expected_sha256, ObjectType::Blob, data).is_ok());
+        assert!(verify_fetched_object(&expected_sha256, ObjectType::Blob, b"tampered").is_err());
+    }
+
+    /// End-to-end through `TieredStorage::get`: an object present only in the
+    /// remote tier is fetched, verified, cached, and returned unchanged.
+    #[tokio::test]
+    async fn tiered_get_verifies_and_caches_valid_remote_object() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let data = b"tiered verify happy path".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &data);
+
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote
+            .put(&hash, &data, obj_type)
+            .await
+            .expect("seed remote");
+
+        let local_dir = tempdir().expect("tempdir");
+        let tiered = TieredStorage::new(
+            LocalStorage::new(local_dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        // Empty local cache → fetch from remote, verify, cache, return.
+        let (got, got_type) = tiered.get(&hash).await.expect("get should succeed");
+        assert_eq!(got, data);
+        assert_eq!(got_type, obj_type);
+        assert!(tiered.local.exist(&hash).await, "object should be cached");
+    }
+
+    /// End-to-end: a remote object whose bytes do not hash to the requested OID
+    /// (corruption/tampering in the durable tier) is rejected by `get`, and is
+    /// NOT written into the local cache.
+    #[tokio::test]
+    async fn tiered_get_rejects_and_does_not_cache_corrupted_remote_object() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let obj_type = ObjectType::Blob;
+        let good = b"the original bytes".to_vec();
+        let hash = ObjectHash::from_type_and_data(obj_type, &good);
+
+        // Store DIFFERENT bytes at the requested OID's location.
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        remote
+            .put(&hash, b"tampered payload", obj_type)
+            .await
+            .expect("seed remote");
+
+        let local_dir = tempdir().expect("tempdir");
+        let tiered = TieredStorage::new(
+            LocalStorage::new(local_dir.path().to_path_buf()),
+            remote,
+            1 << 20,
+            1 << 20,
+        );
+
+        assert!(
+            tiered.get(&hash).await.is_err(),
+            "corrupted object must be rejected"
+        );
+        assert!(
+            !tiered.local.exist(&hash).await,
+            "corrupted object must not be cached"
+        );
     }
 
     /// `HeapSize::heap_size` MUST report the `disk_size` accounting
