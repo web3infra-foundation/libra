@@ -205,7 +205,18 @@ pub fn generate_upload_pack_content(
     // `include-tag` asks the server to also send annotated tag objects that
     // point at objects in the returned pack — this powers Git's default tag
     // auto-follow on `fetch`. Servers that don't support it ignore it.
-    let mut capability = vec!["side-band-64k", "multi_ack_detailed", "include-tag"];
+    // `ofs-delta` lets the server delta-compress objects against earlier objects
+    // in the SAME pack by offset (smaller transfers). git-internal's pack decoder
+    // resolves OffsetDelta objects, so it is safe to advertise. `thin-pack` is
+    // deliberately NOT advertised: a thin pack deltas against objects OUTSIDE the
+    // pack, which the self-contained decoder cannot complete. `report-status` is a
+    // push (receive-pack) capability and has no place on an upload-pack want line.
+    let mut capability = vec![
+        "side-band-64k",
+        "multi_ack_detailed",
+        "ofs-delta",
+        "include-tag",
+    ];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capability.push("object-format=sha256");
     }
@@ -263,4 +274,34 @@ impl From<Branch> for DiscoveredReference {
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use super::generate_upload_pack_content;
+
+    #[test]
+    fn upload_pack_want_line_advertises_expected_capabilities() {
+        let have: Vec<String> = Vec::new();
+        let want = vec!["1".repeat(40)];
+        let body = generate_upload_pack_content(&have, &want, &[], None);
+        let text = String::from_utf8_lossy(&body);
+
+        // The first `want` line carries the capability list + agent string.
+        for cap in [
+            "side-band-64k",
+            "multi_ack_detailed",
+            "ofs-delta",
+            "include-tag",
+        ] {
+            assert!(text.contains(cap), "want line must advertise {cap}: {text}");
+        }
+        assert!(
+            text.contains("agent=libra/"),
+            "want line must send an agent string: {text}"
+        );
+        // Intentionally NOT advertised: a thin pack would delta against objects
+        // outside the pack, which the self-contained decoder cannot complete.
+        assert!(
+            !text.contains("thin-pack"),
+            "thin-pack must not be advertised: {text}"
+        );
+    }
+}

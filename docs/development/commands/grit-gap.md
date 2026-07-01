@@ -515,8 +515,8 @@ gantt
 | 文档示例验证 | `cargo test --test compat_command_docs_examples_section` | ✅ 现有（`tests/compat/`） | 所有 `EXAMPLES` 块 |
 | Compat matrix 对齐 | `cargo test --test compat_matrix_alignment` | ✅ 现有（`tests/compat/`） | `COMPATIBILITY.md` 与 README 一致性 |
 | Lint/Format | `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings` | ✅ 现有 | 全部 |
-| 协议 capability | `cargo test --test protocol_capability_negotiation --features test-network` | 🆕 待建（GGT-14） | 阶段 7 / GGT-14 |
-| 协议 timeout/恢复 | `cargo test --test protocol_timeout_recovery --features test-network` | 🆕 待建（GGT-14） | 阶段 7 / GGT-14 |
+| 协议 capability | `cargo test --test protocol_capability_negotiation --features test-network` | ✅ 已建（v0.17.1784，自包含） | 阶段 7 / GGT-14 |
+| 协议 timeout/恢复 | `cargo test --test protocol_timeout_recovery --features test-network` | ✅ 已建（v0.17.1784，本地 listener） | 阶段 7 / GGT-14 |
 
 **CI 矩阵**（✅ 现有 job 见 `CLAUDE.md`「CI Pipeline」；🆕 为本计划提议新增的 job，需在 `.github/workflows/base.yml` 落地）：
 - ✅ `compat-offline-core`：默认 L1 套件；含 `command_test` / `compat_matrix_alignment` / `compat_command_docs_examples_section` / `compat_help_flag_descriptions` / lib tests / clippy / fmt
@@ -1030,16 +1030,17 @@ patch 输入
 - [x] 本地 remote fetch 不再依赖系统 `git-upload-pack`（v0.17.1777：进程内 discovery + fetch，两处 spawn 移除）。
 - [x] pack 协商（want/have/depth BFS）、sideband progress 和 EOF（flush）处理复用 `internal/protocol` 现有路径（`PackEncoder` + 共享线格式封装）；thin pack 暂不生成（Phase B）。
 - [x] 错误信息说明 remote/path/protocol，不泄露凭据（错误含外部 repo 路径，无凭据）。
-- [ ] **（Phase B）** 保留连接/空闲 timeout、sideband 错误帧、半包/截断 pack 和远端无效能力声明的回归测试；协议错误不能被降级成成功的空 fetch。
+- [x] **（Phase B，v0.17.1782..1784）** 保留连接/空闲 timeout、sideband 错误帧、半包/截断 pack 的回归测试；协议错误不再被降级成成功的空 fetch（半包 → `FetchError::IncompletePack`，不更新 refs）。新增自包含 L2（`--features test-network`）`tests/protocol_timeout_recovery.rs`（本地静默/不可路由 listener → idle/connect 超时在数秒内恢复而非无限挂起）与 `tests/protocol_capability_negotiation.rs`（want-body 只声明可解码的能力）。
 - [~] **（Phase B，v0.17.1782 —— connect/idle 已落地；first_byte 待续）超时配置**（默认值，文档在 `fetch.md` 公开）：
   - [x] `connect_timeout`：默认 30s（`fetch.<remote>.connectTimeout` / `LIBRA_FETCH_CONNECT_TIMEOUT_MS`）。**接线修复**：`RemoteClient::with_network_timeouts` 此前是死代码（从未被调用）；新增 `with_resolved_fetch_timeouts(remote)` 在 `from_spec_with_remote` 之后接线，按 env(ms)→`fetch.<remote>.<key>`→`fetch.<key>`(秒)→默认解析。**git:// 补齐**：`git_client.rs` 原无任何超时（裸 `TcpStream::connect`/`read_to_end`），现 `GitClient` 带 connect/idle 字段 + `with_network_timeouts`，`open_stream` 用 `tokio::time::timeout` 包 connect，逐 read + 整包 read 用 idle timeout 包裹。本地 remote 免网络超时（读盘）——以豁免代替「≤5s」。
   - [x] `idle_timeout`：默认 60s（`fetch.<remote>.idleTimeout` / `LIBRA_FETCH_IDLE_TIMEOUT_MS`）；http/ssh 复用同一解析值（此前各自硬编码 60s）。
   - [ ] `first_byte_timeout`：默认 30s；connect 成功后到首个 `NAK`/pack header 之间的等待 —— **待续**（当前由 idle_timeout 覆盖首个 read）。
   - L1：`resolve_fetch_timeout` env/默认单测 + `git_client` 默认/override/不可路由 connect-超时单测。
-- [ ] **capability 声明**（v1 v2 协商）：
-  - 上游 send 时声明 `report-status` / `side-band-64k` / `ofs-delta` / `thin-pack` / `agent=libra/<version>`
-  - 解析远端 `cap-list` 时拒绝未知 capability + log + 拒绝非 v2 协议（v0 协议拒绝；不允许 v1 走 v2 通道）
-  - 测试需覆盖「远端不发 v2 → 客户端拒绝」、「远端缺 `side-band-64k` → 降级但要求 side-band 至少 16k」两条路径
+- [x/~] **capability 声明（v0.17.1784 —— 安全子集已落地；不安全/不适用项有意不采纳）**：
+  - [x] upload-pack want 行声明 `side-band-64k` / `multi_ack_detailed` / **`ofs-delta`（新增）** / `include-tag` / `agent=libra/<version>`（+ SHA-256 时 `object-format=sha256`）。`ofs-delta` 安全，因 git-internal 的 pack decoder（`decode.rs:336` `ObjectType::OffsetDelta`）能解析 in-pack 偏移增量。
+  - [有意不采纳] **`thin-pack`**：thin pack 的增量引用包外对象，Libra 自包含 decoder 无外部 delta-base 解析器，声明它会导致无法补全 → 故意不声明。**`report-status`**：是 push（receive-pack）能力，与 upload-pack want 行无关 → 不放入 fetch 能力集。
+  - [有意不采纳] **「拒绝非 v2 协议 / 拒绝未知 capability」**：Libra 的线协议按设计是 v0/v1；「拒绝非 v2」会拒掉 Libra 自身所有 remote，不可行。且正确的 Git 客户端行为是**忽略**未识别的服务端能力（而非拒绝），故不实现「拒绝未知 cap」。远端 `object-format` 不匹配已拒绝（`FetchError::ObjectFormatMismatch`）。
+  - L1：`mod.rs` 的 `upload_pack_want_line_advertises_expected_capabilities`（断言声明集含 ofs-delta/agent、不含 thin-pack）。
 - [x] **half pack 恢复（v0.17.1783）**：`read_fetch_stream` 循环结束后，若 `reach_pack && !pack_completion.complete`（pack 已开始但流在完成前结束），发 `tracing::warn!("incomplete pack received: N bytes ...; discarding — references were not updated")` 并返回新 `FetchError::IncompletePack{received}`（映射 `NetworkProtocol` + 「connection dropped mid-transfer — retry」提示），而非把半包交给下游靠 index-pack 崩。refs 本就在成功后才更新，故半包 → 明确错误 + 不更新 refs + 已收对象留待 `gc`。L1：`read_fetch_stream_rejects_a_truncated_pack`（截断 empty pack → IncompletePack）。
 - [x] **sideband 错误帧（v0.17.1783）**：channel 3 的 `ERR`/`FATAL` 帧本就解析为 `FetchError::RemoteSideband`（fetch 非 0）；新增 `clean_sideband_message` 去除 `ERR `/`FATAL `/`ERR: `/`FATAL: ` 前缀，使错误读作远端原文。L1：`clean_sideband_message_strips_err_and_fatal_markers`。（远端路径/对象名由远端文本自身携带。）
 - [x] **协议升级不改变 wire 格式**：未引入 v3 pack；进程内路径复用 v2 pack + 既有 NAK/sideband/flush 线格式。
@@ -1047,8 +1048,8 @@ patch 输入
 
 **验证**：
 - [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test network_remotes_test --features test-network -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test protocol_capability_negotiation --features test-network -- --nocapture`
-- [ ] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test protocol_timeout_recovery --features test-network -- --nocapture`
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test protocol_capability_negotiation --features test-network -- --nocapture`（v0.17.1784；自包含，无需外部服务）
+- [x] `LIBRA_SKIP_WEB_BUILD=1 cargo test --test protocol_timeout_recovery --features test-network -- --nocapture`（v0.17.1784；本地 listener，自包含）
 - [ ] 复跑 fetch/pull 回归：`LIBRA_SKIP_WEB_BUILD=1 cargo test --test command_test fetch_ pull_ -- --nocapture`
 
 ---

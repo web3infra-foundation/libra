@@ -222,18 +222,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_stream_times_out_on_unroutable_host() {
-        // 10.255.255.1 is in a reserved range that typically black-holes the SYN,
-        // so connect() would hang without the timeout. A 200ms bound must fire.
-        let url = Url::parse("git://10.255.255.1:9418/repo.git").unwrap();
+    async fn discovery_returns_promptly_on_a_refused_connection() {
+        // Bind then drop a listener so the port is free but unused; a connect
+        // there is refused promptly. Deterministic on any network (unlike a
+        // black-holed address), and it exercises that the connect result
+        // propagates as an error instead of hanging.
+        let port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let url = Url::parse(&format!("git://127.0.0.1:{port}/repo.git")).unwrap();
         let client = GitClient::from_url(&url)
-            .with_network_timeouts(Duration::from_millis(200), Duration::from_secs(60));
+            .with_network_timeouts(Duration::from_secs(5), Duration::from_secs(60));
         let started = tokio::time::Instant::now();
         let result = client.discovery_reference(ServiceType::UploadPack).await;
-        assert!(result.is_err(), "unroutable connect should fail");
+        assert!(result.is_err(), "a refused connect should fail");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the connect timeout must bound the wait, took {:?}",
+            started.elapsed() < Duration::from_secs(2),
+            "a refused connect must return promptly, took {:?}",
             started.elapsed()
         );
     }

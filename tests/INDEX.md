@@ -139,6 +139,8 @@
 | target | wave | one-line purpose | relevant src |
 |---|---|---|---|
 | `network_remotes_test` | 3 | Real-network smoke tests against GitHub | `src/internal/protocol/`, `src/git_protocol.rs` |
+| `protocol_timeout_recovery` | 3 | git:// connect/idle timeout recovery via a local hung/refused listener (self-contained) | `src/internal/protocol/git_client.rs` |
+| `protocol_capability_negotiation` | 3 | Fetch want-line advertises only decoder-supported capabilities (ofs-delta yes; thin-pack/report-status no) | `src/internal/protocol/mod.rs` |
 
 ## Wave 4 — Live AI (test-live-ai / DEEPSEEK_API_KEY)
 
