@@ -688,12 +688,12 @@ impl RevertState {
 
     fn save(&self) -> Result<(), RevertError> {
         let path = Self::path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| RevertError::StateIo(e.to_string()))?;
-        }
         let data =
             serde_json::to_vec_pretty(self).map_err(|e| RevertError::StateIo(e.to_string()))?;
-        fs::write(&path, data).map_err(|e| RevertError::StateIo(e.to_string()))
+        // Atomic + fsynced write (lore.md §7.7): recovery-critical sequencer
+        // state must never be left truncated by a crash.
+        crate::utils::atomic_write::write_atomic(&path, &data, true)
+            .map_err(|e| RevertError::StateIo(e.to_string()))
     }
 
     fn cleanup() -> Result<(), RevertError> {

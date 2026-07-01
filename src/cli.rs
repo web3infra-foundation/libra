@@ -1269,6 +1269,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let argv = rewrite_log_short_number_args(argv);
     let argv = rewrite_index_pack_progress_args(argv);
     utils::output::reset_warning_tracker();
+    // Pick up `LIBRA_SYNC_DATA` so atomic object writes fsync when requested
+    // (lore.md §7.7; the `--sync-data` flag of §0.5 layers on top).
+    utils::atomic_write::init_sync_data_from_env();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }

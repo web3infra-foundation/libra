@@ -233,14 +233,12 @@ impl MergeState {
 
     fn save(&self) -> Result<(), PullMergeError> {
         let path = Self::path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                PullMergeError::StateSave(format!("failed to create {}: {error}", parent.display()))
-            })?;
-        }
         let data = serde_json::to_vec_pretty(self)
             .map_err(|error| PullMergeError::StateSave(error.to_string()))?;
-        fs::write(&path, data)
+        // Atomic + fsynced write (lore.md §7.7): sequencer state is
+        // recovery-critical, so a crash must leave it either fully written or
+        // absent — never truncated — and it must survive a power loss.
+        crate::utils::atomic_write::write_atomic(&path, &data, true)
             .map_err(|error| PullMergeError::StateSave(format!("{}: {error}", path.display())))
     }
 

@@ -494,17 +494,20 @@ impl Storage for LocalStorage {
                 set_hash_kind(kind);
             }
             let path = self_clone.get_obj_path(&hash);
-            // INVARIANT: get_obj_path always returns `objects/AB/CD...` so it has a parent.
-            let dir = path
-                .parent()
-                .expect("get_obj_path output always has a parent directory");
-            fs::create_dir_all(dir)?;
 
             let header = format!("{} {}\0", obj_type, data.len());
             let full_content = [header.as_bytes().to_vec(), data].concat();
 
-            let mut file = fs::File::create(&path)?;
-            file.write_all(&Self::compress_zlib(&full_content)?)?;
+            // Atomic loose-object write (lore.md §7.7): a crash mid-write must
+            // never leave a half-written object at the final path (which fsck /
+            // reconcile would then read as corrupt). fsync only when
+            // `--sync-data` is requested (§0.5) — the default keeps object writes
+            // fast while still crash-atomic.
+            crate::utils::atomic_write::write_atomic(
+                &path,
+                &Self::compress_zlib(&full_content)?,
+                crate::utils::atomic_write::sync_data_enabled(),
+            )?;
             path.to_str().map(str::to_owned).ok_or_else(|| {
                 GitError::InvalidArgument(format!(
                     "loose object path is not valid UTF-8: {}",
@@ -762,6 +765,43 @@ mod tests {
         assert!(
             matches!(&err, GitError::InvalidObjectInfo(detail) if detail.contains("non-UTF-8 header bytes")),
             "unexpected err: {err:?}"
+        );
+    }
+
+    /// `put` writes loose objects through `write_atomic` (lore.md §7.7): the
+    /// object round-trips, and the shard directory holds only the final object
+    /// with no leftover temp file.
+    #[tokio::test]
+    async fn put_writes_loose_object_atomically() {
+        use git_internal::{
+            hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+            internal::object::types::ObjectType,
+        };
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let data = b"atomic loose object".to_vec();
+        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, &data);
+
+        storage
+            .put(&hash, &data, ObjectType::Blob)
+            .await
+            .expect("put");
+
+        let (got, obj_type) = storage.get(&hash).await.expect("get");
+        assert_eq!(got, data);
+        assert_eq!(obj_type, ObjectType::Blob);
+
+        let shard = dir.path().join(&hash.to_string()[0..2]);
+        let entries: Vec<_> = std::fs::read_dir(&shard)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "shard should hold only the final object (no stray temp), got: {entries:?}"
         );
     }
 }

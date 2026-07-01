@@ -5,6 +5,7 @@ pub mod error;
 pub mod fuse;
 pub mod output;
 
+pub mod atomic_write;
 pub mod backoff;
 pub mod client_storage;
 pub mod convert;
