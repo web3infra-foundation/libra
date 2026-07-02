@@ -34,7 +34,7 @@ Command Groups:
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, check-mailmap, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
-  Remote And Cloud        remote, fetch, pull, push, open, cloud, publish, credential, bundle
+  Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing fsck, maintenance, repack, logfile, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
@@ -352,6 +352,11 @@ enum Commands {
         after_help = command::logfile::LOGFILE_EXAMPLES
     )]
     Logfile(command::logfile::LogfileArgs),
+    #[command(
+        about = "Inspect the tiered-storage / LRU cache configuration",
+        after_help = command::cache::CACHE_EXAMPLES
+    )]
+    Cache(command::cache::CacheArgs),
     #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
@@ -1144,6 +1149,8 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Completions(_)
         // `logfile` only inspects env-derived tracing configuration.
         | Commands::Logfile(_)
+        // `cache info` only inspects env/config-derived storage tunables.
+        | Commands::Cache(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
@@ -1438,6 +1445,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::LsFiles(cmd_args) => command::ls_files::execute_safe(cmd_args, &output).await?,
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Logfile(cmd_args) => command::logfile::execute_safe(cmd_args, &output).await?,
+        Commands::Cache(cmd_args) => command::cache::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,

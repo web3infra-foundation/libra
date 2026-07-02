@@ -151,6 +151,106 @@ pub struct ClientStorage {
     base_path: PathBuf, // Keep base_path for legacy access if needed
 }
 
+/// Default tiered-storage small/large object threshold (1 MiB): objects at or
+/// above this size are LRU-cached rather than stored permanently locally.
+pub const DEFAULT_STORAGE_THRESHOLD_BYTES: usize = 1024 * 1024;
+/// Default local LRU disk budget for large cached objects (200 MiB).
+pub const DEFAULT_CACHE_SIZE_BYTES: usize = 200 * 1024 * 1024;
+
+/// The resolved tiered-storage / LRU-cache tunables (lore.md §0.10). Exposes the
+/// existing `LIBRA_STORAGE_*` knobs for inspection via `libra cache info`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// The RAW `LIBRA_STORAGE_TYPE` value (`local` only when unset), e.g.
+    /// `s3`/`r2`. Not normalized — a wrong-case `R2` is reported verbatim (and
+    /// `tiered` is false), matching how the backend interprets it.
+    pub storage_type: String,
+    /// Whether the static config selects a durable tier: a case-sensitive
+    /// `s3`/`r2` `storage_type` that also passes every static fallback check the
+    /// backend applies before connecting (non-empty bucket, parseable endpoint
+    /// URL, non-empty access/secret key). The cache tunables only take effect
+    /// when tiered. NB: an actual connection additionally requires valid
+    /// credentials, which this static report does not validate.
+    pub tiered: bool,
+    /// Small/large object threshold in bytes (`LIBRA_STORAGE_THRESHOLD`).
+    pub threshold_bytes: usize,
+    /// Local LRU disk budget in bytes (`LIBRA_STORAGE_CACHE_SIZE`).
+    pub cache_size_bytes: usize,
+}
+
+/// Resolve the cache/storage tunables the way [`ClientStorage::create_storage_backend`]
+/// does (env first, then the global config DB via `resolve_env_sync`), mirroring
+/// its lenient parse — an unparseable numeric value falls back to the default,
+/// exactly as the storage backend would use it. Used by `libra cache info` so
+/// the reported values match what the running backend applies.
+///
+/// # Errors
+/// Propagates a config-resolution failure (e.g. an unreadable global config DB).
+/// Whether the S3/R2 static pre-connection checks pass, resolved in the SAME
+/// order as [`ClientStorage::create_storage_backend`] and short-circuiting to
+/// `false` at the first static fallback (empty bucket / unparseable endpoint /
+/// empty access or secret key). Each var is resolved in order so a
+/// config-resolution error only surfaces for a var the backend would actually
+/// have reached — `tiered` is thus never over-reported. `REGION`/`ALLOW_HTTP`
+/// values do not gate tiering (the backend accepts any), but a resolution error
+/// on either still degrades the backend to local, so they are resolved too.
+fn tiered_static_checks_pass() -> Result<bool, String> {
+    if resolve_env_sync("LIBRA_STORAGE_BUCKET")?.is_some_and(|bucket| bucket.is_empty()) {
+        return Ok(false);
+    }
+    if let Some(endpoint) = resolve_env_sync("LIBRA_STORAGE_ENDPOINT")?
+        && url::Url::parse(&endpoint).is_err()
+    {
+        return Ok(false);
+    }
+    let _region = resolve_env_sync("LIBRA_STORAGE_REGION")?;
+    if resolve_env_sync("LIBRA_STORAGE_ACCESS_KEY")?.is_some_and(|key| key.is_empty()) {
+        return Ok(false);
+    }
+    if resolve_env_sync("LIBRA_STORAGE_SECRET_KEY")?.is_some_and(|secret| secret.is_empty()) {
+        return Ok(false);
+    }
+    let _allow_http = resolve_env_sync("LIBRA_STORAGE_ALLOW_HTTP")?;
+    Ok(true)
+}
+
+pub fn resolve_cache_config() -> Result<CacheConfig, String> {
+    let (storage_type, mut tiered) = match resolve_env_sync("LIBRA_STORAGE_TYPE")? {
+        // Raw, case-sensitive match — identical to create_storage_backend, so a
+        // value the backend rejects (e.g. `R2`, `" r2 "`) reports non-tiered
+        // rather than misleading the user into thinking tiering is active.
+        Some(raw) => {
+            let tiered = matches!(raw.as_str(), "s3" | "r2");
+            (raw, tiered)
+        }
+        None => ("local".to_string(), false),
+    };
+    // Mirror every static pre-connection fallback the backend applies, in the
+    // SAME order, so `tiered` is never over-reported. (An actual connection
+    // additionally needs valid credentials, which a static report cannot verify.)
+    if tiered {
+        tiered = tiered_static_checks_pass()?;
+    }
+
+    // Raw `.parse()` (no trim) mirrors the backend exactly: an unparseable value
+    // like `" 2048 "` falls back to the default, just as the backend applies it.
+    let threshold_bytes = match resolve_env_sync("LIBRA_STORAGE_THRESHOLD")? {
+        Some(raw) => raw.parse().unwrap_or(DEFAULT_STORAGE_THRESHOLD_BYTES),
+        None => DEFAULT_STORAGE_THRESHOLD_BYTES,
+    };
+    let cache_size_bytes = match resolve_env_sync("LIBRA_STORAGE_CACHE_SIZE")? {
+        Some(raw) => raw.parse().unwrap_or(DEFAULT_CACHE_SIZE_BYTES),
+        None => DEFAULT_CACHE_SIZE_BYTES,
+    };
+
+    Ok(CacheConfig {
+        storage_type,
+        tiered,
+        threshold_bytes,
+        cache_size_bytes,
+    })
+}
+
 impl ClientStorage {
     pub fn base_path(&self) -> &PathBuf {
         &self.base_path
@@ -376,8 +476,10 @@ impl ClientStorage {
         let local = LocalStorage::new(base_path.clone());
 
         let threshold = match resolve_env_sync("LIBRA_STORAGE_THRESHOLD") {
-            Ok(Some(raw_threshold)) => raw_threshold.parse().unwrap_or(1024 * 1024),
-            Ok(None) => 1024 * 1024,
+            Ok(Some(raw_threshold)) => raw_threshold
+                .parse()
+                .unwrap_or(DEFAULT_STORAGE_THRESHOLD_BYTES),
+            Ok(None) => DEFAULT_STORAGE_THRESHOLD_BYTES,
             Err(err) => {
                 return Self::storage_config_resolution_fallback(
                     &base_path,
@@ -389,8 +491,8 @@ impl ClientStorage {
 
         // Parse cache size (previously hardcoded/magic number)
         let disk_cache_limit_bytes = match resolve_env_sync("LIBRA_STORAGE_CACHE_SIZE") {
-            Ok(Some(raw_size)) => raw_size.parse().unwrap_or(200 * 1024 * 1024),
-            Ok(None) => 200 * 1024 * 1024,
+            Ok(Some(raw_size)) => raw_size.parse().unwrap_or(DEFAULT_CACHE_SIZE_BYTES),
+            Ok(None) => DEFAULT_CACHE_SIZE_BYTES,
             Err(err) => {
                 return Self::storage_config_resolution_fallback(
                     &base_path,

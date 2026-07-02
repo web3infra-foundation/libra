@@ -105,6 +105,7 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra cloud` | | Cloud backup and restore operations via Cloudflare D1/R2 | [cloud.md](cloud.md) |
+| `libra cache` | | Inspect the tiered-storage / LRU cache configuration (type, threshold, budget) | [cache.md](cache.md) |
 | `libra publish` | | Manage read-only Cloudflare Worker publishing | [publish.md](publish.md) |
 | `libra worktree` | `wt` | Manage multiple working trees attached to the repository | [worktree.md](worktree.md) |
 

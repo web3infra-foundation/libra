@@ -109,6 +109,7 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "maintenance",
     "completions",
     "logfile",
+    "cache",
 ];
 
 #[test]
