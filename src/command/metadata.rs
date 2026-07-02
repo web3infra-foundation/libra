@@ -19,8 +19,8 @@ use crate::{
         branch::Branch,
         config::{ConfigKv, is_sensitive_key},
         metadata::{
-            KEY_ARCHIVE, KEY_PROTECT, MetadataKv, MetadataScope, REPO_METADATA_PREFIX,
-            validate_key, validate_value,
+            KEY_ARCHIVE, KEY_PROTECT, MetadataKv, MetadataScope, MetadataValueType,
+            REPO_METADATA_PREFIX, validate_key, validate_typed_value, validate_value,
         },
     },
     utils::{
@@ -82,6 +82,16 @@ pub enum MetadataCommand {
         value: String,
         #[command(flatten)]
         scope: ScopeArgs,
+        /// Declare the value numeric: an integer or finite decimal with no
+        /// surrounding whitespace (validated at set time; stored exactly as
+        /// given, no canonicalization).
+        #[arg(long, conflicts_with = "binary")]
+        numeric: bool,
+        /// Declare the value binary: the VALUE argument is standard base64
+        /// (validated; the encoded text is stored, so raw payloads cap at
+        /// ~3/4 of the 1 MiB value limit). Decode with `| base64 -d`.
+        #[arg(long)]
+        binary: bool,
     },
     /// Remove one metadata key. `clear` is accepted as an alias (Lore parity).
     #[command(visible_alias = "clear")]
@@ -116,6 +126,8 @@ enum MetadataOutput {
         target: String,
         key: String,
         value: String,
+        /// The declared value type (`text`/`numeric`/`binary`) — additive field.
+        value_type: String,
         /// The overwritten value, when the key already existed.
         previous: Option<String>,
     },
@@ -267,17 +279,44 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
             }
             Ok(())
         }
-        MetadataCommand::Set { key, value, scope } => {
+        MetadataCommand::Set {
+            key,
+            value,
+            scope,
+            numeric,
+            binary,
+        } => {
             validate_key(&key).map_err(usage_error)?;
             validate_value(&value).map_err(usage_error)?;
+            let value_type = if numeric {
+                MetadataValueType::Numeric
+            } else if binary {
+                MetadataValueType::Binary
+            } else {
+                MetadataValueType::Text
+            };
+            validate_typed_value(value_type, &value).map_err(usage_error)?;
             let scope = resolve_scope(&scope).await?;
+            // The config store has no value_type column; repo typed values are
+            // an explicit follow-up (documented), not a silent downgrade.
+            if matches!(scope, Scope::Repo) && value_type != MetadataValueType::Text {
+                return Err(usage_error(format!(
+                    "--{} is not supported for --repo metadata (the config store is text-only)",
+                    value_type.as_str()
+                ))
+                .with_hint(
+                    "repo-scope typed values are a documented follow-up; store the value as text",
+                ));
+            }
             let previous = match &scope {
-                Scope::Branch(name) => MetadataKv::set(MetadataScope::Branch, name, &key, &value)
-                    .await
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to write metadata: {e}"))
-                            .with_stable_code(StableErrorCode::IoWriteFailed)
-                    })?,
+                Scope::Branch(name) => {
+                    MetadataKv::set(MetadataScope::Branch, name, &key, &value, value_type)
+                        .await
+                        .map_err(|e| {
+                            CliError::fatal(format!("failed to write metadata: {e}"))
+                                .with_stable_code(StableErrorCode::IoWriteFailed)
+                        })?
+                }
                 Scope::Repo => {
                     let full_key = format!("{REPO_METADATA_PREFIX}{key}");
                     let existing = ConfigKv::get(&full_key)
@@ -315,6 +354,7 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                 target: scope.target(),
                 key,
                 value,
+                value_type: value_type.as_str().to_string(),
                 previous,
             };
             if output.is_json() {

@@ -43,17 +43,23 @@ lands once, in the future branch-policy layer (lore.md 1.13), which will read
 these keys fail-closed (a corrupted value counts as protected, never silently
 unprotected).
 
-Values are plain text in v1 (typed values and revision/file scopes are the
-lore.md 1.10 follow-up, which extends this same command). The empty string is a
-legal value, distinct from an absent key. Keys are exact and case-sensitive
-(max 256 bytes, no whitespace); values are capped at 1 MiB.
+Values are text by default; `set --branch` also accepts **typed values**
+(lore.md 1.10): `--numeric` (an integer or finite decimal — no surrounding
+whitespace; validated at set time, stored exactly as given) and `--binary` (the
+VALUE argument is standard base64 — the encoded text is stored, so raw
+payloads cap at ~3/4 of the 1 MiB value limit; decode with `| base64 -d`).
+`get`/`list`/JSON report the stored `value_type`. Typed flags are refused for
+`--repo` (the config store is text-only; a documented follow-up). The empty
+string is a legal value, distinct from an absent key. Keys are exact and
+case-sensitive (max 256 bytes, no whitespace); values are capped at 1 MiB.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
 | `get <key>` | Print the value. Exits 1 when the key is absent (like `config` key misses). |
-| `set <key> <value>` | Create or overwrite. `--json` reports the `previous` value on overwrite. |
+| `set <key> <value>` | Create or overwrite. `--json` reports the `previous` value on overwrite and the `value_type`. |
+| `--numeric` / `--binary` | (`set --branch` only) Declare the value's type; mutually exclusive. Validation failures exit 129. |
 | `unset <key>` | Remove the key (alias: `clear`). Exits 1 when nothing was removed. |
 | `list` | Print `key=value` lines, key-ordered. |
 | `--branch <NAME>` | Operate on a local branch's metadata. |

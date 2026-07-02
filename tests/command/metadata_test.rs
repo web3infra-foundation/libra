@@ -130,6 +130,137 @@ fn metadata_repo_scope_is_config_kv_dual_surface() {
 }
 
 #[test]
+fn metadata_typed_values_roundtrip_and_validate() {
+    let repo = meta_repo();
+    let p = repo.path();
+    // numeric roundtrip: stored as given, value_type reported.
+    let set = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "set",
+            "build-count",
+            "42",
+            "--numeric",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    assert_cli_success(&set, "numeric set");
+    let json = parse_json_stdout(&set);
+    assert_eq!(json["data"]["value_type"].as_str(), Some("numeric"));
+    let get = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "get",
+            "build-count",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    let json = parse_json_stdout(&get);
+    assert_eq!(json["data"]["value"].as_str(), Some("42"));
+    assert_eq!(json["data"]["value_type"].as_str(), Some("numeric"));
+    // binary roundtrip: base64 text stored verbatim.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "metadata", "set", "blob", "aGVsbG8=", "--binary", "--branch", "main",
+            ],
+            p,
+        ),
+        "binary set",
+    );
+    let get = run_libra_command(&["metadata", "get", "blob", "--branch", "main"], p);
+    assert_eq!(String::from_utf8_lossy(&get.stdout).trim(), "aGVsbG8=");
+    // type overwrite updates value_type and reports previous.
+    let over = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "set",
+            "build-count",
+            "hi",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    let json = parse_json_stdout(&over);
+    assert_eq!(json["data"]["value_type"].as_str(), Some("text"));
+    assert_eq!(json["data"]["previous"].as_str(), Some("42"));
+    // validation failures are usage errors (129).
+    let bad = run_libra_command(
+        &[
+            "metadata",
+            "set",
+            "n",
+            "NaN",
+            "--numeric",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    assert_eq!(bad.status.code(), Some(129), "NaN rejected");
+    let padded = run_libra_command(
+        &[
+            "metadata",
+            "set",
+            "n",
+            " 12 ",
+            "--numeric",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    assert_eq!(
+        padded.status.code(),
+        Some(129),
+        "surrounding whitespace rejected (validate==store, no skew)"
+    );
+    let bad = run_libra_command(
+        &[
+            "metadata",
+            "set",
+            "b",
+            "not base64!",
+            "--binary",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    assert_eq!(bad.status.code(), Some(129), "bad base64 rejected");
+    // typed flags are mutually exclusive (clap) and refused on --repo.
+    let both = run_libra_command(
+        &[
+            "metadata",
+            "set",
+            "k",
+            "1",
+            "--numeric",
+            "--binary",
+            "--branch",
+            "main",
+        ],
+        p,
+    );
+    assert_eq!(both.status.code(), Some(129));
+    let repo_typed = run_libra_command(&["metadata", "set", "k", "1", "--numeric", "--repo"], p);
+    assert_eq!(repo_typed.status.code(), Some(129), "repo typed refused");
+    assert!(
+        String::from_utf8_lossy(&repo_typed.stderr).contains("text-only"),
+        "{}",
+        String::from_utf8_lossy(&repo_typed.stderr)
+    );
+}
+
+#[test]
 fn metadata_repo_sensitive_and_encrypted_keys_are_refused() {
     let repo = meta_repo();
     let p = repo.path();

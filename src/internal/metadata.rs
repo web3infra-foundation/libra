@@ -111,6 +111,72 @@ pub fn validate_value(value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// A metadata value's declared type (the `value_type` column reserved by the
+/// 1.5 migration). The stored `value` is always TEXT: the decimal string for
+/// `numeric`, standard base64 for `binary` (per the 1.5 design — raw payloads
+/// therefore cap at ~3/4 of [`MAX_VALUE_LEN`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataValueType {
+    #[default]
+    Text,
+    Numeric,
+    Binary,
+}
+
+impl MetadataValueType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MetadataValueType::Text => "text",
+            MetadataValueType::Numeric => "numeric",
+            MetadataValueType::Binary => "binary",
+        }
+    }
+}
+
+/// Validate a value against its declared type (set-time only — reads return
+/// whatever the store carries). `numeric` accepts an i64 or a FINITE f64
+/// (rejects empty/NaN/inf/overflow and surrounding whitespace), stored
+/// exactly as given; `binary` must be valid standard base64 (an empty payload
+/// is legal). Both remain bounded by [`validate_value`] on the stored text.
+pub fn validate_typed_value(
+    value_type: MetadataValueType,
+    value: &str,
+) -> std::result::Result<(), String> {
+    match value_type {
+        MetadataValueType::Text => Ok(()),
+        MetadataValueType::Numeric => {
+            // STRICT: no surrounding whitespace — the exact string that
+            // validates is the exact string stored (no trim-then-store skew).
+            let ok = value.parse::<i64>().is_ok()
+                || value.parse::<f64>().is_ok_and(|number| number.is_finite());
+            if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "invalid --numeric value '{value}' (expected an integer or finite decimal, no surrounding whitespace)"
+                ))
+            }
+        }
+        MetadataValueType::Binary => {
+            use base64::Engine;
+            if base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .is_ok()
+            {
+                Ok(())
+            } else {
+                // Do NOT echo the value: it can be up to 1 MiB of arbitrary
+                // (possibly secret) data — report only its length.
+                Err(format!(
+                    "invalid --binary value ({} bytes given; expected standard base64 — raw payloads cap at ~{}KiB)",
+                    value.len(),
+                    MAX_VALUE_LEN * 3 / 4 / 1024
+                ))
+            }
+        }
+    }
+}
+
 /// Whether a recorded flag value counts as SET, parsed FAIL-CLOSED: the
 /// explicit falsy spellings (`false`/`0`/`no`/`off`, case-insensitive,
 /// trimmed) count as off; EVERYTHING else — including garbage — counts as on,
@@ -162,6 +228,7 @@ impl MetadataKv {
         target: &str,
         key: &str,
         value: &str,
+        value_type: MetadataValueType,
     ) -> Result<Option<String>> {
         let previous = Self::get_with_conn(db, scope, target, key)
             .await?
@@ -172,7 +239,7 @@ impl MetadataKv {
             target: Set(target.to_string()),
             key: Set(key.to_string()),
             value: Set(value.to_string()),
-            value_type: Set("text".to_string()),
+            value_type: Set(value_type.as_str().to_string()),
             created_at: Set(now.clone()),
             updated_at: Set(now),
             ..Default::default()
@@ -202,9 +269,10 @@ impl MetadataKv {
         target: &str,
         key: &str,
         value: &str,
+        value_type: MetadataValueType,
     ) -> Result<Option<String>> {
         let db = get_db_conn_instance().await;
-        Self::set_with_conn(&db, scope, target, key, value).await
+        Self::set_with_conn(&db, scope, target, key, value, value_type).await
     }
 
     /// Delete one entry; returns whether a row was removed.
@@ -382,6 +450,26 @@ mod tests {
         assert!(validate_value("v").is_ok());
         assert!(validate_value(&"v".repeat(MAX_VALUE_LEN)).is_ok());
         assert!(validate_value(&"v".repeat(MAX_VALUE_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn typed_value_validation_matrix() {
+        use MetadataValueType::*;
+        for ok in ["42", "-7", "+1", "007", "3.14", "-0"] {
+            assert!(validate_typed_value(Numeric, ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "", "NaN", "inf", "1e999", "0x10", "1,000", "abc", " 12 ", "12 ",
+        ] {
+            assert!(validate_typed_value(Numeric, bad).is_err(), "{bad:?}");
+        }
+        for ok in ["", "aGVsbG8=", "AAAA"] {
+            assert!(validate_typed_value(Binary, ok).is_ok(), "{ok:?}");
+        }
+        for bad in ["not base64!", "aGVsbG8", "%%%"] {
+            assert!(validate_typed_value(Binary, bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_typed_value(Text, "anything at all").is_ok());
     }
 
     #[test]
