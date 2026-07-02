@@ -5,9 +5,10 @@ Merge one target into the current branch.
 ## Synopsis
 
 ```text
-libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] [--no-gpg-sign] <branch>
+libra merge [--ff-only | --no-ff | --squash | --no-commit] [-m <msg>] [--no-edit] [--stat | -n | --no-stat] [--verify-signatures | --no-verify-signatures] [--no-rerere-autoupdate] [--no-gpg-sign] [--dry-run] <branch>
 libra merge --continue
 libra merge --abort
+libra merge --restart
 ```
 
 ## Description
@@ -54,6 +55,8 @@ Libra still does not implement octopus merges, custom strategies, strategy optio
 | `--no-gpg-sign` | Do not GPG-sign the merge commit. No-op accepted for Git parity: Libra's merge never signs. (Git's `-S`/`--gpg-sign` is not implemented.) |
 | `--continue` | Finish an in-progress merge after conflicts have been resolved and staged. |
 | `--abort` | Restore the pre-merge HEAD, index, and working tree. |
+| `--dry-run` | Libra extension: preview the merge outcome writing **nothing** — reports fast-forward / already-up-to-date / clean three-way / would-conflict (with the paths). Exits 0 for a clean preview, 1 when the merge would conflict. Mutually exclusive with `--continue`/`--abort`/`--restart`/`--squash`/`--no-commit`. |
+| `--restart` | Libra extension (ports Lore's `branch merge restart`): abort the in-progress conflicted merge — discarding any resolution work, exactly like `--abort` — then immediately re-run the same merge against the recorded target commit, regenerating fresh conflict markers and state. Takes no branch and no merge options (the original `-m`/`--no-ff`/… are not replayed). Requires a **conflicted** merge: a staged `--no-commit` merge is refused (finish it with `--continue` or discard with `--abort`). |
 | `--json` | Emit a structured success envelope. |
 | `--machine` | Emit the same structured envelope as one compact JSON line. |
 | `--quiet` | Suppress human success output. |
@@ -65,6 +68,8 @@ libra merge feature-x
 libra merge refs/remotes/origin/main
 libra merge --continue
 libra merge --abort
+libra merge --dry-run feature-x
+libra merge --restart
 libra merge --json feature-x
 ```
 
@@ -77,6 +82,23 @@ When a merge conflicts:
 3. Run `libra merge --continue` to create the two-parent merge commit.
 
 Run `libra merge --abort` before continuing to restore the branch, index, and working tree to the pre-merge commit. `libra status` shows the in-progress merge target and the continue/abort commands while merge state exists.
+
+To throw away a botched resolution attempt and start over in one step, run `libra merge --restart`: it restores the pre-merge state exactly like `--abort` (any edits to conflicted files are **discarded**) and immediately re-runs the same merge against the recorded target commit — deterministic even if the branch has moved since — leaving fresh conflict markers and a fresh merge state. The re-run uses default merge options.
+
+## Dry Run
+
+`libra merge --dry-run <branch>` (a Libra extension — Git has no true merge dry-run) reports what the merge *would* do without writing anything: no HEAD, index, working-tree, reflog, merge-state, or object-store mutation (auto-merged blobs are computed in memory only). Because it is read-only it also works on a dirty working tree — note the preview does not validate cleanliness, so a real merge may still refuse where the preview succeeded.
+
+Outcomes and exit codes:
+
+| Preview outcome | Human output | Exit |
+|-----------------|--------------|------|
+| Fast-forward possible | `Would fast-forward` | 0 |
+| Already up to date | `Already up to date.` | 0 |
+| Clean three-way merge | `Would merge cleanly by the 'three-way' strategy.` | 0 |
+| Would conflict | `Would conflict in: <paths>` | 1 |
+
+The would-conflict exit of 1 is an outcome signal (like `merge-file` and `diff --exit-code`), deliberately distinct from the 128 a *real* conflicting merge exits with — the preview itself succeeded. With `--json`/`--machine` the summary carries `"dry_run": true` and, when conflicting, `"would_conflict": true` plus `conflicted_paths`; both keys are absent from every real merge's output (frozen schema).
 
 ## Human Output
 

@@ -369,6 +369,8 @@ pub(crate) async fn run_pull(
                 no_commit: args.no_commit,
                 // `pull` does not expose `--verify-signatures`.
                 verify_signatures: false,
+                // `pull` does not expose `--dry-run`.
+                dry_run: false,
             },
         )
         .await
@@ -737,6 +739,9 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             .with_hint("resolve conflicts, then run 'libra merge --continue'")
             .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
         merge::PullMergeError::NoMergeInProgress => {
+            CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
+        merge::PullMergeError::RestartWithoutConflicts => {
             CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
         merge::PullMergeError::InvalidConflictStyle(..) => CliError::failure(error.to_string())

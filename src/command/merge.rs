@@ -56,12 +56,16 @@ EXAMPLES:
     libra merge --verify-signatures feature-x  Require a valid PGP signature on the merged tip
     libra merge --continue         Finish an in-progress merge after resolving conflicts
     libra merge --abort            Restore the pre-merge HEAD, index, and worktree
+    libra merge --dry-run feature-x  Preview the outcome (ff/clean/conflict) writing nothing
+    libra merge --restart          Abort the conflicted merge and re-run it fresh
     libra merge --json feature-x   Structured JSON output for agents
 
 NOTES:
     Divergent single-head merges create a merge commit when paths do not
     conflict. Conflicts write markers and can be finished with --continue
-    or restored with --abort.";
+    or restored with --abort. --dry-run exits 1 when the merge would
+    conflict (0 for ff/up-to-date/clean); --restart discards resolution
+    work done so far, exactly like --abort, before re-running.";
 
 #[derive(Parser, Debug)]
 #[command(after_help = MERGE_EXAMPLES)]
@@ -76,6 +80,25 @@ pub struct MergeArgs {
     /// Abort an in-progress merge and restore the pre-merge state
     #[arg(long, conflicts_with = "continue_merge")]
     pub abort: bool,
+
+    /// Preview the merge outcome without writing anything (Libra extension —
+    /// Git has no true merge dry-run): reports whether merging `<branch>` would
+    /// fast-forward, already be up to date, merge cleanly, or conflict (and on
+    /// which paths). No index, worktree, HEAD, reflog, object, or merge-state
+    /// write happens. Exits 0 for a clean preview and 1 when the merge would
+    /// conflict.
+    #[arg(long = "dry-run", conflicts_with_all = ["continue_merge", "abort", "restart", "squash", "no_commit"])]
+    pub dry_run: bool,
+
+    /// Restart the in-progress conflicted merge from scratch (Libra extension,
+    /// porting Lore's `branch merge restart`): abort it — restoring the
+    /// pre-merge HEAD, index, and working tree exactly like `--abort`, which
+    /// DISCARDS any conflict resolution done so far — then immediately re-run
+    /// the same merge against the recorded target commit, regenerating fresh
+    /// conflict markers. The re-run uses default merge options (an original
+    /// `-m`/`--no-ff`/`--squash`/`--no-commit` is not replayed).
+    #[arg(long, conflicts_with_all = ["branch", "continue_merge", "abort", "ff_only", "no_ff", "message", "squash", "no_commit", "verify_signatures"])]
+    pub restart: bool,
 
     /// Refuse to merge unless the current branch can fast-forward to the target.
     #[arg(long = "ff-only", conflicts_with_all = ["no_ff", "continue_merge", "abort"])]
@@ -166,6 +189,14 @@ pub(crate) struct PullMergeSummary {
     pub aborted: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub continued: bool,
+    /// `--dry-run`: this summary is a preview; nothing was written. Absent from
+    /// JSON for every real merge (schema-frozen additive field).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// `--dry-run` only: the merge would stop on conflicts (in
+    /// `conflicted_paths`). Absent from JSON for every real merge.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub would_conflict: bool,
 }
 
 pub(crate) type MergeOutput = PullMergeSummary;
@@ -197,6 +228,11 @@ pub(crate) struct PullMergeOptions {
     /// Checked on the SAME loaded commit that is merged (no re-resolution), so the
     /// verified object is exactly the merged object. Always `false` for `pull`.
     pub verify_signatures: bool,
+    /// `libra merge --dry-run`: report the would-be outcome and write NOTHING —
+    /// no index/worktree/HEAD/reflog/merge-state mutation and no object-store
+    /// writes (auto-merged blobs are computed in memory only). Always `false`
+    /// for `pull`.
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +320,12 @@ pub(crate) enum PullMergeError {
     Conflicts { paths: String },
     #[error("no merge in progress")]
     NoMergeInProgress,
+    /// `--restart` on an in-progress merge that has NO conflicts (a staged
+    /// `--no-commit` merge). Restarting would silently discard the staged
+    /// result and re-run with default options (possibly fast-forwarding), so
+    /// it is refused — restart exists to redo a CONFLICTED merge.
+    #[error("no conflicted merge to restart (the in-progress merge has no conflicts)")]
+    RestartWithoutConflicts,
     #[error("merge already in progress")]
     MergeInProgress,
     #[error("you must resolve all merge conflicts before continuing")]
@@ -373,6 +415,10 @@ impl From<PullMergeError> for CliError {
                 .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
             PullMergeError::NoMergeInProgress => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
+            PullMergeError::RestartWithoutConflicts => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("finish the staged merge with 'libra merge --continue'")
+                .with_hint("or discard it with 'libra merge --abort'"),
             PullMergeError::InvalidConflictStyle(..) => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("set merge.conflictStyle to 'merge' (default) or 'diff3'"),
@@ -427,6 +473,14 @@ pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<(
     let result = run_merge(args, output).await.map_err(merge_error_to_cli)?;
     render_merge_output(&result, output)?;
     maybe_print_merge_stat(show_stat, &result, output).await;
+    // `--dry-run` that would conflict: the summary (human or JSON) has been
+    // rendered; exit 1 to signal the outcome — mirroring `merge-file`'s
+    // conflict-with-output exit and `diff --exit-code`. Deliberately not the
+    // 128 a REAL conflicting merge exits with: the preview succeeded and wrote
+    // nothing, so this is an outcome signal, not an error.
+    if result.dry_run && result.would_conflict {
+        return Err(CliError::silent_exit(1));
+    }
     Ok(())
 }
 
@@ -454,6 +508,11 @@ async fn maybe_print_merge_stat(show_stat: bool, result: &MergeOutput, output: &
 }
 
 async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput, MergeError> {
+    // `--restart` operates on the saved merge state alone; clap guarantees no
+    // branch positional or option flags accompany it (conflicts_with_all).
+    if args.restart {
+        return run_merge_restart(output).await;
+    }
     match (args.branch.as_deref(), args.continue_merge, args.abort) {
         (Some(branch), false, false) => {
             let options = PullMergeOptions {
@@ -465,6 +524,7 @@ async fn run_merge(args: MergeArgs, output: &OutputConfig) -> Result<MergeOutput
                 // `--verify-signatures` is enforced inside the merge on the loaded
                 // tip commit, so the verified object is exactly the merged object.
                 verify_signatures: args.verify_signatures,
+                dry_run: args.dry_run,
             };
             run_merge_for_pull_with_options(branch, branch, output, options).await
         }
@@ -499,6 +559,29 @@ fn render_merge_output(result: &MergeOutput, output: &OutputConfig) -> CliResult
         return emit_json_data("merge", result, output);
     }
     if output.quiet {
+        return Ok(());
+    }
+
+    if result.dry_run {
+        // `--dry-run`: preview phrasing — nothing was written, so the normal
+        // messages ("Fast-forward", "fix conflicts and then commit") would be
+        // misleading or outright wrong here.
+        if result.up_to_date {
+            info_println!(output, "Already up to date.");
+        } else if result.would_conflict {
+            info_println!(
+                output,
+                "Would conflict in: {}\n(dry run: nothing was written)",
+                result.conflicted_paths.join(", ")
+            );
+        } else if result.strategy == "fast-forward" {
+            info_println!(output, "Would fast-forward\n(dry run: nothing was written)");
+        } else {
+            info_println!(
+                output,
+                "Would merge cleanly by the 'three-way' strategy.\n(dry run: nothing was written)"
+            );
+        }
         return Ok(());
     }
 
@@ -568,7 +651,11 @@ pub(crate) async fn run_merge_for_pull_with_options(
 
     let Some(current_commit_id) = Head::current_commit().await else {
         let files_changed = count_changed_files(None, &target_commit)?;
-        apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        // `--dry-run`: report the fast-forward preview without applying it
+        // (count_changed_files is read-only).
+        if !options.dry_run {
+            apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        }
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
             old_commit: None,
@@ -579,6 +666,8 @@ pub(crate) async fn run_merge_for_pull_with_options(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+            dry_run: options.dry_run,
+            would_conflict: false,
         });
     };
     let current_commit: Commit =
@@ -604,12 +693,17 @@ pub(crate) async fn run_merge_for_pull_with_options(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+            dry_run: options.dry_run,
+            would_conflict: false,
         });
     }
 
     if lca.id == current_commit.id && !options.no_ff && !options.squash && !options.no_commit {
         let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
-        apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        // `--dry-run`: report the fast-forward preview without applying it.
+        if !options.dry_run {
+            apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        }
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
             old_commit: Some(current_commit_id.to_string()),
@@ -620,6 +714,8 @@ pub(crate) async fn run_merge_for_pull_with_options(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+            dry_run: options.dry_run,
+            would_conflict: false,
         });
     }
 
@@ -642,6 +738,7 @@ pub(crate) async fn run_merge_for_pull_with_options(
             message_override: options.message.clone(),
             squash: options.squash,
             no_commit: options.no_commit,
+            dry_run: options.dry_run,
             output,
         },
     )
@@ -669,6 +766,8 @@ struct ThreeWayMergeOptions<'a> {
     message_override: Option<String>,
     squash: bool,
     no_commit: bool,
+    /// Preview only: compute the outcome, write nothing (lore.md §1.3).
+    dry_run: bool,
     output: &'a OutputConfig,
 }
 
@@ -679,16 +778,49 @@ async fn perform_three_way_merge(
     upstream: &str,
     options: ThreeWayMergeOptions<'_>,
 ) -> Result<PullMergeSummary, PullMergeError> {
-    switch::ensure_clean_status(options.output)
-        .await
-        .map_err(|_| PullMergeError::DirtyWorktree)?;
+    // `--dry-run` never writes, so it may preview on a dirty tree (documented:
+    // the preview does not validate worktree cleanliness — a real merge may
+    // still refuse). Every other path must start clean.
+    if !options.dry_run {
+        switch::ensure_clean_status(options.output)
+            .await
+            .map_err(|_| PullMergeError::DirtyWorktree)?;
+    }
 
     let head_name = current_head_name().await?;
     let base_items = commit_tree_items(&base_commit)?;
     let our_items = commit_tree_items(&current_commit)?;
     let their_items = commit_tree_items(&target_commit)?;
-    let merge_result = merge_tree_items(&base_items, &our_items, &their_items)?;
+    // Under `--dry-run`, auto-merged blobs are computed in memory only
+    // (persist=false) so the preview writes nothing to the object store —
+    // under tiered storage a `save_object` would even upload to the remote.
+    let merge_result = merge_tree_items(&base_items, &our_items, &their_items, !options.dry_run)?;
     let files_changed = count_item_map_changes(&our_items, &merge_result.merged_items);
+
+    // `--dry-run`: the outcome is fully known here — report it and stop before
+    // the FIRST write (no merge state, index, worktree, HEAD, or reflog
+    // mutation; no conflict markers; conflict-style config not consulted).
+    if options.dry_run {
+        let conflicted_paths: Vec<String> = merge_result
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        let would_conflict = !conflicted_paths.is_empty();
+        return Ok(PullMergeSummary {
+            strategy: "three-way".to_string(),
+            old_commit: Some(current_commit.id.to_string()),
+            commit: None,
+            files_changed,
+            up_to_date: false,
+            parents: Vec::new(),
+            conflicted_paths,
+            aborted: false,
+            continued: false,
+            dry_run: true,
+            would_conflict,
+        });
+    }
 
     if !merge_result.conflicts.is_empty() {
         // Resolved only on the conflict path: a clean merge never renders
@@ -744,6 +876,8 @@ async fn perform_three_way_merge(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+            dry_run: false,
+            would_conflict: false,
         });
     }
 
@@ -773,6 +907,8 @@ async fn perform_three_way_merge(
             conflicted_paths: Vec::new(),
             aborted: false,
             continued: false,
+            dry_run: false,
+            would_conflict: false,
         });
     }
 
@@ -799,6 +935,8 @@ async fn perform_three_way_merge(
         conflicted_paths: Vec::new(),
         aborted: false,
         continued: false,
+        dry_run: false,
+        would_conflict: false,
     })
 }
 
@@ -1010,6 +1148,8 @@ async fn run_merge_continue(_output: &OutputConfig) -> Result<MergeOutput, Merge
         conflicted_paths: Vec::new(),
         aborted: false,
         continued: true,
+        dry_run: false,
+        would_conflict: false,
     })
 }
 
@@ -1022,10 +1162,17 @@ fn ensure_no_unstaged_changes_for_continue() -> Result<(), PullMergeError> {
     Ok(())
 }
 
-async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeError> {
-    let state = MergeState::load_required()?;
+/// Restore the pre-merge state recorded in `state`: HEAD back to `orig_head`
+/// (reflog entry labelled with `policy`), index/worktree reset to the original
+/// tree, and the merge state cleaned LAST — the crash-safe ordering shared by
+/// `--abort` and `--restart` (a crash mid-way leaves a resumable/abortable
+/// state, never a clean-looking tree with stale merge state).
+async fn restore_pre_merge_state(
+    state: &MergeState,
+    policy: &str,
+) -> Result<ObjectHash, MergeError> {
     let orig_head = object_hash_from_state("orig_head", &state.orig_head)?;
-    update_head_with_reflog(&state.head_name, orig_head, &state.target_ref, "abort").await?;
+    update_head_with_reflog(&state.head_name, orig_head, &state.target_ref, policy).await?;
     let original_commit: Commit =
         load_object(&orig_head).map_err(|error| MergeError::CurrentLoad {
             commit_id: orig_head.to_string(),
@@ -1033,6 +1180,37 @@ async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeErr
         })?;
     reset_index_and_workdir_to_tree(&original_commit.tree_id)?;
     MergeState::cleanup()?;
+    Ok(orig_head)
+}
+
+/// `merge --restart` (Libra extension, porting Lore's `branch merge restart`):
+/// abort the in-progress conflicted merge — restoring the pre-merge HEAD,
+/// index, and working tree exactly like `--abort`, DISCARDING any conflict
+/// resolution done so far — then immediately re-run the same merge against the
+/// RECORDED target commit (`state.target`, not the ref name, which may have
+/// moved since the original merge), regenerating fresh conflict markers and
+/// merge state. The re-run uses default merge options: the original
+/// `-m`/`--no-ff`/`--squash`/`--no-commit` are not persisted in [`MergeState`]
+/// and are not replayed (documented limitation).
+async fn run_merge_restart(output: &OutputConfig) -> Result<MergeOutput, MergeError> {
+    let state = MergeState::load_required()?;
+    // A `--no-commit` merge also persists MergeState — with no conflicts.
+    // Restarting it would silently discard the staged result and re-run with
+    // default options (possibly fast-forwarding); refuse instead.
+    if state.conflicted_paths.is_empty() {
+        return Err(MergeError::RestartWithoutConflicts);
+    }
+    let target = state.target.clone();
+    let target_ref = state.target_ref.clone();
+    restore_pre_merge_state(&state, "restart").await?;
+    // Deterministic replay: merge the recorded commit; keep the original ref
+    // name as the upstream label so the merge message/state read naturally.
+    run_merge_for_pull_with_options(&target, &target_ref, output, PullMergeOptions::default()).await
+}
+
+async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeError> {
+    let state = MergeState::load_required()?;
+    let orig_head = restore_pre_merge_state(&state, "abort").await?;
 
     Ok(PullMergeSummary {
         strategy: "abort".to_string(),
@@ -1044,6 +1222,8 @@ async fn run_merge_abort(_output: &OutputConfig) -> Result<MergeOutput, MergeErr
         conflicted_paths: Vec::new(),
         aborted: true,
         continued: false,
+        dry_run: false,
+        would_conflict: false,
     })
 }
 
@@ -1326,6 +1506,7 @@ fn resolve_three_way(
     base: Option<&MergeTreeEntry>,
     ours: Option<&MergeTreeEntry>,
     theirs: Option<&MergeTreeEntry>,
+    persist_merged_blobs: bool,
 ) -> Result<MergeResolution, PullMergeError> {
     let base_present = base.is_some();
     let ours_state = classify_relative_to_base(base, ours);
@@ -1357,7 +1538,8 @@ fn resolve_three_way(
             if ours == theirs {
                 MergeResolution::Use(theirs)
             } else if let Some(base) = base
-                && let Some(merged) = try_merge_blob_contents(base, ours, theirs)?
+                && let Some(merged) =
+                    try_merge_blob_contents(base, ours, theirs, persist_merged_blobs)?
             {
                 MergeResolution::Use(merged)
             } else {
@@ -1387,6 +1569,7 @@ fn try_merge_blob_contents(
     base: &MergeTreeEntry,
     ours: MergeTreeEntry,
     theirs: MergeTreeEntry,
+    persist: bool,
 ) -> Result<Option<MergeTreeEntry>, PullMergeError> {
     if base.mode != ours.mode
         || base.mode != theirs.mode
@@ -1405,12 +1588,17 @@ fn try_merge_blob_contents(
     };
 
     let merged_blob = Blob::from_content_bytes(merged_bytes);
-    save_object(&merged_blob, &merged_blob.id).map_err(|error| {
-        PullMergeError::TreeCreate(format!(
-            "failed to save auto-merged blob {}: {error}",
-            merged_blob.id
-        ))
-    })?;
+    // `--dry-run` (persist=false): the merged OID is computed in memory only —
+    // persisting here would write the object store (and, under tiered storage,
+    // upload to the durable tier) from a preview.
+    if persist {
+        save_object(&merged_blob, &merged_blob.id).map_err(|error| {
+            PullMergeError::TreeCreate(format!(
+                "failed to save auto-merged blob {}: {error}",
+                merged_blob.id
+            ))
+        })?;
+    }
 
     Ok(Some(MergeTreeEntry {
         hash: merged_blob.id,
@@ -1429,6 +1617,7 @@ fn merge_tree_items(
     base_items: &HashMap<PathBuf, MergeTreeEntry>,
     our_items: &HashMap<PathBuf, MergeTreeEntry>,
     their_items: &HashMap<PathBuf, MergeTreeEntry>,
+    persist_merged_blobs: bool,
 ) -> Result<ThreeWayMergeResult, PullMergeError> {
     let mut all_paths: HashSet<PathBuf> = base_items.keys().cloned().collect();
     all_paths.extend(our_items.keys().cloned());
@@ -1441,6 +1630,7 @@ fn merge_tree_items(
             base_items.get(&path),
             our_items.get(&path),
             their_items.get(&path),
+            persist_merged_blobs,
         )? {
             MergeResolution::Use(hash) => {
                 merged_items.insert(path, hash);
@@ -2114,6 +2304,10 @@ mod tests {
             "failed to read merge.conflictStyle config: db locked",
         );
         assert_eq!(
+            PullMergeError::RestartWithoutConflicts.to_string(),
+            "no conflicted merge to restart (the in-progress merge has no conflicts)",
+        );
+        assert_eq!(
             PullMergeError::TargetLoad {
                 commit_id: "deadbeef".to_string(),
                 detail: "object not found".to_string(),
@@ -2205,8 +2399,8 @@ mod tests {
         let mut their_items = HashMap::new();
         their_items.insert(path.clone(), theirs);
 
-        let result =
-            merge_tree_items(&base_items, &our_items, &their_items).expect("merge tree items");
+        let result = merge_tree_items(&base_items, &our_items, &their_items, true)
+            .expect("merge tree items");
 
         assert!(result.conflicts.is_empty());
         assert_eq!(result.merged_items.get(&path), Some(&theirs));

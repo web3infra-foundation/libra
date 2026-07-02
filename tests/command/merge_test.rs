@@ -1621,3 +1621,287 @@ fn test_merge_conflict_style_invalid_rejected() {
         "no conflict markers were written: {body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `merge --dry-run` (Libra extension, lore.md §1.3): preview the outcome
+// writing NOTHING — no HEAD/index/worktree/merge-state/object-store mutation.
+// Exit 0 for ff/up-to-date/clean; exit 1 when the merge would conflict.
+// ---------------------------------------------------------------------------
+
+/// HEAD commit hash via `--json log -n1`-free plumbing: read `.libra` HEAD via
+/// `rev-parse`-equivalent CLI (`libra rev-parse HEAD`).
+fn head_commit(p: &Path) -> String {
+    let out = run_libra_command(&["rev-parse", "HEAD"], p);
+    assert_cli_success(&out, "rev-parse HEAD");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Count every file under `.libra/objects` (loose objects), recursively.
+fn count_loose_objects(p: &Path) -> usize {
+    fn walk(dir: &Path, total: &mut usize) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, total);
+                } else {
+                    *total += 1;
+                }
+            }
+        }
+    }
+    let mut total = 0;
+    walk(&p.join(".libra").join("objects"), &mut total);
+    total
+}
+
+#[test]
+#[serial]
+fn test_merge_dry_run_fast_forward_writes_nothing() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(&run_libra_command(&["checkout", "feature"], p), "co feat");
+    commit_file(p, "file.txt", "feature content\n", "feature edit");
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+
+    let head_before = head_commit(p);
+    let out = run_libra_command(&["--json", "merge", "--dry-run", "feature"], p);
+    assert_cli_success(&out, "dry-run ff");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["strategy"], "fast-forward");
+    assert_eq!(json["data"]["dry_run"], true);
+    assert!(json["data"].get("would_conflict").is_none());
+    // Nothing was written: HEAD unchanged, worktree file absent, no state.
+    assert_eq!(head_commit(p), head_before, "HEAD must not move");
+    assert!(
+        !p.join("file.txt").exists(),
+        "worktree must not receive the feature file"
+    );
+    assert!(!p.join(".libra").join("merge-state.json").exists());
+}
+
+#[test]
+#[serial]
+fn test_merge_dry_run_already_up_to_date() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    let out = run_libra_command(&["--json", "merge", "--dry-run", "feature"], p);
+    assert_cli_success(&out, "dry-run up-to-date");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["up_to_date"], true);
+    assert_eq!(json["data"]["dry_run"], true);
+}
+
+#[test]
+#[serial]
+fn test_merge_dry_run_clean_three_way_writes_no_objects() {
+    // Divergent but non-overlapping edits: a clean three-way preview. The
+    // auto-merged blob must be computed in memory only — the object store,
+    // HEAD, index, worktree, and merge state all stay untouched.
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    commit_file(p, "shared.txt", "top\nl1\nl2\nl3\nbottom\n", "base shared");
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(&run_libra_command(&["checkout", "feature"], p), "co feat");
+    commit_file(
+        p,
+        "shared.txt",
+        "top\nFEATURE\nl2\nl3\nbottom\n",
+        "feature edit",
+    );
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+    commit_file(p, "shared.txt", "top\nl1\nl2\nMAIN\nbottom\n", "main edit");
+
+    let head_before = head_commit(p);
+    let objects_before = count_loose_objects(p);
+    let out = run_libra_command(&["--json", "merge", "--dry-run", "feature"], p);
+    assert_cli_success(&out, "dry-run clean three-way");
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["strategy"], "three-way");
+    assert_eq!(json["data"]["dry_run"], true);
+    assert!(json["data"]["commit"].is_null(), "no merge commit created");
+    assert!(json["data"].get("would_conflict").is_none());
+
+    assert_eq!(head_commit(p), head_before, "HEAD must not move");
+    assert_eq!(
+        count_loose_objects(p),
+        objects_before,
+        "a dry-run must not write objects (auto-merged blobs stay in memory)"
+    );
+    assert!(!p.join(".libra").join("merge-state.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(p.join("shared.txt")).unwrap(),
+        "top\nl1\nl2\nMAIN\nbottom\n",
+        "worktree untouched"
+    );
+}
+
+#[test]
+#[serial]
+fn test_merge_dry_run_conflict_exits_1_and_writes_nothing() {
+    let temp_repo = create_diverged_repo_for_conflict();
+    let p = temp_repo.path();
+    let head_before = head_commit(p);
+
+    let out = run_libra_command(&["--json", "merge", "--dry-run", "feature"], p);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "would-conflict preview exits 1 (an outcome signal, not the 128 of a real conflict)"
+    );
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["dry_run"], true);
+    assert_eq!(json["data"]["would_conflict"], true);
+    assert!(
+        json["data"]["conflicted_paths"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("shared.txt"))),
+        "conflicted_paths names the path: {json}"
+    );
+
+    assert_eq!(head_commit(p), head_before, "HEAD must not move");
+    assert!(!p.join(".libra").join("merge-state.json").exists());
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(
+        !body.contains("<<<<<<<"),
+        "no conflict markers written by a preview: {body:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_merge_json_schema_freeze_no_dry_run_fields_on_real_merge() {
+    // A REAL merge's JSON must not grow the dry_run/would_conflict keys.
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    let out = run_libra_command(&["--json", "merge", "feature"], p);
+    assert_cli_success(&out, "real merge");
+    let json = parse_json_stdout(&out);
+    assert!(json["data"].get("dry_run").is_none());
+    assert!(json["data"].get("would_conflict").is_none());
+}
+
+#[test]
+#[serial]
+fn test_merge_dry_run_clap_exclusions() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    for argv in [
+        &["merge", "--dry-run", "--continue"][..],
+        &["merge", "--dry-run", "--abort"][..],
+        &["merge", "--dry-run", "--squash", "feature"][..],
+        &["merge", "--restart", "feature"][..],
+        &["merge", "--restart", "--no-ff"][..],
+        &["merge", "--restart", "--dry-run"][..],
+    ] {
+        let out = run_libra_command(argv, p);
+        assert_eq!(
+            out.status.code(),
+            Some(129),
+            "clap must reject {argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `merge --restart` (Libra extension, lore.md §1.3): abort the in-progress
+// conflicted merge (discarding resolution work, exactly like --abort) and
+// re-run the SAME merge against the recorded target commit.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_merge_restart_regenerates_fresh_conflict() {
+    let temp_repo = create_diverged_repo_for_conflict();
+    let p = temp_repo.path();
+    let head_before = head_commit(p);
+    let out = run_libra_command(&["merge", "feature"], p);
+    assert_eq!(out.status.code(), Some(128), "initial conflict");
+
+    // Simulate partial resolution work that --restart must DISCARD.
+    std::fs::write(p.join("shared.txt"), "half-resolved\n").unwrap();
+
+    let out = run_libra_command(&["merge", "--restart"], p);
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "the re-run reproduces the conflict (normal merge exit): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(
+        body.contains("<<<<<<< HEAD") && !body.contains("half-resolved"),
+        "fresh markers regenerated, user edits discarded: {body:?}"
+    );
+    assert!(
+        p.join(".libra").join("merge-state.json").exists(),
+        "a fresh merge state exists after restart"
+    );
+    assert_eq!(head_commit(p), head_before, "HEAD is back at orig_head");
+    // The restarted merge is resumable exactly like a normal conflicted merge.
+    assert_cli_success(&run_libra_command(&["merge", "--abort"], p), "abort");
+}
+
+#[test]
+#[serial]
+fn test_merge_restart_without_merge_in_progress_errors() {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    let out = run_libra_command(&["merge", "--restart"], p);
+    assert_eq!(out.status.code(), Some(128), "no merge in progress");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no merge in progress"),
+        "actionable error: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_merge_restart_refuses_staged_no_commit_merge() {
+    // `--no-commit` persists MergeState with NO conflicts; --restart must
+    // refuse (it would discard the staged result and could fast-forward),
+    // leaving the staged merge fully intact.
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    commit_file(p, "shared.txt", "top\nl1\nl2\nl3\nbottom\n", "base shared");
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(&run_libra_command(&["checkout", "feature"], p), "co feat");
+    commit_file(
+        p,
+        "shared.txt",
+        "top\nFEATURE\nl2\nl3\nbottom\n",
+        "feature edit",
+    );
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+    commit_file(p, "shared.txt", "top\nl1\nl2\nMAIN\nbottom\n", "main edit");
+
+    assert_cli_success(
+        &run_libra_command(&["merge", "--no-commit", "feature"], p),
+        "clean --no-commit merge",
+    );
+    assert!(p.join(".libra").join("merge-state.json").exists());
+    let head_before = head_commit(p);
+
+    let out = run_libra_command(&["merge", "--restart"], p);
+    assert_eq!(out.status.code(), Some(128), "restart refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no conflicted merge to restart"),
+        "actionable refusal: {stderr}"
+    );
+    // The staged no-commit merge is untouched and still finishable.
+    assert_eq!(head_commit(p), head_before, "HEAD untouched");
+    assert!(
+        p.join(".libra").join("merge-state.json").exists(),
+        "staged merge state preserved"
+    );
+    assert_cli_success(
+        &run_libra_command(&["merge", "--continue"], p),
+        "staged merge still finishable",
+    );
+}
