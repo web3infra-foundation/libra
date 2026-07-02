@@ -1541,3 +1541,83 @@ fn test_merge_conflict_is_line_level() {
         "shared lines must not be inside the conflict region: {body:?}"
     );
 }
+
+/// Build a one-line both-modified conflict repo (`shared.txt`) with `feature`
+/// diverging from `main`, without running the merge yet.
+fn create_diverged_repo_for_conflict() -> tempfile::TempDir {
+    let temp_repo = create_committed_repo_via_cli();
+    let p = temp_repo.path();
+    commit_file(
+        p,
+        "shared.txt",
+        "top\nl1\nORIG\nl3\nbottom\n",
+        "base shared",
+    );
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], p),
+        "co feature",
+    );
+    commit_file(
+        p,
+        "shared.txt",
+        "top\nl1\nFEATURE\nl3\nbottom\n",
+        "feature edit",
+    );
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+    commit_file(p, "shared.txt", "top\nl1\nMAIN\nl3\nbottom\n", "main edit");
+    temp_repo
+}
+
+/// `merge.conflictStyle = diff3` adds the `||||||| base` block with the
+/// common-ancestor content between ours and the `=======` separator
+/// (lore.md §1.3); the default two-marker style stays unchanged when unset.
+#[test]
+#[serial]
+fn test_merge_conflict_diff3_markers() {
+    let temp_repo = create_diverged_repo_for_conflict();
+    let p = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.conflictStyle", "diff3"], p),
+        "set conflictStyle",
+    );
+
+    let out = run_libra_command(&["merge", "feature"], p);
+    assert_eq!(out.status.code(), Some(128), "merge conflict exits 128");
+    let body = std::fs::read_to_string(p.join("shared.txt")).expect("read conflict");
+    assert!(
+        body.contains("<<<<<<< HEAD\nMAIN\n||||||| base\nORIG\n=======\nFEATURE\n"),
+        "diff3 emits the base block between ours and the separator: {body:?}"
+    );
+}
+
+/// An unsupported `merge.conflictStyle` (e.g. the unimplemented `zdiff3`) is a
+/// hard error when a conflict must be rendered — never a silent fall-back to
+/// the default marker format — and nothing is written (no merge state).
+#[test]
+#[serial]
+fn test_merge_conflict_style_invalid_rejected() {
+    let temp_repo = create_diverged_repo_for_conflict();
+    let p = temp_repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.conflictStyle", "zdiff3"], p),
+        "set conflictStyle",
+    );
+
+    let out = run_libra_command(&["merge", "feature"], p);
+    assert_eq!(out.status.code(), Some(128), "invalid style is fatal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported merge.conflictStyle 'zdiff3'"),
+        "actionable error names the bad value: {stderr}"
+    );
+    assert!(
+        !p.join(".libra").join("merge-state.json").exists(),
+        "no merge state is left behind when the style is rejected"
+    );
+    let body = std::fs::read_to_string(p.join("shared.txt")).expect("read file");
+    assert!(
+        !body.contains("<<<<<<<"),
+        "no conflict markers were written: {body:?}"
+    );
+}

@@ -123,6 +123,17 @@ enum CherryPickError {
 
     #[error("failed to update cherry-pick state: {0}")]
     SaveFailed(String),
+
+    /// The repository configures an unsupported `merge.conflictStyle` value —
+    /// a hard error before any conflicted index/worktree state is written,
+    /// consistent with `libra merge`.
+    #[error("unsupported merge.conflictStyle '{0}' (expected 'merge' or 'diff3')")]
+    InvalidConflictStyle(String),
+
+    /// The `merge.conflictStyle` config could not be read (config-store I/O
+    /// failure) — never a silent default-style fall-back.
+    #[error("failed to read merge.conflictStyle config: {0}")]
+    ConflictStyleRead(String),
 }
 
 impl CherryPickError {
@@ -145,6 +156,8 @@ impl CherryPickError {
             Self::WrongBranch { .. } => StableErrorCode::RepoStateInvalid,
             Self::LoadObject(_) => StableErrorCode::IoReadFailed,
             Self::SaveFailed(_) => StableErrorCode::IoWriteFailed,
+            Self::InvalidConflictStyle(_) => StableErrorCode::RepoStateInvalid,
+            Self::ConflictStyleRead(_) => StableErrorCode::IoReadFailed,
         }
     }
 }
@@ -208,6 +221,12 @@ impl From<CherryPickError> for CliError {
             CherryPickError::SaveFailed(_) => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("check filesystem permissions and repository writability"),
+            CherryPickError::InvalidConflictStyle(_) => CliError::failure(message)
+                .with_stable_code(stable_code)
+                .with_hint("set merge.conflictStyle to 'merge' (default) or 'diff3'"),
+            CherryPickError::ConflictStyleRead(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("check repository integrity and retry"),
         }
     }
 }
@@ -226,6 +245,11 @@ enum CherryPickSingleError {
     Conflict(String),
     LoadObject(String),
     SaveFailed(String),
+    /// Unsupported `merge.conflictStyle` value — raised BEFORE the conflicted
+    /// index/worktree state is written, so nothing is mutated.
+    InvalidConflictStyle(String),
+    /// `merge.conflictStyle` config-store read failure.
+    ConflictStyleRead(String),
 }
 
 /// Serializable snapshot of the commit-modifier options for a cherry-pick
@@ -599,6 +623,8 @@ fn map_single_error(err: CherryPickSingleError, commit_label: &str) -> CherryPic
         },
         CherryPickSingleError::LoadObject(r) => CherryPickError::LoadObject(r),
         CherryPickSingleError::SaveFailed(r) => CherryPickError::SaveFailed(r),
+        CherryPickSingleError::InvalidConflictStyle(v) => CherryPickError::InvalidConflictStyle(v),
+        CherryPickSingleError::ConflictStyleRead(r) => CherryPickError::ConflictStyleRead(r),
     }
 }
 
@@ -1175,6 +1201,21 @@ async fn cherry_pick_single_commit(
     }
 
     if !conflicts.is_empty() {
+        // Honor the Git-compatible `merge.conflictStyle` config (merge/diff3)
+        // for the line-level markers, same as `libra merge` (lore.md §1.3).
+        // Resolved FIRST — before the conflicted index is saved or the worktree
+        // is touched — so an invalid config errors with nothing mutated.
+        let conflict_style =
+            super::merge::conflict_style_from_config()
+                .await
+                .map_err(|e| match e {
+                    super::merge::ConflictStyleError::Invalid(value) => {
+                        CherryPickSingleError::InvalidConflictStyle(value)
+                    }
+                    super::merge::ConflictStyleError::Read(detail) => {
+                        CherryPickSingleError::ConflictStyleRead(detail)
+                    }
+                })?;
         index
             .save(&index_file)
             .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save index: {e}")))?;
@@ -1183,7 +1224,14 @@ async fn cherry_pick_single_commit(
         reset_workdir_tracked_only(&current_index, &index)?;
         let short_src = short_display_hash(&commit_id.to_string()).to_string();
         for (path, ours_hash, their_hash, base_hash) in &conflicts {
-            write_conflict_markers_file(path, ours_hash, their_hash, base_hash, &short_src)?;
+            write_conflict_markers_file(
+                path,
+                ours_hash,
+                their_hash,
+                base_hash,
+                &short_src,
+                conflict_style,
+            )?;
         }
         // rerere: record the preimage of each just-written conflict and replay a
         // previously recorded resolution if one matches. A no-op unless
@@ -1521,6 +1569,7 @@ fn write_conflict_markers_file(
     their_hash: &Option<ObjectHash>,
     base_hash: &Option<ObjectHash>,
     short_src: &str,
+    conflict_style: diffy::ConflictStyle,
 ) -> Result<(), CherryPickSingleError> {
     fn side_bytes(hash: &Option<ObjectHash>) -> Option<Vec<u8>> {
         hash.as_ref()
@@ -1533,10 +1582,14 @@ fn write_conflict_markers_file(
     // Line-level merge applies only when both sides are present and text; the
     // shared helper returns None otherwise so we fall back to whole-file markers.
     let content: Vec<u8> = match (&ours_bytes, &theirs_bytes) {
-        (Some(ours), Some(theirs)) => {
-            super::merge::render_line_level_conflict(base_bytes.as_deref(), ours, theirs, short_src)
-                .unwrap_or_else(|| whole_file_conflict(ours, theirs, short_src))
-        }
+        (Some(ours), Some(theirs)) => super::merge::render_line_level_conflict(
+            base_bytes.as_deref(),
+            ours,
+            theirs,
+            short_src,
+            conflict_style,
+        )
+        .unwrap_or_else(|| whole_file_conflict(ours, theirs, short_src)),
         _ => whole_file_conflict(
             ours_bytes.as_deref().unwrap_or(&[]),
             theirs_bytes.as_deref().unwrap_or(&[]),

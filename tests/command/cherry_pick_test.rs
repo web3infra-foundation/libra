@@ -1545,6 +1545,68 @@ fn conflict_sequence_repo() -> (tempfile::TempDir, String, String) {
     (repo, f1, f2)
 }
 
+/// `merge.conflictStyle = diff3` is honored by cherry-pick's line-level markers
+/// (parity with `libra merge` — Git honors the config for both): the base block
+/// appears as `||||||| base` with the common-ancestor content (lore.md §1.3).
+#[test]
+fn cherry_pick_conflict_honors_diff3_style() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.conflictStyle", "diff3"], p),
+        "set conflictStyle",
+    );
+    let out = run_libra_command(&["cherry-pick", &feat], p);
+    assert_eq!(out.status.code(), Some(128), "conflict exit");
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(
+        body.contains("||||||| base\nbase\n=======\n"),
+        "diff3 base block with ancestor content: {body:?}"
+    );
+}
+
+/// An unsupported `merge.conflictStyle` is a hard error raised BEFORE the
+/// conflicted index/worktree state is written: no markers, no persisted
+/// sequencer state (a follow-up pick is NOT blocked), worktree untouched.
+#[test]
+fn cherry_pick_conflict_style_invalid_rejected_before_mutation() {
+    let (repo, feat) = conflict_repo();
+    let p = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.conflictStyle", "zdiff3"], p),
+        "set conflictStyle",
+    );
+    let out = run_libra_command(&["cherry-pick", &feat], p);
+    assert_eq!(out.status.code(), Some(128), "invalid style is fatal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported merge.conflictStyle 'zdiff3'"),
+        "actionable error names the bad value: {stderr}"
+    );
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert_eq!(
+        body, "main side\n",
+        "worktree untouched — no markers, no partial reset"
+    );
+    // No sequencer state persisted: fixing the config lets a fresh pick proceed
+    // (it conflicts normally rather than reporting an in-progress pick).
+    assert_cli_success(
+        &run_libra_command(&["config", "merge.conflictStyle", "merge"], p),
+        "fix conflictStyle",
+    );
+    let retry = run_libra_command(&["cherry-pick", &feat], p);
+    let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+    assert!(
+        !retry_stderr.contains("already in progress"),
+        "no stale sequencer state was left behind: {retry_stderr}"
+    );
+    let body = std::fs::read_to_string(p.join("shared.txt")).unwrap();
+    assert!(
+        body.contains("<<<<<<< HEAD"),
+        "retry conflicts normally with markers: {body}"
+    );
+}
+
 /// A conflict exits 128/LBR-CONFLICT-001, writes worktree markers, and persists
 /// resumable state (proven by a follow-up new pick being blocked).
 #[test]

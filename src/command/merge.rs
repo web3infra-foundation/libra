@@ -32,6 +32,7 @@ use crate::{
     info_println,
     internal::{
         branch::{Branch, BranchStoreError},
+        config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -258,6 +259,17 @@ pub(crate) enum PullMergeError {
     MissingAction,
     #[error("merge accepts either a branch argument, --continue, or --abort")]
     ConflictingAction,
+    /// The repository configures an unsupported `merge.conflictStyle` value.
+    /// Surfaced only when a conflict actually needs rendering, and a hard error
+    /// rather than a silent fall-back to the default style — a typo must not
+    /// quietly change the conflict-marker format (`zdiff3` is not implemented).
+    #[error("unsupported merge.conflictStyle '{0}' (expected 'merge' or 'diff3')")]
+    InvalidConflictStyle(String),
+    /// The `merge.conflictStyle` config could not be read (config-store I/O
+    /// failure) — surfaced as an I/O error, never a silent default-style
+    /// fall-back that would ignore a configured `diff3`.
+    #[error("failed to read merge.conflictStyle config: {0}")]
+    ConflictStyleRead(String),
     #[error("{0} - not something we can merge")]
     InvalidTarget(String),
     #[error("failed to load merge target '{commit_id}': {detail}")]
@@ -361,6 +373,12 @@ impl From<PullMergeError> for CliError {
                 .with_hint("or run 'libra merge --abort' to restore the pre-merge state"),
             PullMergeError::NoMergeInProgress => CliError::failure(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid),
+            PullMergeError::InvalidConflictStyle(..) => CliError::failure(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("set merge.conflictStyle to 'merge' (default) or 'diff3'"),
+            PullMergeError::ConflictStyleRead(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
             PullMergeError::StateLoad(..) | PullMergeError::IndexLoad(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -673,6 +691,12 @@ async fn perform_three_way_merge(
     let files_changed = count_item_map_changes(&our_items, &merge_result.merged_items);
 
     if !merge_result.conflicts.is_empty() {
+        // Resolved only on the conflict path: a clean merge never renders
+        // markers, so an invalid style config cannot block it.
+        let conflict_style = conflict_style_from_config().await.map_err(|e| match e {
+            ConflictStyleError::Invalid(value) => PullMergeError::InvalidConflictStyle(value),
+            ConflictStyleError::Read(detail) => PullMergeError::ConflictStyleRead(detail),
+        })?;
         write_conflicted_merge_state(MergeConflictInput {
             head_name,
             upstream: upstream.to_string(),
@@ -684,6 +708,7 @@ async fn perform_three_way_merge(
             base_items,
             our_items,
             their_items,
+            conflict_style,
         })?;
         // rerere: record the preimage of each merge conflict just written and
         // replay a recorded resolution if one matches. A no-op unless
@@ -777,6 +802,42 @@ async fn perform_three_way_merge(
     })
 }
 
+/// Resolve the conflict-marker style from the Git-compatible
+/// `merge.conflictStyle` config key (lore.md §1.3): unset/`merge` → the default
+/// two-marker style, `diff3` → additionally emit the `||||||| base` block.
+/// Matching Git, this is config-only — `git merge` has no CLI style flag. An
+/// unrecognized value (including the unimplemented `zdiff3`) is a hard error so
+/// a typo never silently changes the marker format. Consulted only when a
+/// conflict actually needs rendering; shared by `merge`/`pull` and
+/// `cherry-pick`, which use the same line-level renderer.
+/// Why [`conflict_style_from_config`] could not produce a style: the configured
+/// value is unsupported, or the config store itself could not be read. The two
+/// are distinct on purpose — a read failure must surface as an I/O problem, not
+/// silently fall back to the default style (which could ignore a configured
+/// `diff3`).
+pub(crate) enum ConflictStyleError {
+    Invalid(String),
+    Read(String),
+}
+
+pub(crate) async fn conflict_style_from_config() -> Result<diffy::ConflictStyle, ConflictStyleError>
+{
+    // Case-insensitive variable lookup: Git config variable names are
+    // case-insensitive, and Libra stores keys verbatim, so both
+    // `merge.conflictStyle` and `merge.conflictstyle` spellings must match.
+    let entry = ConfigKv::get_var_case_insensitive("merge.", "conflictStyle")
+        .await
+        .map_err(|error| ConflictStyleError::Read(error.to_string()))?;
+    match entry
+        .map(|entry| entry.value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("merge") => Ok(diffy::ConflictStyle::Merge),
+        Some("diff3") => Ok(diffy::ConflictStyle::Diff3),
+        Some(other) => Err(ConflictStyleError::Invalid(other.to_string())),
+    }
+}
+
 struct MergeConflictInput {
     head_name: String,
     upstream: String,
@@ -788,6 +849,8 @@ struct MergeConflictInput {
     base_items: HashMap<PathBuf, MergeTreeEntry>,
     our_items: HashMap<PathBuf, MergeTreeEntry>,
     their_items: HashMap<PathBuf, MergeTreeEntry>,
+    /// Marker style for conflicted paths, resolved from `merge.conflictStyle`.
+    conflict_style: diffy::ConflictStyle,
 }
 
 fn write_conflicted_merge_state(input: MergeConflictInput) -> Result<(), PullMergeError> {
@@ -877,8 +940,15 @@ fn write_conflicted_merge_state(input: MergeConflictInput) -> Result<(), PullMer
     }
 
     for (path, kind) in &input.conflicts {
-        write_conflict_markers(&workdir, path, marker_eol, &theirs_abbrev, *kind)
-            .map_err(PullMergeError::WorkdirReset)?;
+        write_conflict_markers(
+            &workdir,
+            path,
+            marker_eol,
+            &theirs_abbrev,
+            *kind,
+            input.conflict_style,
+        )
+        .map_err(PullMergeError::WorkdirReset)?;
     }
 
     Ok(())
@@ -1467,6 +1537,7 @@ fn write_conflict_markers(
     marker_eol: &str,
     commit_abbrev: &str,
     kind: ConflictKind,
+    conflict_style: diffy::ConflictStyle,
 ) -> Result<(), String> {
     let content: Vec<u8> = match kind {
         ConflictKind::BothChanged { base, ours, theirs } => {
@@ -1478,6 +1549,7 @@ fn write_conflict_markers(
                 &theirs_blob.data,
                 marker_eol,
                 commit_abbrev,
+                conflict_style,
             )?
         }
         ConflictKind::OursModifiedTheirsDeleted { ours } => {
@@ -1518,6 +1590,7 @@ fn both_changed_conflict_content(
     theirs: &[u8],
     marker_eol: &str,
     commit_abbrev: &str,
+    conflict_style: diffy::ConflictStyle,
 ) -> Result<Vec<u8>, String> {
     let whole_file = || {
         format!(
@@ -1538,10 +1611,14 @@ fn both_changed_conflict_content(
         }
         None => None,
     };
-    Ok(
-        render_line_level_conflict(base_data.as_deref(), ours, theirs, commit_abbrev)
-            .unwrap_or_else(whole_file),
+    Ok(render_line_level_conflict(
+        base_data.as_deref(),
+        ours,
+        theirs,
+        commit_abbrev,
+        conflict_style,
     )
+    .unwrap_or_else(whole_file))
 }
 
 /// Render a both-modified conflict as a line-level three-way merge, matching
@@ -1560,6 +1637,7 @@ pub(crate) fn render_line_level_conflict(
     ours: &[u8],
     theirs: &[u8],
     commit_label: &str,
+    conflict_style: diffy::ConflictStyle,
 ) -> Option<Vec<u8>> {
     if std::str::from_utf8(ours).is_err()
         || std::str::from_utf8(theirs).is_err()
@@ -1574,7 +1652,7 @@ pub(crate) fn render_line_level_conflict(
     // only `diffy`'s emitted markers.
     let marker_len = conflict_marker_length(&[base.unwrap_or(&[]), ours, theirs]);
     let mut options = diffy::MergeOptions::new();
-    options.set_conflict_style(diffy::ConflictStyle::Merge);
+    options.set_conflict_style(conflict_style);
     options.set_conflict_marker_length(marker_len);
     match options.merge_bytes(base.unwrap_or(&[]), ours, theirs) {
         // A genuine conflict: `diffy` returns the file with line-level markers
@@ -1627,10 +1705,15 @@ fn conflict_marker_length(sides: &[&[u8]]) -> usize {
 fn relabel_conflict_markers(conflicted: Vec<u8>, marker_len: usize, commit_label: &str) -> Vec<u8> {
     let open = "<".repeat(marker_len);
     let close = ">".repeat(marker_len);
+    let bars = "|".repeat(marker_len);
     let ours_marker = format!("{open} ours");
     let theirs_marker = format!("{close} theirs");
+    // `diffy`'s diff3 base marker; only emitted under ConflictStyle::Diff3.
+    let original_marker = format!("{bars} original");
     let head_marker = format!("{open} HEAD");
     let label_marker = format!("{close} {commit_label}");
+    // Match the `||||||| base` label convention `restore --conflict=diff3` uses.
+    let base_marker = format!("{bars} base");
 
     let text = String::from_utf8_lossy(&conflicted);
     // `split('\n')` + `join('\n')` round-trips exactly (including a trailing
@@ -1642,6 +1725,8 @@ fn relabel_conflict_markers(conflicted: Vec<u8>, marker_len: usize, commit_label
                 head_marker.as_str()
             } else if line == theirs_marker {
                 label_marker.as_str()
+            } else if line == original_marker {
+                base_marker.as_str()
             } else {
                 line
             }
@@ -1824,8 +1909,14 @@ mod tests {
         let base = b"top\nl1\nl2\nl3\nbottom\n";
         let ours = b"top\nl1\nMAIN\nl3\nbottom\n";
         let theirs = b"top\nl1\nOTHER\nl3\nbottom\n";
-        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234")
-            .expect("a real text conflict renders line-level markers");
+        let out = render_line_level_conflict(
+            Some(base),
+            ours,
+            theirs,
+            "abc1234",
+            diffy::ConflictStyle::Merge,
+        )
+        .expect("a real text conflict renders line-level markers");
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "top\nl1\n<<<<<<< HEAD\nMAIN\n=======\nOTHER\n>>>>>>> abc1234\nl3\nbottom\n",
@@ -1841,7 +1932,14 @@ mod tests {
         let base = b"<<<<<<< ours\nl2\n";
         let ours = b"<<<<<<< ours\nMAIN\n";
         let theirs = b"<<<<<<< ours\nOTHER\n";
-        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234").unwrap();
+        let out = render_line_level_conflict(
+            Some(base),
+            ours,
+            theirs,
+            "abc1234",
+            diffy::ConflictStyle::Merge,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.starts_with("<<<<<<< ours\n"),
@@ -1867,7 +1965,14 @@ mod tests {
         let base = b"prefix <<<<<<< ours\nl2\n";
         let ours = b"prefix <<<<<<< ours\nMAIN\n";
         let theirs = b"prefix <<<<<<< ours\nOTHER\n";
-        let out = render_line_level_conflict(Some(base), ours, theirs, "abc1234").unwrap();
+        let out = render_line_level_conflict(
+            Some(base),
+            ours,
+            theirs,
+            "abc1234",
+            diffy::ConflictStyle::Merge,
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.starts_with("prefix <<<<<<< ours\n"),
@@ -1886,9 +1991,76 @@ mod tests {
     #[test]
     fn render_line_level_conflict_skips_binary_and_clean_merges() {
         // Binary side -> None (caller falls back to whole-file markers).
-        assert!(render_line_level_conflict(None, b"a\n", &[0xff, 0xfe], "x").is_none());
+        assert!(
+            render_line_level_conflict(
+                None,
+                b"a\n",
+                &[0xff, 0xfe],
+                "x",
+                diffy::ConflictStyle::Merge
+            )
+            .is_none()
+        );
         // No real text conflict (only one side changed) -> None.
-        assert!(render_line_level_conflict(Some(b"a\n"), b"a\n", b"b\n", "x").is_none());
+        assert!(
+            render_line_level_conflict(
+                Some(b"a\n"),
+                b"a\n",
+                b"b\n",
+                "x",
+                diffy::ConflictStyle::Merge
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn render_line_level_conflict_diff3_emits_base_block() {
+        // `merge.conflictStyle = diff3`: the common-ancestor content appears
+        // between a `||||||| base` marker and the `=======` separator.
+        let base = b"top\nl1\nORIG\nl3\nbottom\n";
+        let ours = b"top\nl1\nMAIN\nl3\nbottom\n";
+        let theirs = b"top\nl1\nOTHER\nl3\nbottom\n";
+        let out = render_line_level_conflict(
+            Some(base),
+            ours,
+            theirs,
+            "abc1234",
+            diffy::ConflictStyle::Diff3,
+        )
+        .expect("a real text conflict renders line-level markers");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "top\nl1\n<<<<<<< HEAD\nMAIN\n||||||| base\nORIG\n=======\nOTHER\n>>>>>>> abc1234\nl3\nbottom\n",
+            "diff3 adds the base block, relabelled from diffy's `original` to `base`"
+        );
+    }
+
+    #[test]
+    fn render_line_level_conflict_diff3_does_not_corrupt_base_marker_like_content() {
+        // A shared content line that looks like the diff3 base marker must
+        // survive verbatim: markers are bumped past it, and only the generated
+        // (bumped) `|||||||| original` line is relabelled.
+        let base = b"||||||| original\nORIG\n";
+        let ours = b"||||||| original\nMAIN\n";
+        let theirs = b"||||||| original\nOTHER\n";
+        let out = render_line_level_conflict(
+            Some(base),
+            ours,
+            theirs,
+            "abc1234",
+            diffy::ConflictStyle::Diff3,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with("||||||| original\n"),
+            "the literal base-marker-like content line is preserved verbatim: {text:?}"
+        );
+        assert!(
+            text.contains("|||||||| base\n"),
+            "the generated (8-char, bumped) base marker is relabelled to `base`: {text:?}"
+        );
     }
 
     #[test]
@@ -1932,6 +2104,14 @@ mod tests {
         assert_eq!(
             PullMergeError::InvalidTarget("a/b".to_string()).to_string(),
             "a/b - not something we can merge",
+        );
+        assert_eq!(
+            PullMergeError::InvalidConflictStyle("zdiff3".to_string()).to_string(),
+            "unsupported merge.conflictStyle 'zdiff3' (expected 'merge' or 'diff3')",
+        );
+        assert_eq!(
+            PullMergeError::ConflictStyleRead("db locked".to_string()).to_string(),
+            "failed to read merge.conflictStyle config: db locked",
         );
         assert_eq!(
             PullMergeError::TargetLoad {

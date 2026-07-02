@@ -18,6 +18,20 @@ If the current branch can be fast-forwarded, Libra moves the branch pointer to t
 
 Clean three-way merges create a two-parent merge commit, update HEAD, rebuild the index, restore the working tree, and write a merge reflog entry. Conflicting three-way merges write line-level conflict markers to the working tree (matching Git — only the diverging hunks are enclosed between `<<<<<<< HEAD` / `=======` / `>>>>>>>`, with shared context left outside; binary or modify/delete paths fall back to whole-file markers), write unmerged index stages, save Libra merge state, and return `LBR-CONFLICT-002` with hints for `libra merge --continue` and `libra merge --abort`.
 
+### Conflict style (`merge.conflictStyle`)
+
+The marker format follows the Git-compatible `merge.conflictStyle` config key (config-only — matching Git, `merge` has no CLI style flag):
+
+```bash
+libra config merge.conflictStyle diff3
+```
+
+- `merge` (default, or unset) — the two-marker style above.
+- `diff3` — additionally emits the common-ancestor content between a `||||||| base` marker and the `=======` separator, so you can see what both sides started from.
+- Any other value — including the unimplemented `zdiff3` — is a hard error when a conflict must be rendered (exit 128), never a silent fall-back to the default style.
+
+The config is honored by both `libra merge` and `libra cherry-pick` for line-level text conflicts. Binary and modify/delete conflicts keep their two-part whole-file presentation (Git also emits no base block there), and `libra rebase` currently renders whole-file markers without a base block regardless of this setting.
+
 Libra still does not implement octopus merges, custom strategies, strategy options, or interactive message editing (`--edit`/launching an editor). Signature verification (`--verify-signatures`) is supported but limited to the local vault PGP key (no external GPG keyring).
 
 ## Options
@@ -159,6 +173,7 @@ Already-up-to-date merges use `strategy: "already-up-to-date"`, `commit: null`, 
 | Untracked file would be overwritten | `LBR-CONFLICT-002` | 128 |
 | Merge already in progress | `LBR-CONFLICT-002` | 128 |
 | No merge in progress for `--continue` / `--abort` | `LBR-REPO-003` | 128 |
+| Unsupported `merge.conflictStyle` value (e.g. `zdiff3`) when rendering a conflict | `LBR-REPO-003` | 128 |
 | Unresolved conflict stages remain for `--continue` | `LBR-CONFLICT-002` | 128 |
 | Failed to read merge state or index | `LBR-IO-001` | 128 |
 | Failed to save state, index, tree, commit, HEAD, or worktree | `LBR-IO-002` | 128 |
