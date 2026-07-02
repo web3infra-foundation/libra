@@ -60,6 +60,14 @@ pub const SCAN_LOCK_STEAL_SECS: i64 = 600;
 /// Sentinel fingerprint recorded when no index file exists.
 pub const FINGERPRINT_ABSENT: &str = "absent";
 
+/// FIXED-WIDTH UTC timestamp (RFC3339, microsecond precision) — every stored
+/// timestamp and cutoff comparison in this module goes through here so
+/// lexicographic string comparison is exactly chronological (variable-width
+/// fractions would make `<` unsound at tick boundaries).
+pub fn now_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyEntry {
     pub path: String,
@@ -164,6 +172,43 @@ pub fn current_index_fingerprint(index_path: &Path) -> Result<String> {
     Ok(tail.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Validate and normalize repo-relative candidate paths for advisory marks —
+/// the SHARED gate for every mark producer (CLI, service endpoint, watcher).
+/// Rejects absolute paths and any parent/root/prefix component (an escaping
+/// stored path would make later verification stat/hash files OUTSIDE the
+/// repository), and refuses non-UTF-8 (never lossy-mangled). Returns the
+/// '/'-normalized stored forms, or the list of offending inputs.
+pub fn validate_mark_paths(
+    workdir_relative: &[std::path::PathBuf],
+) -> std::result::Result<Vec<String>, Vec<String>> {
+    let mut stored = Vec::with_capacity(workdir_relative.len());
+    let mut offenders = Vec::new();
+    for path in workdir_relative {
+        let escapes = path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+        if escapes {
+            offenders.push(path.display().to_string());
+            continue;
+        }
+        match native_path_to_stored(path) {
+            Ok(text) => stored.push(text),
+            Err(_) => offenders.push(path.display().to_string()),
+        }
+    }
+    if offenders.is_empty() {
+        Ok(stored)
+    } else {
+        Err(offenders)
+    }
+}
+
 /// The single owner API for the dirty-set cache tables.
 pub struct DirtyCache;
 
@@ -234,13 +279,38 @@ impl DirtyCache {
         Self::list_with_conn(&db).await
     }
 
-    /// Upsert manual advisory marks (`libra dirty <paths>`). Over-reporting is
-    /// the safe direction, so marks never invalidate the snapshot epoch.
+    /// Upsert manual advisory marks (`libra dirty <paths>`, the service mark
+    /// endpoint, the watcher). Over-reporting is the safe direction, so marks
+    /// never invalidate the snapshot epoch. Validation is ENFORCED here — the
+    /// public marking entrypoint takes workdir-relative native paths and
+    /// refuses the whole batch if any escapes the repository (an escaping
+    /// stored path would make later verification stat/hash files OUTSIDE the
+    /// repo). Returns the stored forms that were marked.
     pub async fn mark_paths_with_conn<C: ConnectionTrait>(
+        db: &C,
+        workdir_relative: &[std::path::PathBuf],
+    ) -> std::result::Result<Vec<String>, MarkError> {
+        let stored_paths = validate_mark_paths(workdir_relative).map_err(MarkError::Escaping)?;
+        Self::mark_stored_paths_with_conn(db, &stored_paths)
+            .await
+            .map_err(MarkError::Store)?;
+        Ok(stored_paths)
+    }
+
+    pub async fn mark_paths(
+        workdir_relative: &[std::path::PathBuf],
+    ) -> std::result::Result<Vec<String>, MarkError> {
+        let db = get_db_conn_instance().await;
+        Self::mark_paths_with_conn(&db, workdir_relative).await
+    }
+
+    /// Raw insertion for PRE-VALIDATED stored paths (private: every public
+    /// entry goes through [`validate_mark_paths`]).
+    async fn mark_stored_paths_with_conn<C: ConnectionTrait>(
         db: &C,
         stored_paths: &[String],
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        let now = now_timestamp();
         for path in stored_paths {
             let active = working_dirty::ActiveModel {
                 path: Set(path.clone()),
@@ -266,23 +336,32 @@ impl DirtyCache {
         Ok(())
     }
 
-    pub async fn mark_paths(stored_paths: &[String]) -> Result<()> {
-        let db = get_db_conn_instance().await;
-        Self::mark_paths_with_conn(&db, stored_paths).await
-    }
-
-    /// Atomically replace the whole snapshot (the `--scan` commit step): all
-    /// rows deleted, the given rows inserted, and the meta row stamped fresh
-    /// — call INSIDE one transaction so `--cached` readers see either the old
-    /// or the new snapshot, never a half-update.
+    /// Atomically replace the snapshot (the `--scan` commit step): scan rows
+    /// and PRE-SCAN advisory marks are deleted (the reconcile subsumed them),
+    /// the given rows inserted, and the meta row stamped fresh — call INSIDE
+    /// one transaction so `--cached` readers see either the old or the new
+    /// snapshot, never a half-update. Advisory marks recorded AFTER
+    /// `scan_started_at` survive: a mark landing between the reconcile's walk
+    /// and this commit must not be wiped (that would under-report a recorded
+    /// fact; surviving marks can only over-report — the safe direction).
     pub async fn replace_all_with_conn<C: ConnectionTrait>(
         db: &C,
         entries: &[(String, &'static str)],
         fingerprint: &str,
         head_oid: Option<&str>,
+        scan_started_at: &str,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        let now = now_timestamp();
         working_dirty::Entity::delete_many()
+            .filter(
+                sea_orm::Condition::any()
+                    .add(working_dirty::Column::Source.eq(SOURCE_SCAN))
+                    .add(working_dirty::Column::Source.eq(SOURCE_CHECK))
+                    // STRICT '<': a mark stamped in the same microsecond as
+                    // the scan start survives (over-report only — wiping it
+                    // would recreate the under-report race).
+                    .add(working_dirty::Column::MarkedAt.lt(scan_started_at)),
+            )
             .exec(db)
             .await
             .context("failed to clear working_dirty for the scan snapshot")?;
@@ -295,8 +374,19 @@ impl DirtyCache {
                 verified_at: Set(Some(now.clone())),
                 ..Default::default()
             };
-            active
-                .insert(db)
+            // A surviving post-scan-start mark may collide on (path, kind):
+            // upgrade it to the scan row (same fact, now verified).
+            working_dirty::Entity::insert(active)
+                .on_conflict(
+                    OnConflict::columns([working_dirty::Column::Path, working_dirty::Column::Kind])
+                        .update_columns([
+                            working_dirty::Column::Source,
+                            working_dirty::Column::MarkedAt,
+                            working_dirty::Column::VerifiedAt,
+                        ])
+                        .to_owned(),
+                )
+                .exec(db)
                 .await
                 .context("failed to insert a scan snapshot row")?;
         }
@@ -469,7 +559,7 @@ impl DirtyCache {
         pruned: &[(String, String)],
         confirmed: &[(String, String)],
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        let now = now_timestamp();
         for (path, kind) in pruned {
             working_dirty::Entity::delete_many()
                 .filter(working_dirty::Column::Path.eq(path.as_str()))
@@ -497,6 +587,31 @@ impl DirtyCache {
         Ok(())
     }
 }
+
+/// Error from the validated marking entrypoint.
+#[derive(Debug)]
+pub enum MarkError {
+    /// One or more inputs escape the repository (whole batch refused).
+    Escaping(Vec<String>),
+    Store(anyhow::Error),
+}
+
+impl std::fmt::Display for MarkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MarkError::Escaping(offenders) => {
+                write!(
+                    f,
+                    "paths escape the repository root: {}",
+                    offenders.join(", ")
+                )
+            }
+            MarkError::Store(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for MarkError {}
 
 /// Outcome of a scan-lock acquisition attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,6 +641,21 @@ mod tests {
             native_path_to_stored(&bad).is_err(),
             "lossy conversion would let the row be re-read as a different path"
         );
+    }
+
+    #[test]
+    fn validate_mark_paths_matrix() {
+        use std::path::PathBuf;
+        let ok = validate_mark_paths(&[PathBuf::from("a.txt"), PathBuf::from("d/b.txt")])
+            .expect("relative paths accepted");
+        assert_eq!(ok, vec!["a.txt".to_string(), "d/b.txt".to_string()]);
+        for bad in ["../x", "/etc/hosts", "a/../../x"] {
+            let err = validate_mark_paths(&[PathBuf::from(bad)]);
+            assert!(err.is_err(), "{bad} must be rejected");
+        }
+        // One offender fails the whole batch (atomic refusal).
+        let err = validate_mark_paths(&[PathBuf::from("ok.txt"), PathBuf::from("../bad")]);
+        assert_eq!(err.unwrap_err(), vec!["../bad".to_string()]);
     }
 
     #[test]

@@ -798,6 +798,7 @@ async fn run_status_scan_locked(
     let fingerprint_before =
         current_index_fingerprint(index_path).map_err(|e| dirty_cache_error("fingerprint", e))?;
     let head_before = Head::current_commit().await.map(|oid| oid.to_string());
+    let scan_started_at = crate::internal::dirty::now_timestamp();
 
     // The same full safe reconcile as the default status, raw + display.
     let (staged_raw, unstaged_raw) = compute_raw_sets().await?;
@@ -821,9 +822,15 @@ async fn run_status_scan_locked(
         .begin()
         .await
         .map_err(|e| dirty_cache_error("open a transaction for", anyhow::anyhow!(e)))?;
-    DirtyCache::replace_all_with_conn(&txn, &rows, &fingerprint_before, head_before.as_deref())
-        .await
-        .map_err(|e| dirty_cache_error("write", e))?;
+    DirtyCache::replace_all_with_conn(
+        &txn,
+        &rows,
+        &fingerprint_before,
+        head_before.as_deref(),
+        &scan_started_at,
+    )
+    .await
+    .map_err(|e| dirty_cache_error("write", e))?;
     txn.commit()
         .await
         .map_err(|e| dirty_cache_error("commit", anyhow::anyhow!(e)))?;

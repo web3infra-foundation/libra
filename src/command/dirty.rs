@@ -9,7 +9,7 @@ use clap::Parser;
 use serde::Serialize;
 
 use crate::{
-    internal::dirty::{DirtyCache, native_path_to_stored},
+    internal::dirty::DirtyCache,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -138,48 +138,25 @@ pub async fn execute_safe(args: DirtyArgs, output: &OutputConfig) -> CliResult<(
         return Ok(());
     }
 
-    // Validate ALL paths first — refuse atomically if any escapes the repo
-    // root. Nonexistent paths are legal (a deletion IS dirty); no file
-    // contents are read and the index is never touched.
-    let mut stored: Vec<String> = Vec::with_capacity(args.paths.len());
-    let mut offenders: Vec<String> = Vec::new();
-    for raw in &args.paths {
-        let workdir_relative = util::to_workdir_path(raw);
-        // Must be a purely relative path inside the worktree: reject absolute
-        // results (input outside the repo root) and ANY parent/root/prefix
-        // component, not just a leading `..`.
-        let escapes = workdir_relative.is_absolute()
-            || workdir_relative.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            });
-        if escapes {
-            offenders.push(raw.clone());
-        } else {
-            // CLI args are Strings, so this is infallible in practice; treat a
-            // failure as an escaping/invalid path rather than mangle it.
-            match native_path_to_stored(&workdir_relative) {
-                Ok(text) => stored.push(text),
-                Err(_) => offenders.push(raw.clone()),
-            }
+    // Validation is enforced INSIDE the owner API: the whole batch is
+    // refused if any path escapes the repo root. Nonexistent paths are legal
+    // (a deletion IS dirty); no file contents are read, no index writes.
+    let workdir_relative: Vec<std::path::PathBuf> =
+        args.paths.iter().map(util::to_workdir_path).collect();
+    let stored = match DirtyCache::mark_paths(&workdir_relative).await {
+        Ok(stored) => stored,
+        Err(error @ crate::internal::dirty::MarkError::Escaping(_)) => {
+            return Err(CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("dirty marks are repo-relative; pass paths inside the working tree"));
         }
-    }
-    if !offenders.is_empty() {
-        return Err(CliError::fatal(format!(
-            "paths escape the repository root: {}",
-            offenders.join(", ")
-        ))
-        .with_stable_code(StableErrorCode::CliInvalidTarget)
-        .with_hint("dirty marks are repo-relative; pass paths inside the working tree"));
-    }
-    DirtyCache::mark_paths(&stored).await.map_err(|e| {
-        CliError::fatal(format!("failed to write the dirty cache: {e}"))
-            .with_stable_code(StableErrorCode::IoWriteFailed)
-    })?;
+        Err(error) => {
+            return Err(
+                CliError::fatal(format!("failed to write the dirty cache: {error}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed),
+            );
+        }
+    };
     let total = DirtyCache::list().await.map(|rows| rows.len()).unwrap_or(0);
     let report = DirtyOutput::Mark {
         marked: stored,
