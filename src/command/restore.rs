@@ -87,8 +87,12 @@ pub enum RestoreError {
     /// `path '<file>' is unmerged`.
     #[error("path '{0}' is unmerged")]
     PathUnmerged(String),
-    /// `--ours`/`--theirs` asked for a conflict stage that the path does not
-    /// have. Mirrors Git's `path '<file>' does not have our/their version`.
+    /// `--overlay --ours`/`--theirs` asked for a conflict stage that the path
+    /// does not have (a modify/delete conflict). This is the OVERLAY-mode error:
+    /// it mirrors Git's `path '<file>' does not have our/their version`, which
+    /// Git also only emits under `--overlay`. In the default (no-overlay) mode
+    /// `restore` instead removes the worktree file (the deleting side wins), so
+    /// this variant is not reached there.
     #[error("path '{path}' does not have {} version", stage_side(*stage))]
     MissingStageVersion { path: String, stage: u8 },
     /// `--conflict=<style>` was given an unsupported value (only `merge` and
@@ -374,13 +378,14 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
     // worktree operation.
     if args.ours || args.theirs {
         let stage = if args.ours { 2 } else { 3 };
-        let restored = restore_conflict_stage(&args.pathspec, stage).await?;
+        let (restored, deleted) =
+            restore_conflict_stage(&args.pathspec, stage, args.overlay).await?;
         return Ok(RestoreOutput {
             source: None,
             worktree: true,
             staged: false,
             restored_files: restored,
-            deleted_files: Vec::new(),
+            deleted_files: deleted,
         });
     }
 
@@ -984,11 +989,22 @@ fn stage_blob(index: &Index, path: &str, stage: u8) -> Option<ObjectHash> {
 /// Restore the `stage` side (2 = ours, 3 = theirs) of each matched unmerged path
 /// to the working tree. Reads conflict stages only and writes the worktree; the
 /// index is intentionally left unmerged so `libra status` still shows the
-/// conflict until the user stages a resolution. Returns the restored paths.
+/// conflict until the user stages a resolution.
+///
+/// When the requested stage is ABSENT for a matched path (a modify/delete
+/// conflict — that side deleted the file), the behavior follows Git's overlay
+/// mode, exactly like the rest of `restore`:
+/// - default (no-overlay): the deleting side "wins", so the worktree file is
+///   removed (idempotently) — restoring a deletion means deleting. Exit 0.
+/// - `--overlay`: overlay never removes paths, so this is an error
+///   ([`RestoreError::MissingStageVersion`], matching Git's overlay message).
+///
+/// Returns `(restored, deleted)` working-tree paths.
 async fn restore_conflict_stage(
     pathspec: &[String],
     stage: u8,
-) -> Result<Vec<String>, RestoreError> {
+    overlay: bool,
+) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let unmerged = collect_unmerged_paths(&index);
     let filter: Vec<PathBuf> = pathspec.iter().map(PathBuf::from).collect();
@@ -999,6 +1015,7 @@ async fn restore_conflict_stage(
     }
 
     let mut restored = Vec::new();
+    let mut deleted = Vec::new();
     for path in &matched {
         let path_str = path_to_utf8_typed(path)?;
         match stage_blob(&index, path_str, stage) {
@@ -1006,15 +1023,27 @@ async fn restore_conflict_stage(
                 restore_to_file_typed(&hash, path).await?;
                 restored.push(path.display().to_string());
             }
-            None => {
+            None if overlay => {
+                // Overlay mode never removes paths — Git errors here.
                 return Err(RestoreError::MissingStageVersion {
                     path: path_str.to_string(),
                     stage,
                 });
             }
+            None => {
+                // Default (no-overlay): the requested side deleted this file, so
+                // restore it by removing it from the worktree. Idempotent — an
+                // already-absent file is fine (Git exits 0 either way).
+                let path_abs = util::workdir_to_absolute(path);
+                if path_abs.exists() {
+                    fs::remove_file(&path_abs).map_err(|_| RestoreError::WriteWorktree)?;
+                    util::clear_empty_dir(&path_abs);
+                }
+                deleted.push(path.display().to_string());
+            }
         }
     }
-    Ok(restored)
+    Ok((restored, deleted))
 }
 
 /// `restore --merge` / `--conflict=<style>`: for each matched unmerged path,

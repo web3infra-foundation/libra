@@ -447,6 +447,56 @@ fn create_conflicted_repo() -> tempfile::TempDir {
     repo
 }
 
+/// Build a modify/delete conflict on `tracked.txt` by merging `feature` into
+/// `main` (ours = main, theirs = feature). When `theirs_deletes` is true the
+/// theirs side (feature) deletes the file and ours (main) modifies it, so the
+/// merged index has stage 2 but NO stage 3; otherwise ours (main) deletes and
+/// theirs modifies, so stage 2 is absent. Used to exercise the missing-stage
+/// (delete-on-restore) behavior of `--ours`/`--theirs`.
+fn create_modify_delete_conflict(theirs_deletes: bool) -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let path = repo.path();
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], path),
+        "create feature",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], path),
+        "checkout feature",
+    );
+    if theirs_deletes {
+        assert_cli_success(
+            &run_libra_command(&["rm", "tracked.txt"], path),
+            "rm on feature",
+        );
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", "feature deletes", "--no-verify"], path),
+            "commit feature deletion",
+        );
+    } else {
+        commit_file_cli(path, "tracked.txt", "feature change\n", "feature modifies");
+    }
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], path),
+        "checkout main",
+    );
+    if theirs_deletes {
+        commit_file_cli(path, "tracked.txt", "main change\n", "main modifies");
+    } else {
+        assert_cli_success(
+            &run_libra_command(&["rm", "tracked.txt"], path),
+            "rm on main",
+        );
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", "main deletes", "--no-verify"], path),
+            "commit main deletion",
+        );
+    }
+    // Modify/delete conflict: merge leaves one of stage 2/3 absent. Non-zero exit expected.
+    let _ = run_libra_command(&["merge", "feature"], path);
+    repo
+}
+
 #[test]
 #[serial]
 fn test_restore_ours_writes_stage2_blob() {
@@ -476,6 +526,97 @@ fn test_restore_theirs_writes_stage3_blob() {
     assert_eq!(
         std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
         "feature change\n",
+    );
+}
+
+// Missing-stage (modify/delete) restore: the requested side deleted the file,
+// so restoring it means removing it from the worktree in the default
+// (no-overlay) mode, exactly like `git restore` (lore.md 1.2 Git-fidelity fix).
+
+#[test]
+#[serial]
+fn test_restore_theirs_modify_delete_removes_worktree_file() {
+    // theirs (feature) deleted tracked.txt → stage 3 absent.
+    let repo = create_modify_delete_conflict(true);
+    let out = run_libra_command(&["restore", "--theirs", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "restore --theirs on a modify/delete should succeed (exit 0); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !repo.path().join("tracked.txt").exists(),
+        "restoring the deleted side must remove the worktree file"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_ours_delete_modify_removes_worktree_file() {
+    // ours (main) deleted tracked.txt → stage 2 absent.
+    let repo = create_modify_delete_conflict(false);
+    let out = run_libra_command(&["restore", "--ours", "tracked.txt"], repo.path());
+    assert!(
+        out.status.success(),
+        "restore --ours on a delete/modify should succeed (exit 0); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !repo.path().join("tracked.txt").exists(),
+        "restoring the deleted side must remove the worktree file"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_theirs_modify_delete_json_reports_deleted() {
+    // The deletion is agent-facing: it must appear in deleted_files, not restored_files.
+    let repo = create_modify_delete_conflict(true);
+    let out = run_libra_command(
+        &["--json", "restore", "--theirs", "tracked.txt"],
+        repo.path(),
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json_stdout(&out);
+    let deleted = json["data"]["deleted_files"]
+        .as_array()
+        .expect("deleted_files array");
+    assert!(
+        deleted.iter().any(|v| v.as_str() == Some("tracked.txt")),
+        "deleted_files should list the removed path, got {json}"
+    );
+    assert!(
+        json["data"]["restored_files"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()),
+        "a pure deletion must not report restored_files"
+    );
+}
+
+#[test]
+#[serial]
+fn test_restore_overlay_missing_stage_errors() {
+    // Overlay mode never removes paths, so a missing stage is an error (exit 128),
+    // matching Git's overlay-mode `does not have their version`.
+    let repo = create_modify_delete_conflict(true); // stage 3 absent
+    let out = run_libra_command(
+        &["restore", "--overlay", "--theirs", "tracked.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(128),
+        "overlay mode must error on a missing stage; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not have"),
+        "overlay error should mention the missing side, got: {stderr}"
     );
 }
 

@@ -92,7 +92,13 @@ libra restore --ours file.txt
 libra restore --theirs file.txt
 ```
 
-These flags read the conflict stages and rewrite **only the working tree** — the index is intentionally left unmerged, so `libra status` still reports the conflict until you stage a resolution with `libra add`. They are worktree-only by design and therefore reject `--source` and `--staged` (and each other) at the CLI layer (`LBR-CLI-002`, exit code 129). If the requested stage is absent (for example a modify/delete conflict has no "their" version), the command fails with `LBR-CONFLICT-001` and exit 128.
+These flags read the conflict stages and rewrite **only the working tree** — the index is intentionally left unmerged, so `libra status` still reports the conflict until you stage a resolution with `libra add`. They are worktree-only by design and therefore reject `--source` and `--staged` (and each other) at the CLI layer (`LBR-CLI-002`, exit code 129).
+
+**Modify/delete conflicts.** When the requested side deleted the file (a modify/delete conflict — the requested stage is absent), restoring that side means *removing* the file: in the default (`--no-overlay`) mode `libra restore --theirs <path>` deletes the working-tree file and exits 0 (matching `git restore`). Under `--overlay`, which never removes paths, the same case is instead an error — `path '<file>' does not have their version` (`LBR-CONFLICT-001`, exit 128).
+
+**During a rebase, `--ours`/`--theirs` are swapped** (as in Git): the stages are read verbatim, and a rebase records stage 2 = the branch you are rebasing *onto* (the new base) and stage 3 = the commit being replayed. So mid-rebase `--ours` gives the onto side and `--theirs` the replayed commit — the reverse of a normal merge or cherry-pick (where `--ours` = your `HEAD` and `--theirs` = the incoming side).
+
+`--ours`/`--theirs` act only on unmerged paths. A non-conflicted pathspec is skipped; if *every* pathspec is non-conflicted the command reports no match (`LBR-CONFLICT-001`, exit 128). Libra intentionally does **not** fall through to Git's plain index (stage-0) restore for a clean tracked path here, so a locally modified file is never silently reverted — use a plain `libra restore <path>` for that.
 
 A plain `libra restore` over an unmerged path refuses to act and reports `path '<file>' is unmerged` (`LBR-CONFLICT-001`, exit 128) so a conflict is never silently overwritten or skipped. Pass `--ignore-unmerged` to skip the unmerged paths and restore the rest:
 
