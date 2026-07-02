@@ -391,3 +391,177 @@ fn metadata_follows_branch_lifecycle() {
         "recreated branch starts with no metadata (cascade ran)"
     );
 }
+
+#[test]
+fn metadata_revision_scope_trailers_and_notes() {
+    let repo = meta_repo();
+    let p = repo.path();
+    // A commit carrying a trailer.
+    std::fs::write(p.join("r.txt"), "r").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "r.txt"], p), "add");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "commit",
+                "-m",
+                "revision commit",
+                "--no-verify",
+                "--trailer",
+                "Reviewed-by: Alice",
+            ],
+            p,
+        ),
+        "commit",
+    );
+    // Trailer read (source=trailer), case-insensitive key.
+    let get = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "get",
+            "reviewed-by",
+            "--revision",
+            "HEAD",
+        ],
+        p,
+    );
+    assert_cli_success(&get, "trailer get");
+    let json = parse_json_stdout(&get);
+    assert_eq!(json["data"]["value"].as_str(), Some("Alice"));
+    assert_eq!(json["data"]["source"].as_str(), Some("trailer"));
+    assert_eq!(
+        json["data"]["target"].as_str().map(|t| t.len()),
+        Some(40),
+        "target is the full resolved OID"
+    );
+    // Notes-layer set wins over the trailer.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "metadata",
+                "set",
+                "Reviewed-by",
+                "Bob",
+                "--revision",
+                "HEAD",
+            ],
+            p,
+        ),
+        "note set",
+    );
+    let get = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "get",
+            "reviewed-by",
+            "--revision",
+            "HEAD",
+        ],
+        p,
+    );
+    let json = parse_json_stdout(&get);
+    assert_eq!(json["data"]["value"].as_str(), Some("Bob"));
+    assert_eq!(json["data"]["source"].as_str(), Some("note"));
+    // Typed value on a revision.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "metadata",
+                "set",
+                "score",
+                "3.14",
+                "--numeric",
+                "--revision",
+                "HEAD",
+            ],
+            p,
+        ),
+        "typed revision set",
+    );
+    // list: note shadows the same-key trailer; sources labeled.
+    let list = run_libra_command(&["--json", "metadata", "list", "--revision", "HEAD"], p);
+    let json = parse_json_stdout(&list);
+    let entries = json["data"]["entries"].as_array().unwrap();
+    let reviewed: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| {
+            e["key"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case("reviewed-by")
+        })
+        .collect();
+    assert_eq!(reviewed.len(), 1, "note shadows the trailer: {entries:?}");
+    assert_eq!(reviewed[0]["source"].as_str(), Some("note"));
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["key"] == "score" && e["value_type"] == "numeric"),
+        "{entries:?}"
+    );
+    // unset removes the note entry; the trailer value is visible again.
+    let unset = run_libra_command(
+        &["metadata", "unset", "Reviewed-by", "--revision", "HEAD"],
+        p,
+    );
+    assert_cli_success(&unset, "unset note entry");
+    assert!(
+        String::from_utf8_lossy(&unset.stderr).contains("visible again"),
+        "{}",
+        String::from_utf8_lossy(&unset.stderr)
+    );
+    let get = run_libra_command(
+        &[
+            "--json",
+            "metadata",
+            "get",
+            "reviewed-by",
+            "--revision",
+            "HEAD",
+        ],
+        p,
+    );
+    let json = parse_json_stdout(&get);
+    assert_eq!(json["data"]["source"].as_str(), Some("trailer"));
+    // unset a trailer-only key → exit 1 with the immutability hint.
+    let only = run_libra_command(
+        &["metadata", "unset", "reviewed-by", "--revision", "HEAD"],
+        p,
+    );
+    assert_eq!(only.status.code(), Some(1), "trailer-only unset exits 1");
+    assert!(
+        String::from_utf8_lossy(&only.stderr).contains("immutable"),
+        "{}",
+        String::from_utf8_lossy(&only.stderr)
+    );
+    // Dual surface: the notes doc is visible via libra notes --ref metadata.
+    let notes = run_libra_command(&["notes", "--ref", "metadata", "show", "HEAD"], p);
+    assert_cli_success(&notes, "dual surface notes show");
+    assert!(
+        String::from_utf8_lossy(&notes.stdout).contains("score"),
+        "{}",
+        String::from_utf8_lossy(&notes.stdout)
+    );
+    // Unknown revision → CliInvalidTarget usage-class error.
+    let bad = run_libra_command(&["metadata", "get", "k", "--revision", "nope"], p);
+    assert_eq!(bad.status.code(), Some(129));
+    // A hand-corrupted doc via the dual surface → actionable error naming the
+    // ref, never a panic or silent acceptance.
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "notes", "--ref", "metadata", "add", "-f", "-m", "not json", "HEAD",
+            ],
+            p,
+        ),
+        "hand-edit the note",
+    );
+    let corrupt = run_libra_command(&["metadata", "get", "score", "--revision", "HEAD"], p);
+    assert_eq!(corrupt.status.code(), Some(128), "corrupt doc is fatal");
+    assert!(
+        String::from_utf8_lossy(&corrupt.stderr).contains("notes remove --ref metadata"),
+        "repair hint present: {}",
+        String::from_utf8_lossy(&corrupt.stderr)
+    );
+}

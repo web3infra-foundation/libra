@@ -1156,9 +1156,6 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Logfile(_)
         // `cache info` only inspects env/config-derived storage tunables.
         | Commands::Cache(_)
-        // `metadata` reads/writes SQLite KV only (no object access); it
-        // enforces its own in-repo check.
-        | Commands::Metadata(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {

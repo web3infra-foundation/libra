@@ -15,7 +15,8 @@ libra metadata list                (--branch <name> | --repo) [--prefix <p>]
 
 ## Description
 
-Metadata is scoped: exactly one of `--branch <name>` / `--repo` is required.
+Metadata is scoped: exactly one of `--branch <name>` / `--repo` /
+`--revision <rev>` is required.
 
 - **Branch scope** (`--branch <name>`): key-values attached to a LOCAL branch,
   stored in the `metadata_kv` SQLite table. Metadata follows the branch through
@@ -36,6 +37,21 @@ Metadata is scoped: exactly one of `--branch <name>` / `--repo` is required.
   decrypt); `unset` works on any key. A key given multiple values via
   `config --add` is refused by `set`/`unset` with a hint to `config unset-all`
   first; `get` returns the most recent value.
+
+- **Revision scope** (`--revision <rev>`): metadata on a commit. Commits are
+  immutable, so this scope merges two layers: the commit message's **trailer
+  block** (read-only, parsed with Git's rules — the same engine as
+  `log --trailer`) and a mutable **notes layer** (one JSON document per commit
+  under `refs/notes/metadata`; `libra notes --ref metadata` is an intended
+  dual surface). Reads prefer the notes layer; `get`/`list` report a `source`
+  (`note`/`trailer`) in JSON. Writes (`set`/`unset`) touch only the notes
+  layer — unsetting a trailer-only key exits 1 with an amend/reword hint, and
+  removing a note entry that shadowed a trailer prints a notice that the
+  trailer value is visible again. Key matching is ASCII **case-insensitive**
+  in this scope (the trailer convention; branch/repo stay exact). Note-layer
+  values are **local-only** (notes are never pushed) — another clone sees the
+  commit's trailers but not your overrides. The JSON `target` is always the
+  full resolved commit OID. The whole per-commit document is bounded at 1 MiB.
 
 Well-known branch keys — `protect`, `archive`, and the `lineage.*` prefix — are
 **recorded but not yet enforced**: setting them prints a notice. Enforcement
@@ -64,6 +80,7 @@ case-sensitive (max 256 bytes, no whitespace); values are capped at 1 MiB.
 | `list` | Print `key=value` lines, key-ordered. |
 | `--branch <NAME>` | Operate on a local branch's metadata. |
 | `--repo` | Operate on repository-level metadata (`config` `metadata.*`). |
+| `--revision <REV>` | Operate on a commit's metadata (immutable trailers + a mutable local notes layer; see above). |
 | `--prefix <P>` | (`list` only) Only keys starting with the prefix, e.g. `lineage.`. |
 | `--json` / `--machine` | Structured envelope: `{ action, scope, target, key, value, ... }`. |
 

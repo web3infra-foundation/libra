@@ -1,7 +1,8 @@
 //! Git-faithful commit-message trailer parsing (lore.md §1.9) — the shared
 //! substrate for `log --trailer`/`--only-trailers`, `shortlog
-//! --group=trailer:<key>`, and the future typed revision metadata (lore.md
-//! 1.10, via `parse_trailers_with_recognized`'s extra-keys hook).
+//! --group=trailer:<key>`, and revision metadata (lore.md 1.10, landed:
+//! `metadata --revision` reads trailers through
+//! `parse_trailers_with_recognized`'s extra-keys hook).
 //!
 //! The rules mirror git's `trailer.c` (`git-interpret-trailers`), empirically
 //! cross-checked against Git 2.43:

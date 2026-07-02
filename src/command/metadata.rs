@@ -66,6 +66,13 @@ pub struct ScopeArgs {
     /// Operate on repository-level metadata (stored in config under `metadata.*`).
     #[arg(long)]
     pub repo: bool,
+
+    /// Operate on a revision's metadata: reads merge the commit's immutable
+    /// trailer block with a mutable notes layer (`refs/notes/metadata`, notes
+    /// win); writes go to the notes layer only (local-only — never pushed).
+    /// Key matching is ASCII case-insensitive in this scope.
+    #[arg(long, value_name = "REV")]
+    pub revision: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,6 +127,9 @@ enum MetadataOutput {
         /// `null` when the key is absent (the command then exits 1).
         value: Option<String>,
         value_type: Option<String>,
+        /// Revision scope only: `note` or `trailer` (additive field).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     Set {
         scope: &'static str,
@@ -150,11 +160,19 @@ struct MetadataListEntry {
     /// `<REDACTED>` for encrypted repo-scope values (same as `config list`).
     value: String,
     value_type: String,
+    /// Revision scope only: `note` or `trailer` (additive field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 enum Scope {
     Branch(String),
     Repo,
+    /// The full resolved commit OID plus its message (for the trailer layer).
+    Revision {
+        oid: String,
+        message: String,
+    },
 }
 
 impl Scope {
@@ -162,6 +180,7 @@ impl Scope {
         match self {
             Scope::Branch(_) => "branch",
             Scope::Repo => "repo",
+            Scope::Revision { .. } => "revision",
         }
     }
 
@@ -169,6 +188,9 @@ impl Scope {
         match self {
             Scope::Branch(name) => name.clone(),
             Scope::Repo => String::new(),
+            // Always the FULL resolved OID — stable for --json consumers
+            // regardless of how the user spelled the revision.
+            Scope::Revision { oid, .. } => oid.clone(),
         }
     }
 }
@@ -178,6 +200,23 @@ impl Scope {
 async fn resolve_scope(scope: &ScopeArgs) -> Result<Scope, CliError> {
     if scope.repo {
         return Ok(Scope::Repo);
+    }
+    if let Some(rev) = &scope.revision {
+        let oid = crate::utils::util::get_commit_base(rev)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!("cannot resolve revision '{rev}': {e}"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+            })?;
+        let commit: git_internal::internal::object::commit::Commit =
+            crate::command::load_object(&oid).map_err(|e| {
+                CliError::fatal(format!("failed to load commit {oid}: {e}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+        return Ok(Scope::Revision {
+            oid: oid.to_string(),
+            message: commit.message,
+        });
     }
     // clap's required group guarantees branch is Some here.
     let name = scope.branch.clone().unwrap_or_default();
@@ -233,6 +272,7 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
         MetadataCommand::Get { key, scope } => {
             validate_key(&key).map_err(usage_error)?;
             let scope = resolve_scope(&scope).await?;
+            let mut source: Option<String> = None;
             let (value, value_type): (Option<String>, Option<String>) = match &scope {
                 Scope::Branch(name) => MetadataKv::get(MetadataScope::Branch, name, &key)
                     .await
@@ -256,6 +296,20 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                         (Some(value), Some("text".to_string()))
                     })
                     .unwrap_or((None, None)),
+                Scope::Revision { oid, message } => {
+                    match MetadataKv::revision_get(oid, message, &key)
+                        .await
+                        .map_err(|e| {
+                            CliError::fatal(format!("failed to read revision metadata: {e}"))
+                                .with_stable_code(StableErrorCode::IoReadFailed)
+                        })? {
+                        Some(entry) => {
+                            source = Some(entry.source.as_str().to_string());
+                            (Some(entry.value), Some(entry.value_type))
+                        }
+                        None => (None, None),
+                    }
+                }
             };
             let missing = value.is_none();
             let report = MetadataOutput::Get {
@@ -264,6 +318,7 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                 key,
                 value: value.clone(),
                 value_type,
+                source,
             };
             if output.is_json() {
                 emit_json_data("metadata", &report, output)?;
@@ -314,6 +369,14 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                         .await
                         .map_err(|e| {
                             CliError::fatal(format!("failed to write metadata: {e}"))
+                                .with_stable_code(StableErrorCode::IoWriteFailed)
+                        })?
+                }
+                Scope::Revision { oid, .. } => {
+                    MetadataKv::revision_set(oid, &key, &value, value_type)
+                        .await
+                        .map_err(|e| {
+                            CliError::fatal(format!("failed to write revision metadata: {e}"))
                                 .with_stable_code(StableErrorCode::IoWriteFailed)
                         })?
                 }
@@ -379,6 +442,33 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                         Err(e) => return Err(map_repo_store_error(&key, e)),
                     }
                 }
+                Scope::Revision { oid, message } => {
+                    use crate::internal::metadata::RevisionUnsetOutcome;
+                    match MetadataKv::revision_unset(oid, message, &key)
+                        .await
+                        .map_err(|e| {
+                            CliError::fatal(format!("failed to remove revision metadata: {e}"))
+                                .with_stable_code(StableErrorCode::IoWriteFailed)
+                        })? {
+                        RevisionUnsetOutcome::Removed => true,
+                        RevisionUnsetOutcome::RemovedTrailerRemains => {
+                            eprintln!(
+                                "note: the immutable trailer value for '{key}' is visible again"
+                            );
+                            true
+                        }
+                        RevisionUnsetOutcome::OnlyTrailer => {
+                            return Err(CliError::failure(format!(
+                                "'{key}' is trailer-sourced revision metadata — part of the \
+                                 immutable commit"
+                            ))
+                            .with_stable_code(StableErrorCode::CliInvalidTarget)
+                            .with_hint("amend/reword the commit to change its trailers")
+                            .with_exit_code(1));
+                        }
+                        RevisionUnsetOutcome::Absent => false,
+                    }
+                }
             };
             let report = MetadataOutput::Unset {
                 scope: scope.label(),
@@ -409,6 +499,23 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                             key: entry.key,
                             value: entry.value,
                             value_type: entry.value_type,
+                            source: None,
+                        })
+                        .collect()
+                }
+                Scope::Revision { oid, message } => {
+                    MetadataKv::revision_list(oid, message, prefix.as_deref())
+                        .await
+                        .map_err(|e| {
+                            CliError::fatal(format!("failed to list revision metadata: {e}"))
+                                .with_stable_code(StableErrorCode::IoReadFailed)
+                        })?
+                        .into_iter()
+                        .map(|entry| MetadataListEntry {
+                            key: entry.key,
+                            value: entry.value,
+                            value_type: entry.value_type,
+                            source: Some(entry.source.as_str().to_string()),
                         })
                         .collect()
                 }
@@ -434,6 +541,7 @@ pub async fn execute_safe(args: MetadataArgs, output: &OutputConfig) -> CliResul
                                 entry.value
                             },
                             value_type: "text".to_string(),
+                            source: None,
                         })
                         .collect()
                 }

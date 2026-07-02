@@ -1,8 +1,10 @@
-//! Unified scoped metadata KV store (lore.md §1.5) — the SINGLE owner API for
-//! the `metadata_kv` table. Branch metadata (and future scopes) live here;
+//! Unified scoped metadata store (lore.md §1.5/§1.10) — the SINGLE owner API
+//! for all metadata scopes. Branch metadata lives in the `metadata_kv` table;
 //! repo-scope metadata intentionally lives in `config_kv` under the
 //! `metadata.*` namespace (see [`REPO_METADATA_PREFIX`]) so `libra config`
-//! tooling keeps working on it.
+//! tooling keeps working on it; revision metadata merges the commit's
+//! immutable trailer block with a mutable notes layer (see the revision
+//! section below); file-scope metadata awaits its own design round.
 //!
 //! `protect` / `archive` / `lineage.*` are KEYS in this store, never separate
 //! tables. Nothing enforces them yet: enforcement lands once, in the future
@@ -82,7 +84,9 @@ impl MetadataEntry {
 }
 
 /// Validate a metadata key: non-empty, ≤ [`MAX_KEY_LEN`] bytes, no whitespace
-/// or control characters (keys are exact, case-sensitive identifiers).
+/// or control characters. Branch/repo keys are exact, case-sensitive
+/// identifiers; the REVISION scope matches keys ASCII case-insensitively
+/// (the trailer convention — documented divergence).
 pub fn validate_key(key: &str) -> std::result::Result<(), String> {
     if key.is_empty() {
         return Err("metadata key must not be empty".to_string());
@@ -426,6 +430,358 @@ impl MetadataKv {
                 .await?
                 .is_some_and(|entry| truthy_fail_closed(&entry.value)),
         )
+    }
+}
+
+// ─── Revision-scope metadata (lore.md §1.10) ────────────────────────────────
+//
+// Commits are immutable, so revision metadata is TWO layers behind this one
+// owner API: the commit message's qualifying TRAILER block (read-only, parsed
+// by the 1.9 engine) and a mutable, metadata-owned NOTES document under
+// [`REVISION_NOTES_REF`] — one note blob per commit holding a versioned JSON
+// doc. No new table, no migration: the doc rides the existing `notes` store
+// (lore.md 1.10 explicitly directs "revision 用 trailers/notes", which is the
+// recorded resolution of the §3.6 unified-table red line for this scope).
+// Reads merge both layers with NOTES WINNING (the only mutable layer must be
+// able to override a baked-in trailer). Key matching is ASCII
+// case-insensitive across BOTH layers (the trailer convention) — a documented
+// divergence from the exact-match branch/repo scopes. Note-layer values are
+// LOCAL-ONLY (notes are not pushed); trailer values travel with the commit.
+
+/// The metadata-owned notes ref. `libra notes --ref metadata` operating on the
+/// same doc is an intended dual surface (like `config` for `--repo`).
+pub const REVISION_NOTES_REF: &str = "refs/notes/metadata";
+
+const REVISION_DOC_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RevisionDoc {
+    version: u32,
+    /// BTreeMap for deterministic serialization ordering.
+    entries: std::collections::BTreeMap<String, RevisionDocEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RevisionDocEntry {
+    value: String,
+    #[serde(rename = "type")]
+    value_type: String,
+}
+
+/// Where a revision metadata value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionSource {
+    /// The mutable notes layer (local-only).
+    Note,
+    /// The commit message's immutable trailer block.
+    Trailer,
+}
+
+impl RevisionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RevisionSource::Note => "note",
+            RevisionSource::Trailer => "trailer",
+        }
+    }
+}
+
+/// One merged revision-metadata entry.
+#[derive(Debug, Clone)]
+pub struct RevisionEntry {
+    pub key: String,
+    pub value: String,
+    pub value_type: String,
+    pub source: RevisionSource,
+}
+
+/// Outcome of [`MetadataKv::revision_unset`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionUnsetOutcome {
+    /// A note entry was removed; no same-key trailer remains.
+    Removed,
+    /// A note entry was removed, but a same-key TRAILER value is now visible
+    /// again (surface a notice).
+    RemovedTrailerRemains,
+    /// The key exists only as an immutable trailer — nothing to remove.
+    OnlyTrailer,
+    /// The key is absent from both layers.
+    Absent,
+}
+
+fn corrupt_doc_error(oid: &str, detail: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the revision metadata note for {oid} under {REVISION_NOTES_REF} is not a valid \
+         metadata document ({detail}); repair or remove it with \
+         'libra notes remove --ref metadata {oid}' (a hand-edited note via the dual \
+         surface can cause this)"
+    )
+}
+
+async fn load_revision_doc(oid: &str) -> Result<Option<RevisionDoc>> {
+    Ok(load_revision_doc_with_blob(oid).await?.map(|(doc, _)| doc))
+}
+
+/// [`load_revision_doc`] plus the note BLOB hash, so a caller about to delete
+/// the note can verify it still is the doc it loaded (see `revision_unset`).
+async fn load_revision_doc_with_blob(oid: &str) -> Result<Option<(RevisionDoc, String)>> {
+    match crate::internal::notes::show(REVISION_NOTES_REF, Some(oid)).await {
+        Ok((_object, blob, text)) => {
+            // Enforce the whole-doc bound on EXISTING docs too — a hand-edited
+            // note via the dual surface must not bypass it (and must not feed
+            // an unbounded blob to the JSON parser).
+            if text.len() > MAX_VALUE_LEN {
+                return Err(corrupt_doc_error(
+                    oid,
+                    &format!(
+                        "document is {} bytes, over the {} byte bound",
+                        text.len(),
+                        MAX_VALUE_LEN
+                    ),
+                ));
+            }
+            let doc: RevisionDoc = serde_json::from_str(&text)
+                .map_err(|error| corrupt_doc_error(oid, &error.to_string()))?;
+            if doc.version != REVISION_DOC_VERSION {
+                return Err(corrupt_doc_error(
+                    oid,
+                    &format!(
+                        "unsupported document version {} (this binary supports {})",
+                        doc.version, REVISION_DOC_VERSION
+                    ),
+                ));
+            }
+            Ok(Some((doc, blob)))
+        }
+        Err(crate::internal::notes::NotesError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to read the revision metadata note for {oid}: {error}"
+        )),
+    }
+}
+
+async fn store_revision_doc(oid: &str, doc: &RevisionDoc) -> Result<()> {
+    let text = serde_json::to_string_pretty(doc).context("failed to serialize metadata doc")?;
+    // Bound the WHOLE document, not just individual values, so a commit's
+    // metadata note cannot grow into a multi-MiB blob.
+    if text.len() > MAX_VALUE_LEN {
+        return Err(anyhow::anyhow!(
+            "the revision metadata document for {oid} would exceed {} bytes ({} after this \
+             change); remove entries first",
+            MAX_VALUE_LEN,
+            text.len()
+        ));
+    }
+    crate::internal::notes::add(REVISION_NOTES_REF, oid, &text, true)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to write the revision metadata note: {error}"))?;
+    Ok(())
+}
+
+impl MetadataKv {
+    /// Get one revision metadata entry: the notes layer wins; otherwise the
+    /// LAST matching trailer (the requested key is passed as an extra
+    /// RECOGNIZED key so a mixed final block containing `<key>: v` qualifies —
+    /// the 1.9 hook built for this).
+    pub async fn revision_get(
+        oid: &str,
+        commit_message: &str,
+        key: &str,
+    ) -> Result<Option<RevisionEntry>> {
+        if let Some(doc) = load_revision_doc(oid).await? {
+            let hit = doc
+                .entries
+                .iter()
+                .find(|(stored, _)| stored.eq_ignore_ascii_case(key));
+            if let Some((stored_key, entry)) = hit {
+                return Ok(Some(RevisionEntry {
+                    key: stored_key.clone(),
+                    value: entry.value.clone(),
+                    value_type: entry.value_type.clone(),
+                    source: RevisionSource::Note,
+                }));
+            }
+        }
+        let trailers =
+            crate::internal::log::trailer::parse_trailers_with_recognized(commit_message, &[key]);
+        Ok(trailers
+            .iter()
+            .rev()
+            .find(|trailer| trailer.key_matches(key))
+            .map(|trailer| RevisionEntry {
+                key: trailer.key.clone(),
+                value: trailer.value.clone(),
+                value_type: "text".to_string(),
+                source: RevisionSource::Trailer,
+            }))
+    }
+
+    /// Set one revision metadata entry in the NOTES layer (the commit itself is
+    /// never mutated). Returns the previous NOTE value (a shadowed trailer was
+    /// never in the mutable layer, so it is not "previous"). Read-modify-write
+    /// of the JSON doc; concurrent writers can lose an update (documented v1
+    /// limitation, same class as the branch-scope pool-connection races).
+    pub async fn revision_set(
+        oid: &str,
+        key: &str,
+        value: &str,
+        value_type: MetadataValueType,
+    ) -> Result<Option<String>> {
+        let mut doc = load_revision_doc(oid).await?.unwrap_or(RevisionDoc {
+            version: REVISION_DOC_VERSION,
+            entries: Default::default(),
+        });
+        // Case-insensitive upsert: drop any case-variant, keep the new spelling.
+        let previous_key = doc
+            .entries
+            .keys()
+            .find(|stored| stored.eq_ignore_ascii_case(key))
+            .cloned();
+        let previous = previous_key
+            .and_then(|stored| doc.entries.remove(&stored))
+            .map(|entry| entry.value);
+        doc.entries.insert(
+            key.to_string(),
+            RevisionDocEntry {
+                value: value.to_string(),
+                value_type: value_type.as_str().to_string(),
+            },
+        );
+        store_revision_doc(oid, &doc).await?;
+        Ok(previous)
+    }
+
+    /// Remove one revision metadata entry from the NOTES layer. Trailer values
+    /// are part of the immutable commit and cannot be unset.
+    pub async fn revision_unset(
+        oid: &str,
+        commit_message: &str,
+        key: &str,
+    ) -> Result<RevisionUnsetOutcome> {
+        let trailer_remains =
+            crate::internal::log::trailer::parse_trailers_with_recognized(commit_message, &[key])
+                .iter()
+                .any(|trailer| trailer.key_matches(key));
+
+        let Some((mut doc, loaded_blob)) = load_revision_doc_with_blob(oid).await? else {
+            return Ok(if trailer_remains {
+                RevisionUnsetOutcome::OnlyTrailer
+            } else {
+                RevisionUnsetOutcome::Absent
+            });
+        };
+        let stored_key = doc
+            .entries
+            .keys()
+            .find(|stored| stored.eq_ignore_ascii_case(key))
+            .cloned();
+        let Some(stored_key) = stored_key else {
+            return Ok(if trailer_remains {
+                RevisionUnsetOutcome::OnlyTrailer
+            } else {
+                RevisionUnsetOutcome::Absent
+            });
+        };
+        doc.entries.remove(&stored_key);
+        if doc.entries.is_empty() {
+            // Deleting the whole note removes whatever blob is CURRENT — so
+            // verify it still is the doc we loaded first, or a concurrent
+            // `set` between our load and this delete would have its update
+            // destroyed. (A residual window remains between this check and
+            // the remove — same documented lost-update class as every
+            // read-modify-write on this store — but the common race now gets
+            // a retry instead of silent data loss.)
+            match crate::internal::notes::show(REVISION_NOTES_REF, Some(oid)).await {
+                Ok((_object, current_blob, _text)) if current_blob == loaded_blob => {}
+                Ok(_) | Err(crate::internal::notes::NotesError::NotFound { .. }) => {
+                    return Err(anyhow::anyhow!(
+                        "the revision metadata note for {oid} changed while removing the last \
+                         entry (concurrent writer?); re-run the command"
+                    ));
+                }
+                Err(other) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to re-verify the revision metadata note before removal: {other}"
+                    ));
+                }
+            }
+            crate::internal::notes::remove(REVISION_NOTES_REF, &[oid.to_string()])
+                .await
+                .map_err(|error| match error {
+                    crate::internal::notes::NotesError::NotFound { .. } => anyhow::anyhow!(
+                        "the revision metadata note for {oid} changed while removing the last \
+                         entry (concurrent writer?); re-run the command"
+                    ),
+                    other => anyhow::anyhow!(
+                        "failed to remove the emptied revision metadata note: {other}"
+                    ),
+                })?;
+        } else {
+            store_revision_doc(oid, &doc).await?;
+        }
+        Ok(if trailer_remains {
+            RevisionUnsetOutcome::RemovedTrailerRemains
+        } else {
+            RevisionUnsetOutcome::Removed
+        })
+    }
+
+    /// List merged revision metadata: note entries plus trailer occurrences
+    /// (note shadows same-key trailers, ASCII case-insensitive). Sorted by key
+    /// (case-insensitive); duplicate trailer keys keep message order. The
+    /// trailer layer is parsed with the PLAIN rules here (the block must
+    /// qualify on its own — the recognized-key strengthening applies to `get`
+    /// only, documented). `key_prefix` filters case-insensitively (matching
+    /// the scope's key semantics, unlike the branch scope's exact prefix).
+    pub async fn revision_list(
+        oid: &str,
+        commit_message: &str,
+        key_prefix: Option<&str>,
+    ) -> Result<Vec<RevisionEntry>> {
+        let doc = load_revision_doc(oid).await?;
+        let mut entries: Vec<RevisionEntry> = Vec::new();
+        if let Some(doc) = &doc {
+            for (key, entry) in &doc.entries {
+                entries.push(RevisionEntry {
+                    key: key.clone(),
+                    value: entry.value.clone(),
+                    value_type: entry.value_type.clone(),
+                    source: RevisionSource::Note,
+                });
+            }
+        }
+        for trailer in crate::internal::log::trailer::parse_trailers(commit_message) {
+            let shadowed = doc.as_ref().is_some_and(|doc| {
+                doc.entries
+                    .keys()
+                    .any(|stored| stored.eq_ignore_ascii_case(&trailer.key))
+            });
+            if !shadowed {
+                entries.push(RevisionEntry {
+                    key: trailer.key,
+                    value: trailer.value,
+                    value_type: "text".to_string(),
+                    source: RevisionSource::Trailer,
+                });
+            }
+        }
+        if let Some(prefix) = key_prefix {
+            let prefix = prefix.to_ascii_lowercase();
+            entries.retain(|entry| entry.key.to_ascii_lowercase().starts_with(&prefix));
+        }
+        // Stable merged order: key (case-insensitive), notes before trailers
+        // for equal keys, trailer duplicates keep message order (stable sort).
+        entries.sort_by(|a, b| {
+            a.key
+                .to_ascii_lowercase()
+                .cmp(&b.key.to_ascii_lowercase())
+                .then_with(|| match (a.source, b.source) {
+                    (RevisionSource::Note, RevisionSource::Trailer) => std::cmp::Ordering::Less,
+                    (RevisionSource::Trailer, RevisionSource::Note) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                })
+        });
+        Ok(entries)
     }
 }
 
