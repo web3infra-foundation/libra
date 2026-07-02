@@ -168,6 +168,34 @@ Libra). `--invert-grep` keeps commits whose message does *not* match.
 libra log --grep "fix(" -n 20
 libra log --grep fix -i              # case-insensitive
 libra log --grep WIP --invert-grep   # hide WIP commits
+
+### `--trailer <KEY[=VALUE]>` / `--only-trailers` (Libra extensions)
+
+Git has no such flags — the nearest Git equivalents are a fragile
+`--grep='^Key: '` (filtering) and `--pretty='%(trailers)'` (display).
+
+`--trailer KEY` keeps only commits whose *qualifying trailer block* (parsed
+with Git's rules: the last paragraph, never the title; keys are ASCII
+alphanumerics/dashes; a mixed block needs a recognized trailer such as
+`Signed-off-by` and ≥25% trailer lines) carries a trailer with that key
+(ASCII case-insensitive). `KEY=VALUE` additionally requires the exact unfolded
+value. Repeatable: every `--trailer` must match.
+
+`--only-trailers` replaces each commit's message with its trailer block
+(unfolded `Key: value` lines; `(cherry picked from commit …)` lines verbatim).
+It does not filter — trailer-less commits print with an empty message
+section. Combined with `--trailer`, the display shows only the selected keys.
+Mutually exclusive with `--oneline`/`--pretty`/`--format`.
+
+```bash
+libra log --trailer Reviewed-by                  # commits reviewed by anyone
+libra log --trailer Change-Id=I1234              # exact value match
+libra log --only-trailers --trailer signed-off-by
+```
+
+In `--json` output every commit carries an additive `trailers` array
+(`[{"key": …, "value": …}]`, empty when the commit has no qualifying block);
+`body` still contains the trailer lines inline, unchanged.
 ```
 
 ### `--since <DATE>`

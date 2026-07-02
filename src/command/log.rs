@@ -213,6 +213,21 @@ pub struct LogArgs {
     #[clap(long, value_name = "PATTERN")]
     pub grep: Option<String>,
 
+    /// Only list commits whose trailer block carries this trailer (Libra
+    /// extension — Git has no such flag; nearest is a fragile
+    /// `--grep='^Key: '`). `KEY` matches ASCII case-insensitively; an optional
+    /// `=VALUE` requires an exact (case-sensitive) unfolded value. Repeatable;
+    /// every `--trailer` must match (AND, like the other filters).
+    #[clap(long = "trailer", value_name = "KEY[=VALUE]")]
+    pub trailers: Vec<String>,
+
+    /// Show only each commit's trailer block instead of the message (Libra
+    /// extension; nearest Git equivalent `--pretty='%(trailers)'`). Combined
+    /// with `--trailer`, only the selected keys are shown. Does not filter on
+    /// its own; no-trailer commits print with an empty message section.
+    #[clap(long = "only-trailers", conflicts_with_all = ["oneline", "pretty", "format"])]
+    pub only_trailers: bool,
+
     /// Match `--grep` case-insensitively. (Author/committer matching is already
     /// case-insensitive in Libra.)
     #[clap(short = 'i', long = "regexp-ignore-case")]
@@ -370,6 +385,16 @@ pub struct LogCommitEntry {
     pub parents: Vec<String>,
     pub refs: Vec<String>,
     pub files: Vec<LogFileChange>,
+    /// The commit's qualifying trailer block, parsed (empty when none; the
+    /// `body` intentionally still contains the trailer lines inline so
+    /// existing consumers are unaffected — additive field, lore.md §1.9).
+    pub trailers: Vec<LogTrailerEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogTrailerEntry {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -407,6 +432,40 @@ struct CommitFilter {
     max_parents: Option<usize>,
     /// Pickaxe filter (`-S` literal occurrence count, or `-G` diff-line regex).
     pickaxe: Option<PickaxeKind>,
+    /// `--trailer KEY[=VALUE]` filters — all must match (AND).
+    trailer_filters: Vec<TrailerFilter>,
+}
+
+/// One `--trailer KEY[=VALUE]` filter: key matched ASCII case-insensitively,
+/// value (when given) matched exactly against the unfolded trailer value.
+struct TrailerFilter {
+    key: String,
+    value: Option<String>,
+}
+
+/// Parse the repeatable `--trailer` flags. Split at the FIRST `=` (values may
+/// contain `=`; keys cannot). An empty key is a usage error.
+fn parse_trailer_filters(specs: &[String]) -> Result<Vec<TrailerFilter>, CliError> {
+    specs
+        .iter()
+        .map(|spec| {
+            let (key, value) = match spec.split_once('=') {
+                Some((key, value)) => (key, Some(value.to_string())),
+                None => (spec.as_str(), None),
+            };
+            if key.trim().is_empty() {
+                return Err(CliError::fatal(format!(
+                    "invalid --trailer '{spec}': the key must not be empty"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("example: --trailer Reviewed-by  or  --trailer Change-Id=I1234"));
+            }
+            Ok(TrailerFilter {
+                key: key.trim().to_string(),
+                value,
+            })
+        })
+        .collect()
 }
 
 /// The two pickaxe modes. `StringCount` matches when a commit changes the number
@@ -442,7 +501,14 @@ impl CommitFilter {
             min_parents,
             max_parents,
             pickaxe,
+            trailer_filters: Vec::new(),
         }
+    }
+
+    /// Attach `--trailer` filters (Libra extension, lore.md §1.9).
+    fn with_trailer_filters(mut self, trailer_filters: Vec<TrailerFilter>) -> Self {
+        self.trailer_filters = trailer_filters;
+        self
     }
 
     /// Apply `-i`/`--regexp-ignore-case` and `--invert-grep` to the `--grep`
@@ -474,6 +540,22 @@ impl CommitFilter {
             );
             if !committer.contains(committer_filter) {
                 return false;
+            }
+        }
+
+        if !self.trailer_filters.is_empty() {
+            let trailers = crate::internal::log::trailer::parse_trailers(&commit.message);
+            for filter in &self.trailer_filters {
+                let matched = trailers.iter().any(|trailer| {
+                    trailer.key_matches(&filter.key)
+                        && filter
+                            .value
+                            .as_deref()
+                            .is_none_or(|value| trailer.value == value)
+                });
+                if !matched {
+                    return false;
+                }
             }
         }
 
@@ -1260,7 +1342,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         max_parents,
         pickaxe,
     )
-    .with_grep_options(args.ignore_case, args.invert_grep);
+    .with_grep_options(args.ignore_case, args.invert_grep)
+    .with_trailer_filters(parse_trailer_filters(&args.trailers)?);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let (start_commits, excludes) = resolve_log_start_commits(&args, &ranges).await?;
@@ -1326,8 +1409,16 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         FormatType::Full
     };
-    let formatter =
+    let mut formatter =
         CommitFormatter::new(format_type).with_date_mode(args.date.clone().unwrap_or_default());
+    if args.only_trailers {
+        // Key-filter the display to the `--trailer` keys when given.
+        let selected_keys: Vec<String> = parse_trailer_filters(&args.trailers)?
+            .into_iter()
+            .map(|filter| filter.key)
+            .collect();
+        formatter = formatter.with_only_trailers(selected_keys);
+    }
 
     let mut graph_state = if args.graph {
         Some(GraphState::new())
@@ -1567,7 +1658,8 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         max_parents,
         pickaxe,
     )
-    .with_grep_options(args.ignore_case, args.invert_grep);
+    .with_grep_options(args.ignore_case, args.invert_grep)
+    .with_trailer_filters(parse_trailer_filters(&args.trailers)?);
 
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let (start_commits, excludes) = resolve_log_start_commits(args, &ranges).await?;
@@ -1616,6 +1708,13 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         let mut message_lines = parsed_message.lines();
         let subject = message_lines.next().unwrap_or("").to_string();
         let body = message_lines.collect::<Vec<_>>().join("\n");
+        let trailers = crate::internal::log::trailer::parse_trailers(&commit.message)
+            .into_iter()
+            .map(|trailer| LogTrailerEntry {
+                key: trailer.key,
+                value: trailer.value,
+            })
+            .collect();
         let hash = commit.id.to_string();
         let short_hash = hash.get(..7).unwrap_or(&hash).to_string();
 
@@ -1641,6 +1740,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
                 branch_name.as_deref(),
                 Some(current_head_commit),
             ),
+            trailers,
             files: files
                 .into_iter()
                 .map(|file| LogFileChange {

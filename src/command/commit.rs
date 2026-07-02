@@ -678,7 +678,10 @@ pub async fn run_commit(
         };
 
         let commit_message = match &signoff_line {
-            Some(line) => format!("{final_message}\n\n{line}"),
+            // Route through append_trailers so `-s` joins an existing trailer
+            // block (e.g. from `--trailer`) instead of opening a second
+            // paragraph a Git-strict trailer parser would not see.
+            Some(line) => append_trailers(&final_message, std::slice::from_ref(line)),
             None => final_message.clone(),
         };
 
@@ -764,7 +767,8 @@ pub async fn run_commit(
 
     // Normal (non-amend) path
     let commit_message = match &signoff_line {
-        Some(line) => format!("{message}\n\n{line}"),
+        // See the amend path: `-s` must join an existing trailer block.
+        Some(line) => append_trailers(&message, std::slice::from_ref(line)),
         None => message.clone(),
     };
 
@@ -1300,7 +1304,11 @@ pub(crate) fn cleanup_commit_message(message: &str, mode: CleanupMode) -> String
                 })
                 .collect();
             let mut result = trim_empty_lines(&lines);
-            result.retain(|line| !line.is_empty());
+            // Git's strip collapses CONSECUTIVE blank lines into one but keeps
+            // single blank separators — deleting every interior blank (the old
+            // behavior) flattened multi-paragraph messages and destroyed
+            // user-typed trailer blocks at write time.
+            result.dedup_by(|current, previous| current.is_empty() && previous.is_empty());
             result.join("\n")
         }
     }
@@ -1319,15 +1327,21 @@ fn trim_empty_lines(lines: &[String]) -> Vec<String> {
     lines[start..end].to_vec()
 }
 
-/// Append trailer lines to a commit message, inserting a blank line if needed.
+/// Append trailer lines to a commit message the way `git interpret-trailers`
+/// does: when the message already ends in a qualifying trailer block, append
+/// INTO that block (single newline — so `-s` + `--trailer` produce ONE
+/// Git-parseable block); otherwise open a new final paragraph (blank line).
+/// The old single-newline branch for newline-terminated messages glued
+/// trailers onto the last body line, invisible to a Git-strict parser.
 fn append_trailers(message: &str, trailers: &[String]) -> String {
     let trailers_block = trailers.join("\n");
-    if message.is_empty() {
+    let trimmed = message.trim_end();
+    if trimmed.is_empty() {
         trailers_block
-    } else if message.ends_with('\n') {
-        format!("{}\n{}", message.trim_end(), trailers_block)
+    } else if crate::internal::log::trailer::ends_with_trailer_block(trimmed) {
+        format!("{trimmed}\n{trailers_block}")
     } else {
-        format!("{}\n\n{}", message, trailers_block)
+        format!("{trimmed}\n\n{trailers_block}")
     }
 }
 

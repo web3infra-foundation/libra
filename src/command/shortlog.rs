@@ -203,20 +203,20 @@ fn resolve_group_mode(args: &ShortlogArgs) -> CliResult<GroupMode> {
 /// one identity (Value parsed as `Name <email>`, or the raw text with an empty
 /// email). A commit may contribute several identities (or none).
 fn extract_trailer_identities(message: &str, key: &str) -> Vec<(String, String)> {
-    // The trailer block is the final non-empty paragraph.
-    let block = match message.trim_end().rsplit("\n\n").next() {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
+    // Shared Git-faithful parser (internal::log::trailer, lore.md §1.9): the
+    // block must QUALIFY per git's rules (last paragraph, not the title,
+    // alnum/dash keys, 25% rule). This tightened the old loose rsplit("\n\n")
+    // parser to agree with `git shortlog --group=trailer:<key>` — notably a
+    // single-paragraph message and a prose-heavy final paragraph no longer
+    // contribute groups. The `key` itself is strengthened as a recognized key
+    // so an explicitly requested group qualifies its own mixed block, matching
+    // git's behavior for configured/requested trailers.
     let mut identities = Vec::new();
-    for line in block.lines() {
-        let Some((raw_key, raw_value)) = line.split_once(':') else {
-            continue;
-        };
-        if !raw_key.trim().eq_ignore_ascii_case(key) {
+    for trailer in crate::internal::log::trailer::parse_trailers_with_recognized(message, &[key]) {
+        if !trailer.key_matches(key) {
             continue;
         }
-        let value = raw_value.trim();
+        let value = trailer.value.as_str();
         if value.is_empty() {
             continue;
         }

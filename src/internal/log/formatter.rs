@@ -51,6 +51,8 @@ pub struct CommitFormatter {
     format: FormatType,
     /// `--date=<mode>` rendering mode for author/committer dates ("" = default).
     date_mode: String,
+    /// `--only-trailers`: show only the trailer block (selected keys; empty = all).
+    only_trailers: Option<Vec<String>>,
 }
 
 impl CommitFormatter {
@@ -58,6 +60,7 @@ impl CommitFormatter {
         Self {
             format,
             date_mode: String::new(),
+            only_trailers: None,
         }
     }
 
@@ -113,6 +116,35 @@ impl CommitFormatter {
         out
     }
 
+    /// `log --only-trailers` (Libra extension, lore.md §1.9): replace the
+    /// indented message with the commit's qualifying trailer block — unfolded
+    /// `Key: value` lines (plus separator-less recognized lines like
+    /// `(cherry picked from commit …)` verbatim), optionally key-filtered.
+    /// Empty for commits without a qualifying block.
+    pub fn with_only_trailers(mut self, selected_keys: Vec<String>) -> Self {
+        self.only_trailers = Some(selected_keys);
+        self
+    }
+
+    fn only_trailers_body(&self, commit: &Commit, selected_keys: &[String]) -> String {
+        let trailers = crate::internal::log::trailer::parse_trailers(&commit.message);
+        let mut lines: Vec<String> = Vec::new();
+        if selected_keys.is_empty() {
+            // All keys: render the raw qualifying block (keeps recognized
+            // separator-less lines verbatim).
+            if let Some(block) = crate::internal::log::trailer::trailer_block(&commit.message) {
+                lines = block;
+            }
+        } else {
+            for trailer in &trailers {
+                if selected_keys.iter().any(|key| trailer.key_matches(key)) {
+                    lines.push(format!("{}: {}", trailer.key, trailer.value));
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
     fn format_full(&self, commit: &Commit, ctx: &FormatContext<'_>) -> String {
         let mut out = self.format_header_line(commit, ctx);
         out.push('\n');
@@ -127,6 +159,11 @@ impl CommitFormatter {
             format_timestamp_with(commit.committer.timestamp as i64, &self.date_mode)
         ));
 
+        if let Some(selected_keys) = &self.only_trailers {
+            let body = self.only_trailers_body(commit, selected_keys);
+            out.push_str(&self.indent_message(&body));
+            return out;
+        }
         let (message, _) = parse_commit_msg(&commit.message);
         out.push_str(&self.indent_message(message));
         out

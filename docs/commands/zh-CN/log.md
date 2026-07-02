@@ -150,6 +150,10 @@ libra log --grep fix -i              # 大小写不敏感
 libra log --grep WIP --invert-grep   # 隐藏 WIP 提交
 ```
 
+### `--trailer <KEY[=VALUE]>` / `--only-trailers`（Libra 扩展）
+
+Git 无此二 flag（最近等价：过滤用脆弱的 `--grep='^Key: '`，展示用 `--pretty='%(trailers)'`）。`--trailer KEY` 只保留其**合格 trailer 块**（按 Git 规则解析：末段、绝非标题段；key 仅 ASCII 字母数字/连字符；混合块需含 `Signed-off-by` 等可识别 trailer 且 trailer 行 ≥25%）携带该 key 的提交（ASCII 大小写不敏感）；`KEY=VALUE` 另要求展开后的值精确相等；可重复（全部须命中，AND）。`--only-trailers` 把每个提交的消息替换为其 trailer 块（展开的 `Key: value` 行；`(cherry picked from commit …)` 原样），本身不过滤；与 `--trailer` 组合时仅展示所选 key；与 `--oneline`/`--pretty`/`--format` 互斥。`--json` 下每个提交带增量 `trailers` 数组（`[{key,value}]`，无合格块时为空数组）；`body` 不变。
+
 ### `--since <DATE>`
 
 显示晚于指定日期的提交。

@@ -3170,3 +3170,138 @@ fn test_log_positional_parent_dir_path_not_misclassified() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// `log --trailer` / `--only-trailers` (Libra extensions, lore.md §1.9).
+// ---------------------------------------------------------------------------
+
+/// Three commits: one with a Reviewed-by trailer (via commit --trailer), one
+/// with -s + --trailer combined (regression: must form ONE trailer block), one
+/// with no trailers.
+fn trailer_repo() -> tempfile::TempDir {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_with = |file: &str, args: &[&str]| {
+        std::fs::write(p.join(file), file).unwrap();
+        assert_cli_success(&run_libra_command(&["add", file], p), "add");
+        let mut argv = vec!["commit", "--no-verify"];
+        argv.extend_from_slice(args);
+        assert_cli_success(&run_libra_command(&argv, p), "commit");
+    };
+    commit_with(
+        "a.txt",
+        &[
+            "-m",
+            "add a",
+            "--trailer",
+            "Reviewed-by: Alice <alice@example.com>",
+        ],
+    );
+    commit_with(
+        "b.txt",
+        &["-m", "add b", "-s", "--trailer", "Change-Id: I12345"],
+    );
+    commit_with("c.txt", &["-m", "add c"]);
+    repo
+}
+
+#[test]
+#[serial]
+fn test_log_trailer_filter_and_json() {
+    let repo = trailer_repo();
+    let p = repo.path();
+    // Key filter: only the Reviewed-by commit.
+    let out = run_libra_command(&["log", "--trailer", "reviewed-by", "--no-pager"], p);
+    assert_cli_success(&out, "trailer key filter");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("add a") && !text.contains("add b") && !text.contains("add c"));
+    // Key=value exact filter.
+    let out = run_libra_command(&["log", "--trailer", "Change-Id=I12345", "--no-pager"], p);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("add b"));
+    let out = run_libra_command(&["log", "--trailer", "Change-Id=WRONG", "--no-pager"], p);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("add b"));
+    // -s + --trailer roundtrip: BOTH trailers live in one block, so filtering
+    // by the custom key finds the commit even though -s appended afterward.
+    let out = run_libra_command(&["log", "--trailer", "signed-off-by", "--no-pager"], p);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("add b"),
+        "-s + --trailer form one Git-parseable block"
+    );
+    // JSON: additive trailers field, empty for trailer-less commits.
+    let out = run_libra_command(&["--json", "log"], p);
+    assert_cli_success(&out, "json log");
+    let json = parse_json_stdout(&out);
+    let commits = json["data"]["commits"].as_array().expect("commits");
+    let by_subject = |subj: &str| {
+        commits
+            .iter()
+            .find(|c| c["subject"].as_str() == Some(subj))
+            .unwrap_or_else(|| panic!("missing {subj}"))
+    };
+    let a = by_subject("add a");
+    assert_eq!(a["trailers"][0]["key"].as_str(), Some("Reviewed-by"));
+    assert_eq!(
+        a["trailers"][0]["value"].as_str(),
+        Some("Alice <alice@example.com>")
+    );
+    let b = by_subject("add b");
+    let keys: Vec<&str> = b["trailers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["key"].as_str())
+        .collect();
+    assert!(
+        keys.contains(&"Change-Id") && keys.contains(&"Signed-off-by"),
+        "one block carries both: {keys:?}"
+    );
+    let c = by_subject("add c");
+    assert!(
+        c["trailers"].as_array().is_some_and(|a| a.is_empty()),
+        "trailer-less commit has an empty array"
+    );
+    // Filtered JSON agrees with the human path.
+    let out = run_libra_command(&["--json", "log", "--trailer", "reviewed-by"], p);
+    let json = parse_json_stdout(&out);
+    assert_eq!(json["data"]["commits"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+#[serial]
+fn test_log_only_trailers_display_and_errors() {
+    let repo = trailer_repo();
+    let p = repo.path();
+    let out = run_libra_command(&["log", "--only-trailers", "--no-pager"], p);
+    assert_cli_success(&out, "--only-trailers");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Reviewed-by: Alice <alice@example.com>"),
+        "trailer lines shown: {text}"
+    );
+    assert!(
+        !text.contains("add a\n") || !text.contains("    add a"),
+        "message bodies replaced by trailer blocks"
+    );
+    // Key-filtered display via --trailer.
+    let out = run_libra_command(
+        &[
+            "log",
+            "--only-trailers",
+            "--trailer",
+            "change-id",
+            "--no-pager",
+        ],
+        p,
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Change-Id: I12345"));
+    assert!(
+        !text.contains("Signed-off-by"),
+        "display filtered to the selected key: {text}"
+    );
+    // clap exclusions + empty key usage error.
+    let out = run_libra_command(&["log", "--only-trailers", "--oneline"], p);
+    assert_eq!(out.status.code(), Some(129), "conflicts with --oneline");
+    let out = run_libra_command(&["log", "--trailer", "=x", "--no-pager"], p);
+    assert_eq!(out.status.code(), Some(129), "empty key is a usage error");
+}

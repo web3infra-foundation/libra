@@ -52,6 +52,8 @@ flowchart TD
 - `--pretty=<value>`：识别命名预设（`oneline`/`medium`/`short`/`full`/`fuller`/`reference`/`raw`）与 `format:<tmpl>`/`tformat:<tmpl>` 前缀（自定义模板）；其它值按裸自定义模板处理。`medium`（及空值）映射默认 Full（Git 默认）。`short`/`full`/`fuller`/`reference`/`raw` 经 `FormatType::Preset(LogPreset)` 单独渲染：`short`=commit+Author+缩进 subject（无 Date/Commit/body）；`full`=+Commit 行（无 Date）+完整消息；`fuller`=Author/AuthorDate/Commit/CommitDate 四行对齐+完整消息；`reference`=单行 `<abbrev> (<subject>, <short-date>)`；`raw`=tree/parent/author/committer 原始头（含可选 gpgsig，space-续行）+缩进消息（全 hash、原始时间戳）。预设继承 libra log 既有惯例（时间戳渲染 UTC `+0000`、`--pretty` 隐含缩写哈希、提交消息体空行在存储时已折叠），故在这些既有维度上与 git 非逐字节相同。`show` 复用同一 `parse_pretty_format`/`CommitFormatter`，故同样获得这些预设。
 
 
+- trailer 支持（`lore.md` §1.9）：共享 Git-faithful 解析器 `internal::log::trailer`（`parse_trailers`/`parse_trailers_with_recognized`/`trailer_block`/`ends_with_trailer_block`）——末段块定位（注释行在定位与分类中均透明）、首段（标题）排除、key 字符集仅 ASCII 字母数字+`-`（git `find_separator` 语义，`Change_Id:`/非 ASCII key 不是 trailer）、key 与 `:` 间容忍空白、空值合法、续行 RFC-822 折叠且在 25% 算术中记双非（孤儿续行记非 trailer 行）、可识别前缀 `Signed-off-by: `/`(cherry picked from commit `（后者仅入 raw 块，不作为结构化 Trailer）、合格判定 `全 trailer 或（含可识别且 trailer*3>=非)`。有意简化（不实现）：`trailer.separators`/`trailer.<token>.*` 配置、自定义注释字符、`---` divider。CLI：`--trailer KEY[=VALUE]`（AND 过滤，key 大小写不敏感、value 精确；`CommitFilter.trailer_filters` 同时接入 human 与 `--json` 两条构造路径）与 `--only-trailers`（`CommitFormatter::with_only_trailers`，与 oneline/pretty/format 互斥）为 Libra 扩展；`--json` 增量 `trailers` 字段。`%(trailers[:opts])` pretty 占位符为后续项（复用本解析器）。shortlog `--group=trailer:` 已改走本解析器（请求的 key 作为 recognized 强化，混合块可合格）。写侧三修复见 commit.md。
+
 ## 还未实现的功能
 
 | 类别 | 未完成项 | 当前处理 |
