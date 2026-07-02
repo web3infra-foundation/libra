@@ -89,6 +89,7 @@ pub mod rev_list;
 pub mod rev_parse;
 pub mod revert;
 pub mod sandbox;
+pub mod service;
 pub mod shortlog;
 pub mod show;
 pub mod show_ref;

@@ -35,7 +35,7 @@ Command Groups:
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
   Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere, metadata
   Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, publish, credential, bundle
-  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
+  AI And Automation       code, code-control, automation, usage, graph, sandbox, agent, service
   Maintenance And Plumbing fsck, maintenance, repack, logfile, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
 
 Help Topics:
@@ -367,6 +367,11 @@ enum Commands {
         after_help = command::dirty::DIRTY_EXAMPLES
     )]
     Dirty(command::dirty::DirtyArgs),
+    #[command(
+        about = "Run a headless local service: notification bus + dirty-mark ingestion (Libra extension)",
+        after_help = command::service::SERVICE_EXAMPLES
+    )]
+    Service(command::service::ServiceArgs),
     #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
@@ -1458,6 +1463,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Cache(cmd_args) => command::cache::execute_safe(cmd_args, &output).await?,
         Commands::Metadata(cmd_args) => command::metadata::execute_safe(cmd_args, &output).await?,
         Commands::Dirty(cmd_args) => command::dirty::execute_safe(cmd_args, &output).await?,
+        Commands::Service(cmd_args) => command::service::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,

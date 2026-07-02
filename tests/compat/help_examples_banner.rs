@@ -112,6 +112,7 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "cache",
     "metadata",
     "dirty",
+    "service",
 ];
 
 #[test]

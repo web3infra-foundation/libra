@@ -363,6 +363,7 @@ mod rev_parse_test;
 mod revert_test;
 mod sandbox_status_test;
 mod schema_upgrade_test;
+mod service_test;
 mod shortlog_test;
 mod show_ref_abbrev_test;
 mod show_ref_alias_test;

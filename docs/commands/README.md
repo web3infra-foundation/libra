@@ -40,6 +40,7 @@ Every Libra command accepts the following global flags:
 | `libra stash` | | Save and restore temporary changes with push/pop/list/apply/drop subcommands | [stash.md](stash.md) |
 | `libra status` | `st` | Show the state of the working tree, staging area, and upstream tracking | [status.md](status.md) |
 | `libra dirty` | | Advisory dirty-set marks for the status cache (Libra extension) | [dirty.md](dirty.md) |
+| `libra service` | | Headless local service: notification bus + dirty-mark ingestion (Libra extension) | [service.md](service.md) |
 
 ### Commits & History
 
