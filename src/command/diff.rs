@@ -143,14 +143,28 @@ pub struct DiffArgs {
     #[clap(long = "ignore-space-at-eol")]
     pub ignore_space_at_eol: bool,
 
+    /// Ignore a carriage return at end of line: trailing `\r`s are stripped
+    /// before comparing, so a CRLF↔LF-only change drops out. The weakest
+    /// whitespace flag — `-w`/`-b`/`--ignore-space-at-eol` each already ignore a
+    /// trailing `\r` (it is whitespace) and take precedence when combined. A
+    /// mid-line `\r` still compares exactly. (Known approximation vs Git: Git
+    /// allows at most ONE trailing CR to remain on each side — a non-transitive
+    /// relation no per-line normalizer can express — so a pathological
+    /// multi-CR ending like `a\r\r\r\n` vs `a\r\n` matches here but
+    /// differs in Git; the everyday CRLF↔LF and `\r\r\n`↔`\r\n` cases
+    /// match Git.)
+    #[clap(long = "ignore-cr-at-eol")]
+    pub ignore_cr_at_eol: bool,
+
     /// Ignore changes whose lines are all blank: a change consisting only of
     /// added/removed empty lines is not reported (an added/deleted file whose only
     /// content is blank lines is still listed with zero counts), while a change
     /// near a real edit is shown in full. Only truly empty lines count as blank (a
     /// `\r`-only CRLF line is not blank). Re-diffs affected files so
     /// `--stat`/`--name-only`/`--numstat`/JSON reflect the result; honors `-U<n>`.
-    /// Composes with a whitespace flag (`-w`/`-b`/`--ignore-space-at-eol`): a line
-    /// that is blank after whitespace-normalization then counts as blank.
+    /// Composes with a whitespace flag (`-w`/`-b`/`--ignore-space-at-eol`/
+    /// `--ignore-cr-at-eol`): under any whitespace flag an all-whitespace line
+    /// counts as blank (matching Git's `xdl_blankline`).
     #[clap(long = "ignore-blank-lines")]
     pub ignore_blank_lines: bool,
 
@@ -1122,6 +1136,8 @@ async fn run_diff(args: &DiffArgs, output: &OutputConfig) -> Result<DiffOutput, 
         Some(normalize_ignore_space_change)
     } else if args.ignore_space_at_eol {
         Some(normalize_ignore_space_at_eol)
+    } else if args.ignore_cr_at_eol {
+        Some(normalize_ignore_cr_at_eol)
     } else {
         None
     };
@@ -3302,6 +3318,19 @@ fn normalize_ignore_space_at_eol(line: &str) -> String {
     line.trim_end().to_string()
 }
 
+/// Normalizer for `--ignore-cr-at-eol`: strip ALL trailing carriage returns so
+/// a CRLF↔LF-only change compares equal; anything else (mid-line `\r`, trailing
+/// spaces) still compares exactly. Stripping all — not one — keeps the two
+/// record-splitting paths consistent: the main re-diff path splits with
+/// `str::lines()` (which already drops the terminator's `\r` before the
+/// normalizer runs), while the `--ignore-blank-lines` composition path
+/// raw-splits on `\n` keeping `\r` bytes; with strip-all both paths equate
+/// exactly the same line pairs. See the flag's doc for the documented
+/// approximation vs Git's non-transitive allow-one-remaining-CR comparison.
+fn normalize_ignore_cr_at_eol(line: &str) -> String {
+    line.trim_end_matches('\r').to_string()
+}
+
 /// Compute the unified-diff hunk body for `old_text` vs `new_text` at `context`
 /// lines, comparing lines through `normalize` (e.g. whitespace-insensitive for
 /// `-w`) while EMITTING the original line text. Returns an empty string when the
@@ -3492,15 +3521,29 @@ fn compute_unified_hunks_ignore_blank_inner(
     if let Some(g) = cur.take() {
         groups.push(g);
     }
-    // Mark groups whose every touched line is blank under the comparison view: a
-    // byte-empty content line (or a normalized-empty line when composing a
-    // whitespace flag). Libra's diff models lines by content only and does not
-    // track line terminators, so Git's terminator-dependent `xdl_blankline`
-    // `size<=1` quirk for an unterminated final line is intentionally NOT emulated
-    // — see the no-trailing-newline limitation note below.
+    // Mark groups whose every touched line is blank. Without a whitespace flag,
+    // blank = byte-empty (Git does not treat a `\r`-only CRLF line as blank).
+    // Under ANY whitespace flag, Git's `xdl_blankline` classifies an
+    // all-whitespace line as blank — equivalent to empty-after-normalize for
+    // `-w`/`-b`/`--ignore-space-at-eol`, but NOT for `--ignore-cr-at-eol`
+    // (`"  \r"` normalizes to `"  "`, non-empty, yet Git counts it blank), so
+    // classify on the RAW record's all-whitespace test when composing. Libra's
+    // diff models lines by content only and does not track line terminators, so
+    // Git's terminator-dependent `size<=1` quirk for an unterminated final line
+    // is intentionally NOT emulated — see the limitation note below.
+    let raw_blank = |recs: &[&str]| recs.iter().all(|l| l.trim().is_empty());
     for g in groups.iter_mut() {
-        let old_blank = cmp_old[g.i1..g.i1 + g.chg1].iter().all(|l| l.is_empty());
-        let new_blank = cmp_new[g.i2..g.i2 + g.chg2].iter().all(|l| l.is_empty());
+        let (old_blank, new_blank) = if normalize.is_some() {
+            (
+                raw_blank(&old_recs[g.i1..g.i1 + g.chg1]),
+                raw_blank(&new_recs[g.i2..g.i2 + g.chg2]),
+            )
+        } else {
+            (
+                cmp_old[g.i1..g.i1 + g.chg1].iter().all(|l| l.is_empty()),
+                cmp_new[g.i2..g.i2 + g.chg2].iter().all(|l| l.is_empty()),
+            )
+        };
         g.ignore = old_blank && new_blank;
     }
 
@@ -3853,6 +3896,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         ignore_all_space: false,
         ignore_space_change: false,
         ignore_space_at_eol: false,
+        ignore_cr_at_eol: false,
         ignore_blank_lines: false,
         summary: false,
         shortstat: false,

@@ -2931,3 +2931,146 @@ fn test_diff_rename_full_similarity_non_identical() {
         "-M100% does not fold a non-identical pair: {es}"
     );
 }
+
+#[test]
+fn test_diff_ignore_cr_at_eol() {
+    // `--ignore-cr-at-eol` (lore.md §1.4): a CRLF↔LF-only change drops out;
+    // trailing-space or mid-line `\r` changes still show; stronger whitespace
+    // flags take precedence.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let commit_f = |content: &str, msg: &str| {
+        std::fs::write(p.join("f.txt"), content).unwrap();
+        assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+        assert_cli_success(
+            &run_libra_command(&["commit", "-m", msg, "--no-verify"], p),
+            "commit f",
+        );
+    };
+    let out =
+        |args: &[&str]| String::from_utf8_lossy(&run_libra_command(args, p).stdout).into_owned();
+
+    // 1) LF → CRLF only: plain diff shows it, the flag drops the file entirely.
+    commit_f("alpha\nbeta\ngamma\n", "base lf");
+    std::fs::write(p.join("f.txt"), "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+    assert!(
+        !out(&["diff", "f.txt"]).trim().is_empty(),
+        "plain diff shows the CRLF-only change"
+    );
+    assert!(
+        out(&["diff", "--ignore-cr-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "--ignore-cr-at-eol drops a CRLF-only change"
+    );
+    assert!(
+        out(&["diff", "--ignore-cr-at-eol", "--numstat", "f.txt"])
+            .trim()
+            .is_empty(),
+        "numstat reflects the re-diff (no changes)"
+    );
+    let exit = run_libra_command(&["diff", "--ignore-cr-at-eol", "--exit-code", "f.txt"], p);
+    assert_eq!(
+        exit.status.code(),
+        Some(0),
+        "--exit-code sees no differences under the flag"
+    );
+
+    // 2) Trailing-space-only change STILL shows (distinguishes from
+    //    --ignore-space-at-eol, which would drop it).
+    commit_f("one\ntwo\n", "base spaces");
+    std::fs::write(p.join("f.txt"), "one   \ntwo\n").unwrap();
+    assert!(
+        !out(&["diff", "--ignore-cr-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "trailing-space change is a real change under --ignore-cr-at-eol"
+    );
+    assert!(
+        out(&["diff", "--ignore-space-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "sanity: --ignore-space-at-eol drops the same change"
+    );
+
+    // 3) Mid-line \r is a real change (only the final \r is stripped).
+    commit_f("a\rb\n", "base midcr");
+    std::fs::write(p.join("f.txt"), "ab\n").unwrap();
+    assert!(
+        !out(&["diff", "--ignore-cr-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "mid-line \\r removal is a real change"
+    );
+
+    // 4) Precedence: `-b --ignore-cr-at-eol` behaves as `-b` (a space-amount
+    //    change is dropped even though cr-at-eol alone would keep it).
+    commit_f("x  y\n", "base b");
+    std::fs::write(p.join("f.txt"), "x y\n").unwrap();
+    assert!(
+        out(&["diff", "-b", "--ignore-cr-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "-b wins over --ignore-cr-at-eol"
+    );
+
+    // 5) Double-CR ending: `a\r\r\n` vs `a\r\n` matches Git (equal) and —
+    //    with strip-all normalization — behaves identically on the plain and
+    //    the --ignore-blank-lines composition paths.
+    commit_f("a\r\r\ntail\n", "base doublecr");
+    std::fs::write(p.join("f.txt"), "a\r\ntail\n").unwrap();
+    assert!(
+        out(&["diff", "--ignore-cr-at-eol", "f.txt"])
+            .trim()
+            .is_empty(),
+        "double-CR vs single-CR ending is ignored (matches Git)"
+    );
+    assert!(
+        out(&[
+            "diff",
+            "--ignore-cr-at-eol",
+            "--ignore-blank-lines",
+            "f.txt"
+        ])
+        .trim()
+        .is_empty(),
+        "the ignore-blank composition path agrees (consistent record semantics)"
+    );
+}
+
+#[test]
+fn test_diff_ignore_cr_at_eol_composes_with_ignore_blank_lines() {
+    // Composition (Git's xdl_blankline): under ANY whitespace flag an
+    // all-whitespace line counts as blank — so with --ignore-cr-at-eol both a
+    // "\r"-terminated blank line AND a space-only line count as blank, and a
+    // change adding only such lines drops out.
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    std::fs::write(p.join("f.txt"), "top\nbottom\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit f",
+    );
+    // Insert a CRLF blank line and a space-only line between top and bottom.
+    std::fs::write(p.join("f.txt"), "top\n\r\n   \nbottom\n").unwrap();
+    let out =
+        |args: &[&str]| String::from_utf8_lossy(&run_libra_command(args, p).stdout).into_owned();
+    assert!(
+        !out(&["diff", "--ignore-blank-lines", "f.txt"])
+            .trim()
+            .is_empty(),
+        "without a whitespace flag a \\r-only line is NOT blank (Git parity)"
+    );
+    assert!(
+        out(&[
+            "diff",
+            "--ignore-blank-lines",
+            "--ignore-cr-at-eol",
+            "f.txt"
+        ])
+        .trim()
+        .is_empty(),
+        "with --ignore-cr-at-eol both the CRLF blank and the space-only line count blank"
+    );
+}
