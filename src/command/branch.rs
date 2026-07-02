@@ -1131,6 +1131,22 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
         Head::update(Head::Branch(new_name.clone()), None).await;
     }
 
+    // Move branch metadata (lore.md §1.5) BEFORE deleting the old ref — the
+    // delete's metadata cascade would otherwise wipe the rows being moved.
+    // The destination has no rows (rename onto an existing branch is refused
+    // above), so the defensive dest-clear inside rename_target is a no-op.
+    {
+        let db = get_db_conn_instance().await;
+        crate::internal::metadata::MetadataKv::rename_target_with_conn(
+            &db,
+            crate::internal::metadata::MetadataScope::Branch,
+            &old_name,
+            &new_name,
+        )
+        .await
+        .map_err(|e| branch_config_write_error("branch metadata", e))?;
+    }
+
     Branch::delete_branch_result(&old_name, None)
         .await
         .map_err(map_branch_store_error)?;
@@ -1204,6 +1220,18 @@ async fn copy_branch_impl(args: &[String], force: bool) -> Result<BranchOutput, 
                 .map_err(|e| branch_config_write_error(&dst_key, e))?;
         }
     }
+
+    // Copy branch metadata (lore.md §1.5). A forced copy (-C) replaces any
+    // metadata the overwritten destination carried — destructive by design,
+    // matching the ref overwrite itself.
+    crate::internal::metadata::MetadataKv::copy_target_with_conn(
+        &db,
+        crate::internal::metadata::MetadataScope::Branch,
+        &old_name,
+        &new_name,
+    )
+    .await
+    .map_err(|e| branch_config_write_error("branch metadata", e))?;
 
     Ok(BranchOutput::Copy { old_name, new_name })
 }

@@ -541,7 +541,26 @@ impl Branch {
             .map_err(|err| BranchStoreError::Delete {
                 name: branch_name.to_string(),
                 detail: err.to_string(),
-            })
+            })?;
+        // Cascade branch metadata (lore.md §1.5) for LOCAL branches only —
+        // pruning a remote-tracking ref (remote=Some) must never wipe the
+        // same-named local branch's metadata. On a pool connection the ref
+        // delete and this cascade are two implicit transactions; a crash
+        // between them can orphan rows, which are inert (all reads are
+        // target-keyed) and swept up if the branch name is ever reused.
+        if remote.is_none() {
+            crate::internal::metadata::MetadataKv::delete_all_for_target_with_conn(
+                db,
+                crate::internal::metadata::MetadataScope::Branch,
+                branch_name,
+            )
+            .await
+            .map_err(|err| BranchStoreError::Delete {
+                name: branch_name.to_string(),
+                detail: format!("branch deleted but metadata cascade failed: {err}"),
+            })?;
+        }
+        Ok(())
     }
 
     /// Pool-acquiring counterpart of [`Branch::delete_branch_result_with_conn`].

@@ -48,7 +48,7 @@ fn builtin_migrations_register_current_schema_migrations() {
         versions,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101, 2026060201, 2026060401, 2026060801, 2026061401, 2026062301
+            2026053101, 2026060201, 2026060401, 2026060801, 2026061401, 2026062301, 2026070201
         ]
     );
     assert_eq!(
@@ -67,13 +67,14 @@ fn builtin_migrations_register_current_schema_migrations() {
             "revert_sequence",
             "notes",
             "rename_agent_traces_branch",
+            "metadata_kv",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 13);
-    assert_eq!(runner.max_registered_version(), Some(2026062301));
+    assert_eq!(runner.len(), 14);
+    assert_eq!(runner.max_registered_version(), Some(2026070201));
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,10 +1050,11 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         applied,
         vec![
             2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801, 2026052301,
-            2026053101, 2026060201, 2026060401, 2026060801, 2026061401, 2026062301
+            2026053101, 2026060201, 2026060401, 2026060801, 2026061401, 2026062301, 2026070201
         ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
+    assert!(table_exists(&conn, "metadata_kv").await);
     assert!(table_exists(&conn, "ai_final_decision").await);
     assert!(table_exists(&conn, "automation_log").await);
     assert!(table_exists(&conn, "agent_usage_stats").await);
@@ -1098,8 +1100,8 @@ async fn approved_permission_up_down_up_round_trip() {
     assert_eq!(
         rolled,
         vec![
-            2026062301, 2026061401, 2026060801, 2026060401, 2026060201, 2026053101, 2026052301,
-            2026050801, 2026050601
+            2026070201, 2026062301, 2026061401, 2026060801, 2026060401, 2026060201, 2026053101,
+            2026052301, 2026050801, 2026050601
         ]
     );
     assert!(
@@ -1124,7 +1126,7 @@ async fn approved_permission_up_down_up_round_trip() {
         reapplied,
         vec![
             2026050601, 2026050801, 2026052301, 2026053101, 2026060201, 2026060401, 2026060801,
-            2026061401, 2026062301
+            2026061401, 2026062301, 2026070201
         ]
     );
     assert!(table_exists(&conn, "approved_permission").await);

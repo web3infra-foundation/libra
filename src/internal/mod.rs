@@ -27,6 +27,7 @@ pub mod db;
 pub mod head;
 pub mod log;
 pub mod merge_base;
+pub mod metadata;
 pub mod model;
 pub mod notes;
 pub mod operation;

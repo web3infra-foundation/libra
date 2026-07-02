@@ -288,7 +288,7 @@ docs(readme): update provider table
 
 SQLite database at `.libra/libra.db`. Tables fall into three groups:
 
-- **Git core**: `config`, `config_kv`, `reference`, `reflog`, `rebase_state`, `object_index`, `schema_version`
+- **Git core**: `config`, `config_kv`, `reference`, `reflog`, `rebase_state`, `object_index`, `schema_version`, `metadata_kv` (branch/repo metadata KV, lore.md 1.5)
 - **AI threads & scheduling**: `ai_thread`, `ai_thread_participant`, `ai_thread_intent`, `ai_thread_provider_metadata`, `ai_scheduler_state`, `ai_scheduler_plan_head`, `ai_scheduler_selected_plan`, `ai_live_context_window`
 - **AI runtime contracts**: `ai_index_intent_plan`, `ai_index_intent_task`, `ai_index_intent_context_frame`, `ai_index_plan_step_task`, `ai_index_run_event`, `ai_index_run_patchset`, `ai_index_task_run`, `ai_decision_proposal`, `ai_risk_score_breakdown`, `ai_validation_report`
 

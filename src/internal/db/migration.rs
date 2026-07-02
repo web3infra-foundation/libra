@@ -655,6 +655,17 @@ pub fn builtin_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026062301_rename_agent_traces_branch.sql"),
             include_str!("../../../sql/migrations/2026062301_rename_agent_traces_branch_down.sql"),
         ),
+        // 2026-07-02: unified scoped metadata KV table (lore.md 1.5) — the
+        // single store for branch (and future scoped) metadata; protect /
+        // archive / lineage.* are keys here, never separate tables. Repo-scope
+        // metadata intentionally lives in config_kv under `metadata.*`.
+        // Owner API: `internal::metadata::MetadataKv` (the only writer/reader).
+        sql_migration(
+            2026070201,
+            "metadata_kv",
+            include_str!("../../../sql/migrations/2026070201_metadata_kv.sql"),
+            include_str!("../../../sql/migrations/2026070201_metadata_kv_down.sql"),
+        ),
     ]
 }
 

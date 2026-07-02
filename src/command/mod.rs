@@ -64,6 +64,7 @@ pub mod maintenance;
 pub mod merge;
 pub mod merge_base;
 pub mod merge_file;
+pub mod metadata;
 pub mod mv;
 pub mod notes;
 pub mod op;

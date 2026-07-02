@@ -33,7 +33,7 @@ Command Groups:
   Repository Setup        init, clone, config, completions
   Working Tree            status, add, rm, mv, restore, clean, stash, lfs, ls-files, check-ignore, check-attr, check-mailmap, worktree
   History Inspection      log, shortlog, show, show-ref, format-patch, ls-remote, ls-tree, diff, grep, blame, describe, notes, archive
-  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere
+  Commit And Branching    commit, branch, switch, checkout, tag, merge, rebase, reset, cherry-pick, revert, rerere, metadata
   Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, publish, credential, bundle
   AI And Automation       code, code-control, automation, usage, graph, sandbox, agent
   Maintenance And Plumbing fsck, maintenance, repack, logfile, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref
@@ -357,6 +357,11 @@ enum Commands {
         after_help = command::cache::CACHE_EXAMPLES
     )]
     Cache(command::cache::CacheArgs),
+    #[command(
+        about = "Branch/repo metadata key-value store (Libra extension)",
+        after_help = command::metadata::METADATA_EXAMPLES
+    )]
+    Metadata(command::metadata::MetadataArgs),
     #[command(about = "Summarize commit history by author", alias = "slog")]
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
@@ -1151,6 +1156,9 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Logfile(_)
         // `cache info` only inspects env/config-derived storage tunables.
         | Commands::Cache(_)
+        // `metadata` reads/writes SQLite KV only (no object access); it
+        // enforces its own in-repo check.
+        | Commands::Metadata(_)
         | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         Commands::HashObject(args) if !args.write => {
             match utils::util::try_get_storage_path(None) {
@@ -1446,6 +1454,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
         Commands::Logfile(cmd_args) => command::logfile::execute_safe(cmd_args, &output).await?,
         Commands::Cache(cmd_args) => command::cache::execute_safe(cmd_args, &output).await?,
+        Commands::Metadata(cmd_args) => command::metadata::execute_safe(cmd_args, &output).await?,
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
