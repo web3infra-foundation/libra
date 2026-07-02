@@ -6,7 +6,9 @@ Compare differences between HEAD, the index, the working tree, or two revisions.
 
 ```
 libra diff [<pathspec>...]
-libra diff --staged [<pathspec>...]
+libra diff <commit> [<commit>] [--] [<pathspec>...]
+libra diff <commit>..<commit> | <commit>...<commit> [--] [<pathspec>...]
+libra diff --staged [<commit>] [<pathspec>...]
 libra diff --old <commit> --new <commit> [<pathspec>...]
 libra diff [--name-only | --name-status | --numstat | --stat | --shortstat | --summary]
            [-s | --no-patch] [--exit-code] [--check] [-R] [-z]
@@ -28,7 +30,8 @@ Pathspec arguments filter the diff to only show changes in matching files or dir
 | Old commit | | `--old <COMMIT>` | Specifies the "old" side of the comparison. Defaults to HEAD when `--staged`, or the index otherwise. |
 | New commit | | `--new <COMMIT>` | Specifies the "new" side. Requires `--old`. Conflicts with `--staged`. |
 | Staged | | `--staged` | Compare HEAD against the index (staged changes). Conflicts with `--new`. |
-| Pathspec | | positional | One or more files or directories to restrict the diff. |
+| Revisions | | positional | Up to two leading revisions, Git-style: `diff A` (A vs worktree), `diff A B` (≡ `A..B`), `diff A..B`, `diff A...B` (merge-base(A,B) vs B), `diff --staged A` (A vs index). Not interpreted when `--old`/`--new` is given. |
+| Pathspec | | positional | One or more files or directories to restrict the diff (after any revisions; use `--` to force the path reading). Pre-`--` paths must exist (or carry glob magic); post-`--` paths are taken verbatim. |
 | Algorithm | | `--algorithm <name>` | Diff algorithm: `histogram` (default), `myers`, or `myersMinimal`. |
 | Output file | | `--output <FILENAME>` | Write human-readable output to a file instead of stdout. Ignored in `--json` mode. |
 | Name only | | `--name-only` | Show only the names of changed files. |
@@ -237,19 +240,19 @@ The `old_ref` and `new_ref` fields indicate what was compared (e.g., `"index"`, 
 
 ## Design Rationale
 
-### Why `--old` / `--new` instead of positional commit arguments?
+### Positional revisions and `--old` / `--new`
 
-Git uses positional arguments for commit comparison (`git diff HEAD~1 HEAD`), but this creates ambiguity with pathspec arguments. Is `git diff main src/` comparing the `main` branch to `src/`, or showing changes in `src/` since `main`? Git resolves this with the `--` separator, but the ambiguity remains a source of confusion.
+Git-style positional revisions are supported: `libra diff A` (A vs working tree), `libra diff A B` (identical to `A..B`), `libra diff A...B` (merge-base(A,B) vs B), and `libra diff --staged A` (A vs index). Disambiguation matches Git: everything after `--` is always a path; a pre-`--` token that is both a revision and an existing file is an error (`ambiguous argument '<tok>': both a revision and a filename`), and one that is neither errors with `unknown revision or path not in the working tree` (glob pathspecs like `*.c` are exempt). These errors exit 129 with `LBR-CLI-002`/`LBR-CLI-003` (Libra's CLI-error convention; Git exits 128 here). More than two revisions is rejected — Git ≥2.38's combined-diff form for merges is a declined surface.
 
-Libra uses explicit named flags (`--old`, `--new`) to eliminate all ambiguity. Any positional arguments are always pathspecs. This is particularly valuable for AI agents that construct commands programmatically -- there is exactly one way to express each intent.
+The Libra-only named flags (`--old`, `--new`) remain the ambiguity-free programmatic form — when either is given, every positional is a pathspec and no revision interpretation happens at all. This is valuable for AI agents constructing commands: there is exactly one way to express each intent, with no name-collision hazard.
 
 ### Why histogram as the default algorithm?
 
 Git defaults to the Myers algorithm for historical reasons. The histogram algorithm (introduced in Git 2.0 as an option) generally produces more readable diffs for source code because it is better at identifying moved blocks and avoids pathological cases with repeated lines. Libra defaults to histogram for better out-of-the-box quality. Myers and myersMinimal remain available for compatibility and edge cases.
 
-### Why no `--cached` alias?
+### The `--cached` alias
 
-Git supports both `--staged` and `--cached` as synonyms. This duplication serves no purpose and makes documentation harder to search. Libra standardizes on `--staged` as the single canonical name, matching the terminology used in `libra status` and `libra restore --staged`.
+`--cached` is accepted as a Git-compatible visible alias for `--staged` (the canonical Libra spelling, matching `libra status` and `libra restore --staged`).
 
 ### Why `--new` requires `--old`?
 

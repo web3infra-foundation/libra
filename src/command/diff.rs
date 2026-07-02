@@ -43,7 +43,10 @@ const DIFF_EXAMPLES: &str = "\
 EXAMPLES:
     libra diff                              Compare index against the working tree
     libra diff --staged                     Compare HEAD against the index
-    libra diff --old HEAD~1 --new HEAD      Compare two revisions
+    libra diff --old HEAD~1 --new HEAD      Compare two revisions (flag form)
+    libra diff HEAD~1 HEAD                  Compare two revisions (positional, same as A..B)
+    libra diff main...feature               Diff from merge-base(main,feature) to feature
+    libra diff HEAD -- src/                 '--' separates revisions from paths
     libra diff --stat src/                  Show diff statistics under src/
     libra diff --shortstat                  Show just the files-changed/insertions/deletions line
     libra diff --word-diff                   Word-level diff ([-removed-]{+added+} inline)
@@ -77,6 +80,11 @@ pub struct DiffArgs {
 
     #[clap(help = "Files to compare")]
     pathspec: Vec<String>,
+
+    /// Paths after a `--` separator: always treated as pathspecs, never
+    /// revisions (Git's revision/path disambiguation separator).
+    #[clap(last = true, value_name = "PATH")]
+    after_dashdash: Vec<String>,
 
     /// Diff algorithm. `histogram` is currently the only implemented backend.
     #[clap(
@@ -415,6 +423,31 @@ pub(crate) enum DiffError {
 
     #[error("textconv filter '{command}' failed: {detail}")]
     TextconvFailed { command: String, detail: String },
+
+    /// A leading positional is BOTH a resolvable revision and an existing file
+    /// and no `--` separator was given — Git's ambiguity error.
+    #[error("ambiguous argument '{0}': both a revision and a filename")]
+    AmbiguousArgument(String),
+
+    /// A pre-`--` positional neither resolves as a revision nor exists as a
+    /// path (Git's `unknown revision or path not in the working tree`).
+    #[error("unknown revision or path not in the working tree: '{0}'")]
+    UnknownRevisionOrPath(String),
+
+    /// More than two positional revisions were given. Git ≥2.38 accepts this
+    /// as the combined-diff form for a merge; Libra has no combined diff, so
+    /// it is a declined surface (documented in COMPATIBILITY.md).
+    #[error("more than two revisions given: '{0}'")]
+    TooManyRevisions(String),
+
+    /// `--staged` combines with at most ONE revision (commit vs index); a
+    /// range or a second revision is meaningless there.
+    #[error("--staged compares a single commit against the index; '{0}' is one revision too many")]
+    StagedRevisionRange(String),
+
+    /// `A...B` where both sides resolve but share no merge base.
+    #[error("no merge base found for '{left}' and '{right}'")]
+    NoMergeBase { left: String, right: String },
 }
 
 impl From<DiffError> for CliError {
@@ -458,6 +491,25 @@ impl From<DiffError> for CliError {
                 .with_hint(
                     "check the diff.<driver>.textconv command, or pass --no-textconv to diff raw content",
                 ),
+            DiffError::AmbiguousArgument(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "use '--' to separate paths from revisions: libra diff <revision>... -- <path>...",
+                ),
+            DiffError::UnknownRevisionOrPath(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint(
+                    "use '--' to separate paths from revisions: libra diff <revision>... -- <path>...",
+                ),
+            DiffError::TooManyRevisions(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("libra diff takes at most two revisions; put paths after '--'"),
+            DiffError::StagedRevisionRange(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("drop --staged, or pass a single revision: libra diff --staged <commit>"),
+            DiffError::NoMergeBase { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("the two revisions share no common ancestor"),
         }
     }
 }
@@ -473,7 +525,9 @@ pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()
         return Err(CliError::from(DiffError::NotInRepo));
     }
     let mut args = args;
-    normalize_diff_range(&mut args).await;
+    resolve_positional_revisions(&mut args)
+        .await
+        .map_err(CliError::from)?;
     validate_diff_algorithm(&args).map_err(CliError::from)?;
     emit_worktree_scan_progress(&args, output);
     let mut result = run_diff(&args, output).await.map_err(CliError::from)?;
@@ -925,56 +979,176 @@ fn strip_relative_prefix_in_line(line: &str, strip: &str, full: &str, stripped: 
     line.to_string()
 }
 
-/// `diff A..B`: when no `--old`/`--new`/`--staged` is supplied and the first
-/// positional is a two-dot range whose sides both resolve to commits, rewrite it
-/// into `--old`/`--new`. `A..` diffs A against the working tree; `..B` diffs HEAD
-/// against B. The rewrite only fires when the sides resolve as commits, so a real
-/// path containing `..` is left untouched as a pathspec. Three-dot (`A...B`)
-/// merge-base ranges are not yet handled and fall through to pathspec matching.
-async fn normalize_diff_range(args: &mut DiffArgs) {
-    if args.old.is_some() || args.new.is_some() || args.staged {
-        return;
+/// Whether the raw argv for this `diff` invocation carried a `--` separator.
+/// clap consumes a value-less trailing `--` without a trace (`after_dashdash`
+/// stays empty), so recover it from `std::env::args()` — consulted ONLY when
+/// `after_dashdash` is empty, keeping `DiffArgs::parse_from` unit tests
+/// deterministic (same pattern as rev-parse). Caveat inherited from rev-parse:
+/// an earlier argv token literally equal to `diff` could confuse the scan.
+fn bare_dashdash_in_diff_argv() -> bool {
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.iter().position(|a| a == "diff") {
+        Some(idx) => argv[idx + 1..].iter().any(|a| a == "--"),
+        None => false,
     }
-    let Some(first) = args.pathspec.first().cloned() else {
-        return;
-    };
-    // Three-dot `A...B`: diff from the merge base of A and B to B (Git
-    // semantics). Leave the spec as a pathspec if either side cannot be
-    // resolved or the two commits share no merge base.
-    if let Some((left, right)) = first.split_once("...") {
-        let left_spec = if left.is_empty() { "HEAD" } else { left };
-        let right_spec = if right.is_empty() { "HEAD" } else { right };
-        let (Ok(left_id), Ok(right_id)) = (
-            crate::utils::util::get_commit_base(left_spec).await,
-            crate::utils::util::get_commit_base(right_spec).await,
-        ) else {
-            return;
-        };
-        let Ok(Some(base)) = crate::internal::merge_base::merge_base(&left_id, &right_id) else {
-            return;
-        };
-        args.old = Some(base.to_string());
-        args.new = Some(right_spec.to_string());
-        args.pathspec.remove(0);
-        return;
+}
+
+/// Whether `tok` names something on disk (cwd-relative). Uses
+/// `symlink_metadata` so a dangling symlink still counts as a path (Git's
+/// `check_filename` lstats).
+fn exists_as_path(tok: &str) -> bool {
+    std::path::Path::new(tok).symlink_metadata().is_ok()
+}
+
+/// Whether `tok` carries pathspec glob magic. Git's `check_filename` exempts
+/// wildcard pathspecs from the unknown-revision-or-path error (`git diff '*.c'`
+/// works with no literal `*.c` file); mirror that so globs stay pathspecs.
+fn has_glob_magic(tok: &str) -> bool {
+    tok.contains(['*', '?', '['])
+}
+
+/// Resolve leading positional revisions and the `--` pathspec separator,
+/// matching Git's `diff [<revision>...] [--] [<path>...]` grammar
+/// (lore.md §1.4):
+///
+/// - `A..B` / `A...B` glued ranges as the first positional (three-dot diffs
+///   from `merge-base(A,B)` to `B`; empty sides default to HEAD).
+/// - Bare revisions: `diff A` (A vs worktree), `diff A B` (≡ `A..B`), and
+///   `diff --staged A` (A vs index).
+/// - Everything after `--` is a pathspec, never a revision.
+/// - Git's two disambiguation errors: a pre-`--` token that is BOTH a
+///   revision and an existing file is `ambiguous argument`; one that is
+///   neither is `unknown revision or path not in the working tree` (globs
+///   exempt). With a `--` present, every pre-`--` token must be a revision.
+///
+/// The Libra-only `--old`/`--new` flags keep their documented leniency: when
+/// given, positionals stay pathspecs and no ambiguity walk runs. Note an
+/// ambiguous object-name PREFIX folds into the unknown-revision error rather
+/// than Git's distinct `ambiguous object name` message (documented).
+async fn resolve_positional_revisions(args: &mut DiffArgs) -> Result<(), DiffError> {
+    let dashdash = !args.after_dashdash.is_empty() || bare_dashdash_in_diff_argv();
+    // Post-`--` tokens are pathspecs verbatim (no existence check, matching
+    // `git diff -- nosuch` → empty diff). Fold them in up front.
+    let trailing_paths: Vec<String> = args.after_dashdash.drain(..).collect();
+
+    if args.old.is_some() || args.new.is_some() {
+        args.pathspec.extend(trailing_paths);
+        return Ok(());
     }
-    if !first.contains("..") {
-        return;
+
+    let mut revisions = 0usize;
+    let max_revisions = if args.staged { 1 } else { 2 };
+
+    // Glued range (`A..B` / `A...B`) as the first positional. `...` first —
+    // it contains `..`.
+    if let Some(first) = args.pathspec.first().cloned() {
+        let range_result: Option<Result<(), DiffError>> =
+            if let Some((left, right)) = first.split_once("...") {
+                let left_spec = if left.is_empty() { "HEAD" } else { left };
+                let right_spec = if right.is_empty() { "HEAD" } else { right };
+                let sides = (
+                    crate::utils::util::get_commit_base(left_spec).await,
+                    crate::utils::util::get_commit_base(right_spec).await,
+                );
+                match sides {
+                    (Ok(left_id), Ok(right_id)) => {
+                        match crate::internal::merge_base::merge_base(&left_id, &right_id) {
+                            Ok(Some(base)) => {
+                                args.old = Some(base.to_string());
+                                args.new = Some(right_spec.to_string());
+                                Some(Ok(()))
+                            }
+                            // Both sides resolve but share no ancestor: a clear
+                            // error, not a silent fall-through to pathspec.
+                            _ => Some(Err(DiffError::NoMergeBase {
+                                left: left_spec.to_string(),
+                                right: right_spec.to_string(),
+                            })),
+                        }
+                    }
+                    _ => None, // not a resolvable range; fall through to token rules
+                }
+            } else if let Some((left, right)) = first.split_once("..") {
+                let left_spec = if left.is_empty() { "HEAD" } else { left };
+                let left_ok = crate::command::get_target_commit(left_spec).await.is_ok();
+                let right_ok =
+                    right.is_empty() || crate::command::get_target_commit(right).await.is_ok();
+                if left_ok && right_ok {
+                    args.old = Some(left_spec.to_string());
+                    if !right.is_empty() {
+                        args.new = Some(right.to_string());
+                    }
+                    Some(Ok(()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        match range_result {
+            Some(Err(error)) => return Err(error),
+            Some(Ok(())) => {
+                if args.staged {
+                    // A range names two endpoints; the index IS the new side.
+                    return Err(DiffError::StagedRevisionRange(first));
+                }
+                args.pathspec.remove(0);
+                revisions = 2; // a consumed range uses up both revision slots
+            }
+            None => {}
+        }
     }
-    let Some((left, right)) = first.split_once("..") else {
-        return;
-    };
-    let left_spec = if left.is_empty() { "HEAD" } else { left };
-    let left_ok = crate::command::get_target_commit(left_spec).await.is_ok();
-    let right_ok = right.is_empty() || crate::command::get_target_commit(right).await.is_ok();
-    if !left_ok || !right_ok {
-        return;
+
+    // Walk the remaining leading positionals as bare revisions.
+    let mut remaining: Vec<String> = Vec::with_capacity(args.pathspec.len());
+    let mut revs_done = revisions >= max_revisions && revisions > 0;
+    let mut paths_started = false;
+    for tok in std::mem::take(&mut args.pathspec) {
+        if paths_started {
+            remaining.push(tok);
+            continue;
+        }
+        let resolves = crate::command::get_target_commit(&tok).await.is_ok();
+        let is_path = exists_as_path(&tok);
+        if resolves && is_path && !dashdash {
+            return Err(DiffError::AmbiguousArgument(tok));
+        }
+        // A resolving token is a revision — unconditionally when `--` is
+        // present (that is the separator's whole purpose: pre-`--` tokens are
+        // revisions even when a file of the same name exists).
+        if resolves && (dashdash || !is_path) {
+            if args.staged && revisions >= 1 {
+                return Err(DiffError::StagedRevisionRange(tok));
+            }
+            if revisions >= max_revisions || revs_done {
+                return Err(DiffError::TooManyRevisions(tok));
+            }
+            if revisions == 0 {
+                args.old = Some(tok);
+            } else {
+                args.new = Some(tok);
+            }
+            revisions += 1;
+            continue;
+        }
+        // Not a revision (or shadowed by an existing file): pathspec territory.
+        // With a `--` present every pre-`--` token must be a revision; without
+        // one, a token that neither resolves nor exists (and has no glob
+        // magic) is Git's unknown-revision-or-path error.
+        if dashdash {
+            return Err(DiffError::UnknownRevisionOrPath(tok));
+        }
+        if !is_path && !has_glob_magic(&tok) {
+            return Err(DiffError::UnknownRevisionOrPath(tok));
+        }
+        paths_started = true;
+        revs_done = true;
+        remaining.push(tok);
     }
-    args.old = Some(left_spec.to_string());
-    if !right.is_empty() {
-        args.new = Some(right.to_string());
-    }
-    args.pathspec.remove(0);
+    args.pathspec = remaining;
+    args.pathspec.extend(trailing_paths);
+    Ok(())
 }
 
 fn validate_diff_algorithm(args: &DiffArgs) -> Result<(), DiffError> {
@@ -3897,6 +4071,7 @@ pub(crate) async fn staged_diff_text() -> Result<String, DiffError> {
         ignore_space_change: false,
         ignore_space_at_eol: false,
         ignore_cr_at_eol: false,
+        after_dashdash: Vec::new(),
         ignore_blank_lines: false,
         summary: false,
         shortstat: false,

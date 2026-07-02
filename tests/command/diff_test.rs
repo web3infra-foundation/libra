@@ -2412,7 +2412,7 @@ fn test_diff_textconv() {
     assert_cli_success(&run_libra_command(&["add", "r.dat"], p), "stage r deletion");
     fs::write(p.join("r2.dat"), "aa\nbb\nXX\ndd\nee\nff\ngg\nhh\n").unwrap();
     assert_cli_success(&run_libra_command(&["add", "r2.dat"], p), "add r2");
-    let rn = run_libra_command(&["diff", "-M", "--cached", "r.dat", "r2.dat"], p);
+    let rn = run_libra_command(&["diff", "-M", "--cached", "--", "r.dat", "r2.dat"], p);
     let rns = String::from_utf8_lossy(&rn.stdout);
     assert!(
         rns.contains("rename from r.dat") && rns.contains("-CC") && rns.contains("+XX"),
@@ -2468,7 +2468,7 @@ fn test_diff_textconv() {
     );
     fs::write(p.join("new.bar"), "aa\nbb\nzz\ndd\nee\nff\ngg\nhh\n").unwrap();
     assert_cli_success(&run_libra_command(&["add", "new.bar"], p), "add bar");
-    let xr = run_libra_command(&["diff", "-M", "--cached", "old.foo", "new.bar"], p);
+    let xr = run_libra_command(&["diff", "-M", "--cached", "--", "old.foo", "new.bar"], p);
     let xrs = String::from_utf8_lossy(&xr.stdout);
     assert!(
         xrs.contains("rename from old.foo") && xrs.contains("-AA") && xrs.contains("+zz"),
@@ -2490,7 +2490,7 @@ fn test_diff_textconv() {
     );
     fs::write(p.join("ex.bar"), "kk\nll\n").unwrap(); // identical raw content
     assert_cli_success(&run_libra_command(&["add", "ex.bar"], p), "add ex.bar");
-    let exact = run_libra_command(&["diff", "-M", "--cached", "ex.foo", "ex.bar"], p);
+    let exact = run_libra_command(&["diff", "-M", "--cached", "--", "ex.foo", "ex.bar"], p);
     let exs = String::from_utf8_lossy(&exact.stdout);
     assert!(
         exs.contains("similarity index 100%") && exs.contains("-KK") && exs.contains("+kk"),
@@ -2712,7 +2712,7 @@ fn test_diff_binary_rename() {
     );
     fs::write(p.join("ex2.bin"), b"\xff\xfe\xfd\x00\xfc\n").unwrap(); // identical bytes
     assert_cli_success(&run_libra_command(&["add", "ex2.bin"], p), "add ex2");
-    let exact = run_libra_command(&["diff", "-M", "--cached", "ex.bin", "ex2.bin"], p);
+    let exact = run_libra_command(&["diff", "-M", "--cached", "--", "ex.bin", "ex2.bin"], p);
     let es = String::from_utf8_lossy(&exact.stdout);
     assert!(
         es.contains("similarity index 100%")
@@ -2723,7 +2723,9 @@ fn test_diff_binary_rename() {
     // It is still binary metadata: `--stat` shows a bare `Bin` (no sizes, since the
     // content is unchanged), `--numstat` shows `-`/`-`.
     let xstat = run_libra_command(
-        &["diff", "-M", "--cached", "--stat", "ex.bin", "ex2.bin"],
+        &[
+            "diff", "-M", "--cached", "--stat", "--", "ex.bin", "ex2.bin",
+        ],
         p,
     );
     assert!(
@@ -2732,7 +2734,15 @@ fn test_diff_binary_rename() {
         String::from_utf8_lossy(&xstat.stdout)
     );
     let xnum = run_libra_command(
-        &["diff", "-M", "--cached", "--numstat", "ex.bin", "ex2.bin"],
+        &[
+            "diff",
+            "-M",
+            "--cached",
+            "--numstat",
+            "--",
+            "ex.bin",
+            "ex2.bin",
+        ],
         p,
     );
     assert!(
@@ -3072,5 +3082,199 @@ fn test_diff_ignore_cr_at_eol_composes_with_ignore_blank_lines() {
         .trim()
         .is_empty(),
         "with --ignore-cr-at-eol both the CRLF blank and the space-only line count blank"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Positional revisions + `--` disambiguation (lore.md §1.4): Git's
+// `diff [<revision>...] [--] [<path>...]` grammar.
+// ---------------------------------------------------------------------------
+
+/// Two commits diverging on f.txt; returns (repo, c1, c2) with a dirty worktree
+/// change on top.
+fn positional_diff_repo() -> (tempfile::TempDir, String, String) {
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    let rev = |spec: &str| {
+        let out = run_libra_command(&["rev-parse", spec], p);
+        assert_cli_success(&out, "rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    fs::write(p.join("f.txt"), "one\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f1");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c1", "--no-verify"], p),
+        "commit c1",
+    );
+    let c1 = rev("HEAD");
+    fs::write(p.join("f.txt"), "two\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add f2");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "c2", "--no-verify"], p),
+        "commit c2",
+    );
+    let c2 = rev("HEAD");
+    fs::write(p.join("f.txt"), "three\n").unwrap(); // dirty worktree
+    (repo, c1, c2)
+}
+
+#[test]
+fn test_diff_positional_single_rev() {
+    let (repo, c1, _c2) = positional_diff_repo();
+    let p = repo.path();
+    let positional = run_libra_command(&["diff", &c1], p);
+    assert_cli_success(&positional, "diff <rev>");
+    let flagged = run_libra_command(&["diff", "--old", &c1], p);
+    assert_eq!(
+        String::from_utf8_lossy(&positional.stdout),
+        String::from_utf8_lossy(&flagged.stdout),
+        "diff <rev> equals diff --old <rev> (rev vs worktree)"
+    );
+    assert!(
+        String::from_utf8_lossy(&positional.stdout).contains("+three"),
+        "compares against the dirty worktree"
+    );
+}
+
+#[test]
+fn test_diff_positional_two_revs_equals_two_dot() {
+    let (repo, c1, c2) = positional_diff_repo();
+    let p = repo.path();
+    let spaced = run_libra_command(&["diff", &c1, &c2], p);
+    assert_cli_success(&spaced, "diff A B");
+    let glued = run_libra_command(&["diff", &format!("{c1}..{c2}")], p);
+    assert_eq!(
+        String::from_utf8_lossy(&spaced.stdout),
+        String::from_utf8_lossy(&glued.stdout),
+        "diff A B is byte-identical to diff A..B"
+    );
+    // Order defines old/new: B A is the inverse.
+    let reversed = run_libra_command(&["diff", &c2, &c1], p);
+    let rs = String::from_utf8_lossy(&reversed.stdout);
+    assert!(
+        rs.contains("+one") && rs.contains("-two"),
+        "diff B A inverts the sides: {rs}"
+    );
+    // A pathspec after the two revisions filters the diff.
+    let filtered = run_libra_command(&["diff", &c1, &c2, "f.txt"], p);
+    assert!(
+        String::from_utf8_lossy(&filtered.stdout).contains("-one"),
+        "trailing pathspec filters the two-rev diff"
+    );
+    let missed = run_libra_command(&["diff", &c1, &c2, "--", "nosuch.txt"], p);
+    assert!(
+        String::from_utf8_lossy(&missed.stdout).trim().is_empty(),
+        "post-'--' pathspec needs no existence check and filters to nothing"
+    );
+}
+
+#[test]
+fn test_diff_positional_staged_rev() {
+    let (repo, c1, c2) = positional_diff_repo();
+    let p = repo.path();
+    let positional = run_libra_command(&["diff", "--cached", &c1], p);
+    assert_cli_success(&positional, "diff --cached <rev>");
+    let flagged = run_libra_command(&["diff", "--old", &c1, "--staged"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&positional.stdout),
+        String::from_utf8_lossy(&flagged.stdout),
+        "diff --cached <rev> equals diff --old <rev> --staged"
+    );
+    // Two revisions (or a range) with --staged is an error.
+    let two = run_libra_command(&["diff", "--staged", &c1, &c2], p);
+    assert_eq!(
+        two.status.code(),
+        Some(129),
+        "--staged rejects two revs (LBR-CLI-002)"
+    );
+    let range = run_libra_command(&["diff", "--staged", &format!("{c1}..{c2}")], p);
+    assert_eq!(
+        range.status.code(),
+        Some(129),
+        "--staged rejects a range (LBR-CLI-002)"
+    );
+}
+
+#[test]
+fn test_diff_ambiguous_and_unknown_arguments() {
+    let (repo, _c1, _c2) = positional_diff_repo();
+    let p = repo.path();
+    // A name that is BOTH a branch and a file.
+    assert_cli_success(&run_libra_command(&["branch", "x"], p), "branch x");
+    fs::write(p.join("x"), "content\n").unwrap();
+    let amb = run_libra_command(&["diff", "x"], p);
+    // Libra CLI-category errors exit 129 (LBR-CLI-002), vs Git's 128 die() —
+    // consistent with the existing invalid-revision path; documented divergence.
+    assert_eq!(amb.status.code(), Some(129), "ambiguous argument errors");
+    assert!(
+        String::from_utf8_lossy(&amb.stderr).contains("ambiguous argument 'x'"),
+        "names the token: {}",
+        String::from_utf8_lossy(&amb.stderr)
+    );
+    // `--` forces the path reading; a rev before `--` forces the revision one.
+    let as_path = run_libra_command(&["diff", "--", "x"], p);
+    assert_cli_success(&as_path, "diff -- x path-filters");
+    let as_rev = run_libra_command(&["diff", "x", "--", "f.txt"], p);
+    assert_cli_success(&as_rev, "diff x -- f.txt uses x as a revision");
+    // Unknown token: neither revision nor path.
+    let unk = run_libra_command(&["diff", "no-such-thing"], p);
+    assert_eq!(unk.status.code(), Some(129));
+    assert!(
+        String::from_utf8_lossy(&unk.stderr)
+            .contains("unknown revision or path not in the working tree"),
+        "{}",
+        String::from_utf8_lossy(&unk.stderr)
+    );
+    // More than two revisions is a declined surface (no combined diff).
+    let many = run_libra_command(&["diff", "HEAD", "HEAD", "HEAD"], p);
+    assert_eq!(many.status.code(), Some(129), "three revisions rejected");
+    assert!(
+        String::from_utf8_lossy(&many.stderr).contains("more than two revisions"),
+        "{}",
+        String::from_utf8_lossy(&many.stderr)
+    );
+}
+
+#[test]
+fn test_diff_three_dot_positional_and_no_merge_base() {
+    // Fork: base -> (main: c-main) and (feature: c-feat).
+    let repo = create_committed_repo_via_cli();
+    let p = repo.path();
+    fs::write(p.join("f.txt"), "base\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add base");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "base", "--no-verify"], p),
+        "commit base",
+    );
+    let rev = |spec: &str| {
+        let out = run_libra_command(&["rev-parse", spec], p);
+        assert_cli_success(&out, "rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let base = rev("HEAD");
+    assert_cli_success(&run_libra_command(&["branch", "feature"], p), "branch");
+    assert_cli_success(&run_libra_command(&["checkout", "feature"], p), "co feat");
+    fs::write(p.join("f.txt"), "feature\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add feat");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "feat", "--no-verify"], p),
+        "commit feat",
+    );
+    assert_cli_success(&run_libra_command(&["checkout", "main"], p), "co main");
+    fs::write(p.join("f.txt"), "main\n").unwrap();
+    assert_cli_success(&run_libra_command(&["add", "f.txt"], p), "add main");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "main", "--no-verify"], p),
+        "commit main",
+    );
+
+    // A...B diffs merge-base(A,B) vs B.
+    let three = run_libra_command(&["diff", "main...feature"], p);
+    assert_cli_success(&three, "three-dot");
+    let explicit = run_libra_command(&["diff", "--old", &base, "--new", "feature"], p);
+    assert_eq!(
+        String::from_utf8_lossy(&three.stdout),
+        String::from_utf8_lossy(&explicit.stdout),
+        "A...B equals --old <merge-base> --new B"
     );
 }
