@@ -24,6 +24,7 @@ pub mod ai;
 pub mod branch;
 pub mod config;
 pub mod db;
+pub mod dirty;
 pub mod head;
 pub mod log;
 pub mod merge_base;

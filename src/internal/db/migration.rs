@@ -666,6 +666,17 @@ pub fn builtin_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026070201_metadata_kv.sql"),
             include_str!("../../../sql/migrations/2026070201_metadata_kv_down.sql"),
         ),
+        // 2026-07-02: dirty-set cache (lore.md 1.1) — advisory working-tree
+        // dirty snapshot + staged set, rebuilt by `status --scan`, consumed by
+        // the opt-in `status --cached`/`--check-dirty`/`libra dirty` surfaces
+        // only. Default `status` never touches it; freshness keys on the index
+        // fingerprint + HEAD OID. Owner API: `internal::dirty::DirtyCache`.
+        sql_migration(
+            2026070202,
+            "working_dirty",
+            include_str!("../../../sql/migrations/2026070202_working_dirty.sql"),
+            include_str!("../../../sql/migrations/2026070202_working_dirty_down.sql"),
+        ),
     ]
 }
 

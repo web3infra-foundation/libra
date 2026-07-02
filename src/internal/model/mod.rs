@@ -32,6 +32,8 @@ pub mod reference;
 pub mod reflog;
 pub mod schema_version;
 pub mod source_call_log;
+pub mod working_dirty;
+pub mod working_dirty_meta;
 
 #[cfg(test)]
 mod reference_test;

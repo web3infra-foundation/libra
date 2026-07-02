@@ -120,6 +120,25 @@ pub struct StatusArgs {
     )]
     pub untracked_files: UntrackedFiles,
 
+    /// Libra extension (lore.md 1.1): consume the dirty-set cache instead of
+    /// walking the working tree. Requires a fresh cache (`status --scan`);
+    /// a missing/stale cache degrades to the full reconcile with a hint.
+    /// NOTE: unrelated to Git's `--cached` (= the index) — this reads Libra's
+    /// `working_dirty` SQLite cache.
+    #[clap(long = "cached", conflicts_with_all = ["check_dirty", "scan", "porcelain", "short", "ignored"])]
+    pub cached: bool,
+
+    /// Libra extension (lore.md 1.1): re-verify ONLY the cached dirty set
+    /// (O(dirty paths)) — rows re-verified clean are pruned; nothing new is
+    /// discovered. Degrades to the full reconcile when the cache is stale.
+    #[clap(long = "check-dirty", conflicts_with_all = ["cached", "scan", "porcelain", "short", "ignored"])]
+    pub check_dirty: bool,
+
+    /// Libra extension (lore.md 1.1): run the normal full status AND rebuild
+    /// the dirty-set cache atomically from it (the only authoritative writer).
+    #[clap(long = "scan", conflicts_with_all = ["cached", "check_dirty", "porcelain", "short", "ignored"])]
+    pub scan: bool,
+
     /// Print status entries with columns aligned (human output only).
     #[clap(long = "column", overrides_with = "no_column")]
     pub column: bool,
@@ -649,6 +668,16 @@ pub async fn execute(args: StatusArgs) {
 pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    // Dirty-set cache modes (lore.md 1.1). NOTE: only this CLI entry routes
+    // them — the legacy `execute_to` writer entry ignores the flags (its
+    // callers never set them).
+    if args.scan {
+        return run_status_scan(&args, output).await;
+    }
+    if args.cached || args.check_dirty {
+        return run_status_cache_mode(&args, output).await;
+    }
+
     let data = collect_status_data(&args).await?;
 
     if output.is_json() {
@@ -664,6 +693,434 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
         return Err(CliError::silent_exit(1));
     }
 
+    Ok(())
+}
+
+// ─── Dirty-set cache modes (lore.md §1.1) ───────────────────────────────────
+
+/// The raw (repo-relative) staged + unstaged sets, computed by the same full
+/// safe reconcile the default status uses.
+async fn compute_raw_sets() -> CliResult<(Changes, Changes)> {
+    let staged = changes_to_be_committed_safe()
+        .await
+        .map_err(CliError::from)?;
+    let unstaged = changes_to_be_staged().map_err(CliError::from)?;
+    Ok((staged, unstaged))
+}
+
+fn dirty_cache_error(action: &str, error: anyhow::Error) -> CliError {
+    CliError::fatal(format!("failed to {action} the dirty cache: {error}"))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
+/// Snapshot rows from the raw sets ('/'-normalized repo-relative paths).
+fn snapshot_rows(
+    staged: &Changes,
+    unstaged: &Changes,
+) -> Result<Vec<(String, &'static str)>, CliError> {
+    use crate::internal::dirty;
+    let mut rows: Vec<(String, &'static str)> = Vec::new();
+    let mut push = |paths: &[PathBuf], kind: &'static str| -> Result<(), CliError> {
+        for path in paths {
+            // Strict: the reconcile already refuses undecodable paths, so this
+            // only fires defensively — the scan aborts rather than caching a
+            // lossy-mangled path that would later verify as a different file.
+            let stored = dirty::native_path_to_stored(path)
+                .map_err(|e| dirty_cache_error("encode a path for", e))?;
+            rows.push((stored, kind));
+        }
+        Ok(())
+    };
+    push(&unstaged.new, dirty::KIND_NEW)?;
+    push(&unstaged.modified, dirty::KIND_MODIFIED)?;
+    push(&unstaged.deleted, dirty::KIND_DELETED)?;
+    push(&staged.new, dirty::KIND_STAGED_NEW)?;
+    push(&staged.modified, dirty::KIND_STAGED_MODIFIED)?;
+    push(&staged.deleted, dirty::KIND_STAGED_DELETED)?;
+    Ok(rows)
+}
+
+/// `status --scan`: run the full safe reconcile and atomically replace the
+/// cache snapshot from it. TOCTOU-safe: the index fingerprint and HEAD are
+/// captured BEFORE the reconcile and re-verified AFTER — a concurrent index
+/// writer aborts the cache commit (the old snapshot stays intact) instead of
+/// stamping rows computed against an older index as fresh.
+async fn run_status_scan(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
+    use crate::internal::{
+        db::get_db_conn_instance,
+        dirty::{DirtyCache, ScanLockOutcome},
+    };
+
+    let index_path =
+        path::try_index().map_err(|source| CliError::from(StatusError::Workdir { source }))?;
+    let db = get_db_conn_instance().await;
+    let pid = std::process::id() as i64;
+    match DirtyCache::try_acquire_scan_lock_with_conn(&db, pid)
+        .await
+        .map_err(|e| dirty_cache_error("lock", e))?
+    {
+        ScanLockOutcome::Acquired { stole } => {
+            if stole {
+                crate::utils::error::emit_warning(
+                    "stole a stale dirty-cache scan lock (previous scanner crashed?)",
+                );
+            }
+        }
+        ScanLockOutcome::Held { pid, since } => {
+            return Err(CliError::failure(format!(
+                "another `status --scan` holds the dirty-cache lock (pid {pid}, since {since})"
+            ))
+            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+            .with_hint("wait for it to finish, or re-run later (stale locks are stolen)"));
+        }
+    }
+    // Everything below must release the lock — including error paths.
+    let result = run_status_scan_locked(args, output, &index_path).await;
+    let _ = DirtyCache::release_scan_lock_with_conn(&db, pid).await;
+    result?;
+    // Re-open a plain connection for the final read in JSON mode is not
+    // needed; run_status_scan_locked rendered already.
+    Ok(())
+}
+
+async fn run_status_scan_locked(
+    args: &StatusArgs,
+    output: &OutputConfig,
+    index_path: &std::path::Path,
+) -> CliResult<()> {
+    use sea_orm::TransactionTrait;
+
+    use crate::internal::{
+        db::get_db_conn_instance,
+        dirty::{DirtyCache, current_index_fingerprint},
+    };
+
+    let fingerprint_before =
+        current_index_fingerprint(index_path).map_err(|e| dirty_cache_error("fingerprint", e))?;
+    let head_before = Head::current_commit().await.map(|oid| oid.to_string());
+
+    // The same full safe reconcile as the default status, raw + display.
+    let (staged_raw, unstaged_raw) = compute_raw_sets().await?;
+    let data = collect_status_data(args).await?;
+
+    let fingerprint_after =
+        current_index_fingerprint(index_path).map_err(|e| dirty_cache_error("fingerprint", e))?;
+    let head_after = Head::current_commit().await.map(|oid| oid.to_string());
+    if fingerprint_before != fingerprint_after || head_before != head_after {
+        return Err(CliError::failure(
+            "the index or HEAD changed while scanning; the dirty cache was left untouched",
+        )
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+        .with_hint("re-run 'libra status --scan' once the concurrent operation finishes"));
+    }
+
+    let rows = snapshot_rows(&staged_raw, &unstaged_raw)?;
+    let row_count = rows.len();
+    let db = get_db_conn_instance().await;
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| dirty_cache_error("open a transaction for", anyhow::anyhow!(e)))?;
+    DirtyCache::replace_all_with_conn(&txn, &rows, &fingerprint_before, head_before.as_deref())
+        .await
+        .map_err(|e| dirty_cache_error("write", e))?;
+    txn.commit()
+        .await
+        .map_err(|e| dirty_cache_error("commit", anyhow::anyhow!(e)))?;
+
+    if output.is_json() {
+        let mut json_data = build_status_json(&data, args);
+        json_data["mode"] = serde_json::json!("scan");
+        json_data["cached_paths"] = serde_json::json!(row_count);
+        emit_json_data("status", &json_data, output)?;
+    } else if !output.quiet {
+        let mut stdout = std::io::stdout();
+        render_status_to_writer(&data, args, output, &mut stdout).await?;
+        println!("dirty cache rebuilt ({row_count} paths)");
+    }
+    if args.exit_code && data.is_dirty() {
+        return Err(CliError::silent_exit(1));
+    }
+    Ok(())
+}
+
+/// Classify a manual (`kind='unknown'`) mark against the index, bounded and
+/// panic-free (deliberately no `Index::is_modified`, which panics on missing
+/// entries/files): returns the effective kind, or `None` when clean.
+fn classify_manual_mark(
+    index: &Index,
+    workdir: &std::path::Path,
+    stored: &str,
+) -> Option<&'static str> {
+    use crate::internal::dirty;
+    let native = dirty::stored_path_to_native(stored);
+    let Some(path_str) = native.to_str() else {
+        return Some(dirty::KIND_NEW); // undecodable: over-report
+    };
+    let tracked = index.tracked(path_str, 0);
+    let abs = workdir.join(&native);
+    let exists = abs.symlink_metadata().is_ok();
+    match (tracked, exists) {
+        (false, true) => Some(dirty::KIND_NEW),
+        (false, false) => None, // neither tracked nor present: not dirty
+        (true, false) => Some(dirty::KIND_DELETED),
+        (true, true) => {
+            // Content confirm (no stat shortcut: manual marks are few, and a
+            // wrong stat shortcut here would silently drop a real edit).
+            match calc_file_blob_hash(&abs) {
+                Ok(hash) if index.verify_hash(path_str, 0, &hash) => None,
+                Ok(_) => Some(dirty::KIND_MODIFIED),
+                Err(_) => Some(dirty::KIND_MODIFIED), // unreadable: over-report
+            }
+        }
+    }
+}
+
+/// `status --cached` and `status --check-dirty`: consume / re-verify the
+/// cache. Any freshness doubt degrades to the full reconcile (the cache may
+/// over-report or degrade, never silently under-report).
+async fn run_status_cache_mode(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
+    use sea_orm::TransactionTrait;
+
+    use crate::internal::{
+        db::get_db_conn_instance,
+        dirty::{self, CacheState, DirtyCache, current_index_fingerprint},
+    };
+
+    let index_path =
+        path::try_index().map_err(|source| CliError::from(StatusError::Workdir { source }))?;
+    let fingerprint =
+        current_index_fingerprint(&index_path).map_err(|e| dirty_cache_error("fingerprint", e))?;
+    let head_oid = Head::current_commit().await.map(|oid| oid.to_string());
+    let db = get_db_conn_instance().await;
+    let meta = DirtyCache::meta_with_conn(&db)
+        .await
+        .map_err(|e| dirty_cache_error("read", e))?;
+    let state = DirtyCache::classify(meta.as_ref(), &fingerprint, head_oid.as_deref());
+
+    if state != CacheState::Fresh {
+        // Degrade to the full reconcile — never trust a doubtful cache.
+        crate::utils::error::emit_warning(format!(
+            "dirty cache is {}; falling back to the full status (run 'libra status --scan' to rebuild)",
+            state.as_str()
+        ));
+        let data = collect_status_data(args).await?;
+        if output.is_json() {
+            let mut json_data = build_status_json(&data, args);
+            json_data["mode"] =
+                serde_json::json!(if args.cached { "cached" } else { "check_dirty" });
+            json_data["freshness"] = serde_json::json!("full");
+            json_data["cache_state"] = serde_json::json!(state.as_str());
+            emit_json_data("status", &json_data, output)?;
+        } else if !output.quiet {
+            let mut stdout = std::io::stdout();
+            render_status_to_writer(&data, args, output, &mut stdout).await?;
+        }
+        if args.exit_code && data.is_dirty() {
+            return Err(CliError::silent_exit(1));
+        }
+        return Ok(());
+    }
+
+    let rows = DirtyCache::list_with_conn(&db)
+        .await
+        .map_err(|e| dirty_cache_error("read", e))?;
+    let workdir = util::try_working_dir()
+        .map_err(|source| CliError::from(StatusError::Workdir { source }))?;
+    let index = load_status_index()?;
+
+    // Build the raw sets from the cache (staged snapshot + unstaged rows +
+    // classified manual marks), optionally re-verifying (--check-dirty).
+    let mut staged = Changes::default();
+    let mut unstaged = Changes::default();
+    let mut pruned: Vec<(String, String)> = Vec::new();
+    let mut confirmed: Vec<(String, String)> = Vec::new();
+    for row in &rows {
+        let native = dirty::stored_path_to_native(&row.path);
+        let verify = args.check_dirty;
+        match row.kind.as_str() {
+            dirty::KIND_STAGED_NEW => staged.new.push(native),
+            dirty::KIND_STAGED_MODIFIED => staged.modified.push(native),
+            dirty::KIND_STAGED_DELETED => staged.deleted.push(native),
+            dirty::KIND_NEW => {
+                // An undecodable stored path cannot be re-verified — keep it
+                // (the cache must never under-report a recorded fact).
+                let Some(path_str) = native.to_str() else {
+                    unstaged.new.push(native);
+                    continue;
+                };
+                let still = !verify
+                    || (workdir.join(&native).symlink_metadata().is_ok()
+                        && !index.tracked(path_str, 0));
+                if still {
+                    unstaged.new.push(native);
+                    if verify {
+                        confirmed.push((row.path.clone(), row.kind.clone()));
+                    }
+                } else {
+                    pruned.push((row.path.clone(), row.kind.clone()));
+                }
+            }
+            dirty::KIND_MODIFIED => {
+                let Some(path_str) = native.to_str() else {
+                    unstaged.modified.push(native);
+                    continue;
+                };
+                let abs = workdir.join(&native);
+                let still = !verify || {
+                    index.tracked(path_str, 0)
+                        && abs.symlink_metadata().is_ok()
+                        && match calc_file_blob_hash(&abs) {
+                            Ok(hash) => !index.verify_hash(path_str, 0, &hash),
+                            Err(_) => true, // unreadable: keep (over-report)
+                        }
+                };
+                if still {
+                    unstaged.modified.push(native);
+                    if verify {
+                        confirmed.push((row.path.clone(), row.kind.clone()));
+                    }
+                } else {
+                    pruned.push((row.path.clone(), row.kind.clone()));
+                }
+            }
+            dirty::KIND_DELETED => {
+                let Some(path_str) = native.to_str() else {
+                    unstaged.deleted.push(native);
+                    continue;
+                };
+                let still = !verify
+                    || (index.tracked(path_str, 0)
+                        && workdir.join(&native).symlink_metadata().is_err());
+                if still {
+                    unstaged.deleted.push(native);
+                    if verify {
+                        confirmed.push((row.path.clone(), row.kind.clone()));
+                    }
+                } else {
+                    pruned.push((row.path.clone(), row.kind.clone()));
+                }
+            }
+            _ => {
+                // Manual 'unknown' marks: classified in memory, always content
+                // confirmed (both modes — cheap, marks are few).
+                match classify_manual_mark(&index, &workdir, &row.path) {
+                    Some(dirty::KIND_NEW) => unstaged.new.push(native),
+                    Some(dirty::KIND_DELETED) => unstaged.deleted.push(native),
+                    Some(_) => unstaged.modified.push(native),
+                    None => {
+                        if verify {
+                            pruned.push((row.path.clone(), row.kind.clone()));
+                        }
+                        // --cached: clean manual marks are dropped from the
+                        // VIEW but kept in the cache (read-only fast path).
+                    }
+                }
+            }
+        }
+    }
+    let checked = rows.len();
+    // Re-verify the epoch AFTER processing: a concurrent index/HEAD change
+    // since the initial classify would make this view (and any prune) stale —
+    // degrade instead of committing or rendering it as fresh.
+    let fingerprint_now =
+        current_index_fingerprint(&index_path).map_err(|e| dirty_cache_error("fingerprint", e))?;
+    let head_now = Head::current_commit().await.map(|oid| oid.to_string());
+    if fingerprint_now != fingerprint || head_now != head_oid {
+        crate::utils::error::emit_warning(
+            "the index or HEAD changed while reading the dirty cache; falling back to the full status",
+        );
+        let data = collect_status_data(args).await?;
+        if output.is_json() {
+            let mut json_data = build_status_json(&data, args);
+            json_data["mode"] =
+                serde_json::json!(if args.cached { "cached" } else { "check_dirty" });
+            json_data["freshness"] = serde_json::json!("full");
+            json_data["cache_state"] = serde_json::json!("stale");
+            emit_json_data("status", &json_data, output)?;
+        } else if !output.quiet {
+            let mut stdout = std::io::stdout();
+            render_status_to_writer(&data, args, output, &mut stdout).await?;
+        }
+        if args.exit_code && data.is_dirty() {
+            return Err(CliError::silent_exit(1));
+        }
+        return Ok(());
+    }
+    if args.check_dirty && (!pruned.is_empty() || !confirmed.is_empty()) {
+        let txn = db
+            .begin()
+            .await
+            .map_err(|e| dirty_cache_error("open a transaction for", anyhow::anyhow!(e)))?;
+        DirtyCache::prune_and_confirm_with_conn(&txn, &pruned, &confirmed)
+            .await
+            .map_err(|e| dirty_cache_error("update", e))?;
+        txn.commit()
+            .await
+            .map_err(|e| dirty_cache_error("commit", anyhow::anyhow!(e)))?;
+    }
+
+    // Assemble display data: cheap fresh pieces (head/upstream/merge state),
+    // cache-derived changes (cwd-relative for display), NO rename detection
+    // (would need object loads; documented) and no worktree walk.
+    let head = Head::current().await;
+    let head_oid_hash = Head::current_commit().await;
+    let staged = staged.to_relative();
+    let unstaged = unstaged.to_relative();
+    let upstream = resolve_upstream_info(&head, head_oid_hash.as_ref()).await?;
+    let merge_state = match merge::MergeState::load_optional_sync().map_err(|detail| {
+        CliError::fatal(format!("failed to inspect merge state: {detail}"))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })? {
+        Some(state) => Some(MergeStatusInfo {
+            target_ref: state.target_ref.clone(),
+            conflicted_paths: state.conflicted_paths.clone(),
+        }),
+        None => None,
+    };
+    let data = StatusData {
+        head,
+        has_commits: head_oid_hash.is_some(),
+        head_oid: head_oid_hash,
+        staged,
+        unstaged,
+        ignored_files: vec![],
+        stash_count: None,
+        upstream,
+        merge_state,
+        porcelain_v2: None,
+    };
+
+    if output.is_json() {
+        let mut json_data = build_status_json(&data, args);
+        json_data["mode"] = serde_json::json!(if args.cached { "cached" } else { "check_dirty" });
+        json_data["freshness"] = serde_json::json!("cached");
+        json_data["cache_state"] = serde_json::json!("fresh");
+        json_data["cached_paths"] = serde_json::json!(checked);
+        if args.check_dirty {
+            json_data["checked_paths"] = serde_json::json!(checked);
+            json_data["stale_paths"] = serde_json::json!(
+                pruned
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        emit_json_data("status", &json_data, output)?;
+    } else if !output.quiet {
+        let mut stdout = std::io::stdout();
+        render_status_to_writer(&data, args, output, &mut stdout).await?;
+        if args.check_dirty {
+            println!(
+                "dirty cache re-verified ({} checked, {} pruned)",
+                checked,
+                pruned.len()
+            );
+        }
+    }
+    if args.exit_code && data.is_dirty() {
+        return Err(CliError::silent_exit(1));
+    }
     Ok(())
 }
 

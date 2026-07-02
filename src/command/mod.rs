@@ -37,6 +37,7 @@ pub mod credential;
 pub mod describe;
 pub mod diff;
 pub mod diff_plumbing;
+pub mod dirty;
 pub mod editor;
 pub mod fast_export;
 pub mod fast_import;

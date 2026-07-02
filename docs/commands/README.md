@@ -39,6 +39,7 @@ Every Libra command accepts the following global flags:
 | `libra clean` | | Remove untracked files from the working tree (requires `-n` or `-f`) | [clean.md](clean.md) |
 | `libra stash` | | Save and restore temporary changes with push/pop/list/apply/drop subcommands | [stash.md](stash.md) |
 | `libra status` | `st` | Show the state of the working tree, staging area, and upstream tracking | [status.md](status.md) |
+| `libra dirty` | | Advisory dirty-set marks for the status cache (Libra extension) | [dirty.md](dirty.md) |
 
 ### Commits & History
 

@@ -306,6 +306,7 @@ mod describe_long_test;
 mod describe_test;
 mod diff_plumbing_test;
 mod diff_test;
+mod dirty_test;
 mod fast_export_test;
 mod fast_import_test;
 mod fetch_test;

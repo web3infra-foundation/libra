@@ -130,6 +130,20 @@ Show the number of stash entries. Only effective in standard (long) output mode.
 libra status --show-stash
 ```
 
+### `--scan` / `--cached` / `--check-dirty` (Libra extensions, lore.md 1.1)
+
+`--scan` runs the normal full status AND atomically rebuilds the dirty-set
+cache from it (TOCTOU-guarded on the index fingerprint + HEAD; a scan lock
+blocks concurrent scanners, stale locks are stolen). `--cached` consumes the
+cache instead of walking the worktree — O(dirty paths); any freshness doubt
+degrades to the full status with a hint. Snapshot semantics: worktree-only
+edits made after the scan are invisible until a rescan or a `libra dirty`
+mark (that is what the marks are for). NOTE: unrelated to Git's `--cached`
+(= the index). `--check-dirty` re-verifies only the cached set, pruning rows
+proven clean. The three are mutually exclusive and conflict with
+`--porcelain`/`--short`/`--ignored`; default `status` never touches the
+cache and its JSON gains no keys. See [dirty.md](dirty.md).
+
 ### `--ignored`
 
 Include ignored files in the output.
